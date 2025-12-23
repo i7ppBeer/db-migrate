@@ -1,0 +1,26 @@
+node_modules/
+.env
+.env.local
+*.log
+.DS_Store
+coverage/
+.idea/
+.vscode/
+dist/
+build/
+*.swp
+*.swo
+*~
+
+# Migration specific
+migrations/*.js
+!migrations/.gitkeep
+!migrations/sample-migration.js
+
+# Kubernetes secrets
+k8s/secrets/*.yaml
+!k8s/secrets/.gitkeep
+
+# Test artifacts
+test-results/
+.nyc_output/

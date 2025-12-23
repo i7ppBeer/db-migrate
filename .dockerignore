@@ -1,0 +1,12 @@
+# Ignore credentials
+k8s/mongodb-credentials.yaml
+
+# Ignore build artifacts
+*.log
+node_modules/
+dist/
+build/
+
+# Ignore local test data
+/data/
+*.db

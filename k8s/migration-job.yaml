@@ -1,0 +1,90 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongodb-migration
+  namespace: mongodb-migrations
+  labels:
+    app: mongodb-migration
+    version: "1.0.0"
+  annotations:
+    description: "MongoDB DDL Migration Job with embedded testing"
+spec:
+  # Keep job pods for debugging (1 hour)
+  ttlSecondsAfterFinished: 3600
+  # Retry up to 2 times on failure
+  backoffLimit: 2
+  # Only one pod at a time
+  parallelism: 1
+  completions: 1
+  
+  template:
+    metadata:
+      labels:
+        app: mongodb-migration
+        job-name: mongodb-migration
+    spec:
+      restartPolicy: OnFailure
+      
+      # Security context
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      
+      # Main container: Single container with embedded MongoDB testing
+      containers:
+      - name: migration-runner
+        # Use custom image with embedded MongoDB 6.0, 7.0, 8.0
+        image: ghcr.io/i7ppbeer/mongodb-migrate:latest
+        imagePullPolicy: Always
+        
+        # Resource limits
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        
+        # Command to run the migration runner script
+        command:
+        - /bin/bash
+        - -c
+        - |
+          echo "Starting MongoDB Migration Runner..."
+          /usr/local/bin/migration-runner
+        
+        # Environment variables from ConfigMap and Secret
+        envFrom:
+        - configMapRef:
+            name: migration-config
+        - secretRef:
+            name: mongodb-credentials
+        
+        # Additional environment variables
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: TEST_VERSIONS
+          value: "6.0 7.0 8.0"
+        - name: SKIP_TESTS
+          value: "false"
+        - name: DRY_RUN
+          value: "false"
+        
+        # Volume mounts for temporary data
+        volumeMounts:
+        - name: mongodb-data
+          mountPath: /data/db
+        - name: mongodb-logs
+          mountPath: /var/log/mongodb
+      
+      # Volumes
+      volumes:
+      - name: mongodb-data
+        emptyDir:
+          sizeLimit: 2Gi
+      - name: mongodb-logs
+        emptyDir:
+          sizeLimit: 500Mi

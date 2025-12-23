@@ -1,0 +1,195 @@
+name: MongoDB Migration CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  validate:
+    name: Validate Migrations
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run validation
+      run: npm run validate
+    
+    - name: Check for forbidden operations
+      run: |
+        if grep -r "dropDatabase\|createUser\|dropUser" migrations/*.js; then
+          echo "❌ Forbidden operations detected!"
+          exit 1
+        fi
+        echo "✅ No forbidden operations found"
+
+  test:
+    name: Test Migrations
+    runs-on: ubuntu-latest
+    needs: validate
+    
+    strategy:
+      matrix:
+        mongodb-version: ['6.0', '7.0']
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Start MongoDB ${{ matrix.mongodb-version }}
+      run: |
+        docker run -d \
+          --name mongodb \
+          -p 27017:27017 \
+          -e MONGO_INITDB_ROOT_USERNAME=admin \
+          -e MONGO_INITDB_ROOT_PASSWORD=admin123 \
+          mongo:${{ matrix.mongodb-version }}
+        
+        # Wait for MongoDB to be ready
+        timeout 30 bash -c 'until docker exec mongodb mongosh --eval "db.adminCommand({ping: 1})" --quiet; do sleep 1; done'
+    
+    - name: Run migrations
+      env:
+        MONGODB_URL: mongodb://admin:admin123@localhost:27017
+        MONGODB_DATABASE: test_migrations
+      run: |
+        npm run status
+        npm run up
+        npm run status
+    
+    - name: Test rollback
+      env:
+        MONGODB_URL: mongodb://admin:admin123@localhost:27017
+        MONGODB_DATABASE: test_migrations
+      run: |
+        npm run down
+        npm run up
+    
+    - name: Cleanup
+      if: always()
+      run: |
+        docker stop mongodb || true
+        docker rm mongodb || true
+
+  docker-test:
+    name: Docker Integration Test
+    runs-on: ubuntu-latest
+    needs: validate
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run Docker tests
+      run: |
+        chmod +x scripts/docker-test.sh
+        MIN_VERSION=6.0 MAX_VERSION=7.0 ./scripts/docker-test.sh
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [test, docker-test]
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+    
+    - name: Configure Kubernetes
+      env:
+        KUBE_CONFIG: ${{ secrets.KUBE_CONFIG_STAGING }}
+      run: |
+        mkdir -p $HOME/.kube
+        echo "$KUBE_CONFIG" > $HOME/.kube/config
+    
+    - name: Create MongoDB secret
+      env:
+        MONGODB_URL: ${{ secrets.MONGODB_URL_STAGING }}
+      run: |
+        kubectl create secret generic mongodb-credentials \
+          --from-literal=MONGODB_URL="$MONGODB_URL" \
+          --namespace=mongodb-migrations \
+          --dry-run=client -o yaml | kubectl apply -f -
+    
+    - name: Deploy migrations
+      run: |
+        chmod +x scripts/k8s-deploy.sh
+        NAMESPACE=mongodb-migrations ./scripts/k8s-deploy.sh
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [test, docker-test]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+    
+    - name: Configure Kubernetes
+      env:
+        KUBE_CONFIG: ${{ secrets.KUBE_CONFIG_PRODUCTION }}
+      run: |
+        mkdir -p $HOME/.kube
+        echo "$KUBE_CONFIG" > $HOME/.kube/config
+    
+    - name: Create MongoDB secret
+      env:
+        MONGODB_URL: ${{ secrets.MONGODB_URL_PRODUCTION }}
+      run: |
+        kubectl create secret generic mongodb-credentials \
+          --from-literal=MONGODB_URL="$MONGODB_URL" \
+          --namespace=mongodb-migrations \
+          --dry-run=client -o yaml | kubectl apply -f -
+    
+    - name: Deploy migrations
+      run: |
+        chmod +x scripts/k8s-deploy.sh
+        NAMESPACE=mongodb-migrations TIMEOUT=900 ./scripts/k8s-deploy.sh
+    
+    - name: Verify deployment
+      run: |
+        kubectl get jobs -n mongodb-migrations
+        kubectl logs -n mongodb-migrations -l app=mongodb-migration --tail=50
+    
+    - name: Create deployment tag
+      if: success()
+      run: |
+        git tag "deployment-$(date +%Y%m%d-%H%M%S)"
+        git push origin --tags

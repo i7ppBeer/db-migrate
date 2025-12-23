@@ -1,0 +1,43 @@
+{
+  "name": "mongodb-migrate-ddl",
+  "version": "1.0.0",
+  "description": "MongoDB DDL migration management with validation and automated testing",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "init": "node src/cli.js init",
+    "create": "node src/cli.js create",
+    "validate": "node src/cli.js validate",
+    "test:local": "node src/cli.js test-local",
+    "up": "node src/cli.js up",
+    "down": "node src/cli.js down",
+    "status": "node src/cli.js status",
+    "test": "vitest",
+    "test:integration": "vitest run test/integration.test.js",
+    "lint": "eslint .",
+    "docker:test": "bash scripts/docker-test.sh",
+    "k8s:deploy": "bash scripts/k8s-deploy.sh"
+  },
+  "keywords": [
+    "mongodb",
+    "migration",
+    "ddl",
+    "database",
+    "kubernetes"
+  ],
+  "author": "i7ppBeer",
+  "license": "MIT",
+  "dependencies": {
+    "migrate-mongo": "^14.0.7",
+    "mongodb": "^6.10.0",
+    "commander": "^14.0.0",
+    "chalk": "^5.3.0"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8",
+    "eslint": "^9.15.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
