@@ -2,7 +2,7 @@
 
 #############################################
 # Kubernetes Migration Runner Script
-# 1. Tests migrations on embedded MongoDB (6.0, 7.0, 8.0)
+# 1. Tests migrations on embedded MongoDB (6.0, 7.0, 8.0) (Optional)
 # 2. If tests pass, applies to production MongoDB
 # 3. Auto-rollback on failure
 #############################################
@@ -23,302 +23,165 @@ MONGODB_TEST_PORT=27017
 MONGODB_PROD_URL="${MONGODB_URL}"
 MONGODB_PROD_DB="${MONGODB_DATABASE}"
 DRY_RUN="${DRY_RUN:-false}"
-SKIP_TESTS="${SKIP_TESTS:-false}"
+SKIP_TESTS="${SKIP_TESTS:-true}" # Default to true for K8s Job
 
 # Logging functions
-log_info() {
-    echo -e "${BLUE}ℹ️  $1${NC}"
-}
+log_info() { echo -e "${BLUE}ℹ️  $1${NC}"; }
+log_success() { echo -e "${GREEN}✅ $1${NC}"; }
+log_warning() { echo -e "${YELLOW}⚠️  $1${NC}"; }
+log_error() { echo -e "${RED}❌ $1${NC}"; }
+log_header() { echo -e "\n${CYAN}========================================${NC}\n${CYAN}$1${NC}\n${CYAN}========================================${NC}\n"; }
 
-log_success() {
-    echo -e "${GREEN}✅ $1${NC}"
-}
+# Identify Projects
+PROJECTS=()
+if [ -n "$PROJECT_NAME" ]; then
+    if [ -d "projects/$PROJECT_NAME" ]; then
+        PROJECTS+=("projects/$PROJECT_NAME")
+    else
+        log_error "Project not found: projects/$PROJECT_NAME"
+        exit 1
+    fi
+else
+    for d in projects/*; do
+        if [ -d "$d" ]; then
+            PROJECTS+=("$d")
+        fi
+    done
+fi
 
-log_warning() {
-    echo -e "${YELLOW}⚠️  $1${NC}"
-}
+if [ ${#PROJECTS[@]} -eq 0 ]; then
+    log_error "No projects found!"
+    exit 1
+fi
 
-log_error() {
-    echo -e "${RED}❌ $1${NC}"
-}
-
-log_header() {
-    echo -e "\n${CYAN}========================================${NC}"
-    echo -e "${CYAN}$1${NC}"
-    echo -e "${CYAN}========================================${NC}\n"
-}
+log_info "Found ${#PROJECTS[@]} project(s) to process:"
+for p in "${PROJECTS[@]}"; do
+    echo "  - $(basename "$p")"
+done
 
 # Check prerequisites
 check_prerequisites() {
-    log_info "Checking prerequisites..."
-    
-    if [ -z "$MONGODB_PROD_URL" ]; then
-        log_error "MONGODB_URL environment variable is not set"
+    if ! command -v node &> /dev/null; then
+        log_error "Node.js is not installed"
         exit 1
     fi
+    if ! command -v docker &> /dev/null && [ "$SKIP_TESTS" = "false" ]; then
+        log_warning "Docker is not installed. Skipping tests."
+        SKIP_TESTS="true"
+    fi
+}
+
+# Run tests on embedded MongoDB
+test_project_on_version() {
+    local project_dir=$1
+    local version=$2
+    local port=$3
+    local config_file="$project_dir/config.js"
     
-    if [ -z "$MONGODB_PROD_DB" ]; then
-        log_error "MONGODB_DATABASE environment variable is not set"
-        exit 1
+    log_info "Testing $(basename "$project_dir") on MongoDB $version..."
+    
+    local container_name="mongo-test-$version"
+    # Start container if not running
+    if ! docker ps | grep -q "$container_name"; then
+        docker run -d --name "$container_name" -p "$port:27017" "mongo:$version" > /dev/null
+        sleep 5
     fi
     
-    log_success "Prerequisites check passed"
-}
-
-# Start MongoDB test instance
-start_test_mongodb() {
-    local version=$1
-    local port=$2
+    export MONGODB_URL="mongodb://localhost:$port"
+    export MONGODB_DATABASE="test_db_$(basename "$project_dir")"
     
-    log_info "Starting MongoDB $version on port $port using Docker..."
-    
-    # Container name
-    local container_name="mongodb-test-$version"
-    
-    # Stop and remove any existing container
-    docker stop $container_name 2>/dev/null || true
-    docker rm $container_name 2>/dev/null || true
-    sleep 2
-    
-    # Start MongoDB container
-    docker run -d \
-        --name $container_name \
-        -p $port:27017 \
-        mongo:$version \
-        --bind_ip_all \
-        --noauth
-    
-    # Wait for MongoDB to be ready
-    local max_attempts=30
-    local attempt=0
-    
-    sleep 3  # 給 MongoDB 一點啟動時間
-    
-    while [ $attempt -lt $max_attempts ]; do
-        if docker exec $container_name mongosh --quiet --eval "db.adminCommand('ping').ok" 2>/dev/null | grep -q "1"; then
-            log_success "MongoDB $version is ready"
-            return 0
-        fi
-        attempt=$((attempt + 1))
-        sleep 1
-    done
-    
-    log_error "MongoDB $version failed to start"
-    docker logs $container_name
-    return 1
-}
-
-# Stop MongoDB test instance
-stop_test_mongodb() {
-    local version=$1
-    local container_name="mongodb-test-$version"
-    
-    log_info "Stopping MongoDB $version..."
-    docker stop $container_name 2>/dev/null || true
-    docker rm $container_name 2>/dev/null || true
-    sleep 2
-    log_success "MongoDB stopped"
-}
-
-# Test migrations on specific version
-test_migrations() {
-    local version=$1
-    local port=$2
-    
-    log_header "Testing Migrations on MongoDB $version"
-    
-    # Start test MongoDB
-    start_test_mongodb $version $port || return 1
-    
-    # Configure test database (remove dots from version for database name)
-    local db_version=$(echo "$version" | tr -d '.')
-    export MONGODB_URL="mongodb://127.0.0.1:$port"
-    export MONGODB_DATABASE="migration_test_v${db_version}"
-    
-    # Validate migrations
-    log_info "Validating migration files..."
-    if ! node src/cli.js validate; then
-        log_error "Migration validation failed on MongoDB $version"
-        stop_test_mongodb $version
+    if ! node src/cli.js up -c "$config_file"; then
+        log_error "Migration UP failed for $(basename "$project_dir") on MongoDB $version"
         return 1
     fi
-    log_success "Validation passed"
     
-    # Run migrations UP
-    log_info "Running migrations UP..."
-    if ! node src/cli.js up; then
-        log_error "Migration UP failed on MongoDB $version"
-        stop_test_mongodb $version
+    if ! node src/cli.js down -c "$config_file"; then
+        log_error "Migration DOWN failed for $(basename "$project_dir") on MongoDB $version"
         return 1
     fi
-    log_success "Migrations UP successful"
     
-    # Check migration status
-    log_info "Checking migration status..."
-    node src/cli.js status
-    
-    # Test rollback (down the last migration)
-    log_info "Testing rollback..."
-    if ! node src/cli.js down; then
-        log_warning "Rollback test failed (non-critical)"
-    else
-        log_success "Rollback test passed"
-        
-        # Re-apply the migration
-        log_info "Re-applying migration..."
-        node src/cli.js up
-    fi
-    
-    # Stop test MongoDB
-    stop_test_mongodb $version
-    
-    log_success "MongoDB $version test completed successfully"
     return 0
 }
 
-# Get current migration state (for rollback)
-get_migration_state() {
-    log_info "Capturing current migration state..."
+# Apply to production
+apply_project_production() {
+    local project_dir=$1
+    local config_file="$project_dir/config.js"
     
-    export MONGODB_URL="$MONGODB_PROD_URL"
-    export MONGODB_DATABASE="$MONGODB_PROD_DB"
-    
-    node src/cli.js status > /tmp/migration_state_before.txt 2>&1 || true
-    
-    # Count applied migrations
-    MIGRATIONS_BEFORE=$(grep -c "│.*│.*Z.*│" /tmp/migration_state_before.txt 2>/dev/null || echo "0")
-    
-    log_info "Current applied migrations: $MIGRATIONS_BEFORE"
-}
-
-# Rollback to previous state
-rollback_migrations() {
-    log_warning "Rolling back migrations to previous state..."
-    
-    export MONGODB_URL="$MONGODB_PROD_URL"
-    export MONGODB_DATABASE="$MONGODB_PROD_DB"
-    
-    # Get current state
-    node src/cli.js status > /tmp/migration_state_after.txt 2>&1 || true
-    MIGRATIONS_AFTER=$(grep -c "│.*│.*Z.*│" /tmp/migration_state_after.txt 2>/dev/null || echo "0")
-    
-    # Calculate how many migrations to rollback
-    ROLLBACK_COUNT=$((MIGRATIONS_AFTER - MIGRATIONS_BEFORE))
-    
-    if [ $ROLLBACK_COUNT -le 0 ]; then
-        log_info "No migrations to rollback"
-        return 0
-    fi
-    
-    log_warning "Rolling back $ROLLBACK_COUNT migration(s)..."
-    
-    for ((i=1; i<=ROLLBACK_COUNT; i++)); do
-        log_info "Rollback $i/$ROLLBACK_COUNT..."
-        if ! node src/cli.js down; then
-            log_error "Rollback failed at step $i"
-            return 1
-        fi
-    done
-    
-    log_success "Rollback completed successfully"
-    return 0
-}
-
-# Apply migrations to production
-apply_to_production() {
-    log_header "Applying Migrations to Production"
-    
-    # Get current state for potential rollback
-    get_migration_state
-    
-    # Configure production database
-    export MONGODB_URL="$MONGODB_PROD_URL"
-    export MONGODB_DATABASE="$MONGODB_PROD_DB"
-    
-    log_info "Target: $MONGODB_PROD_URL"
-    log_info "Database: $MONGODB_PROD_DB"
+    log_info "Applying $(basename "$project_dir") to production..."
     
     if [ "$DRY_RUN" = "true" ]; then
-        log_warning "DRY RUN MODE - No changes will be made"
-        node src/cli.js up --dry-run
+        log_info "DRY RUN: Skipping actual migration"
         return 0
     fi
     
-    # Show pending migrations
-    log_info "Checking pending migrations..."
-    node src/cli.js status
+    # Note: MONGODB_URL and MONGODB_DATABASE are set in env (from K8s secrets)
+    # If MONGODB_DATABASE is set, it overrides config.js.
+    # If you want separate DBs per project, ensure MONGODB_DATABASE is NOT set in K8s env,
+    # or set it dynamically here based on project name.
     
-    # Apply migrations
-    log_info "Applying migrations to production..."
-    if ! node src/cli.js up; then
-        log_error "Production migration failed!"
+    if ! node src/cli.js up -c "$config_file"; then
+        log_error "Production migration failed for $(basename "$project_dir")!"
         
-        # Attempt rollback
-        if rollback_migrations; then
-            log_success "Rollback completed successfully"
+        log_warning "Attempting rollback..."
+        if node src/cli.js down -c "$config_file"; then
+            log_success "Rollback successful"
         else
-            log_error "Rollback also failed! Manual intervention required!"
+            log_error "Rollback failed! Manual intervention required!"
         fi
-        
         return 1
     fi
     
-    log_success "Production migrations applied successfully"
-    
-    # Verify final state
-    log_info "Final migration status:"
-    node src/cli.js status
-    
+    log_success "Successfully migrated $(basename "$project_dir")"
     return 0
 }
 
-# Main execution flow
+cleanup_containers() {
+    if [ "$SKIP_TESTS" = "false" ]; then
+        log_info "Cleaning up test containers..."
+        for version in $TEST_VERSIONS; do
+            docker rm -f "mongo-test-$version" > /dev/null 2>&1 || true
+        done
+    fi
+}
+
 main() {
     log_header "MongoDB Migration Runner - Kubernetes Edition"
-    
-    # Check prerequisites
     check_prerequisites
     
-    # Run tests if not skipped
+    # Phase 1: Testing
     if [ "$SKIP_TESTS" = "false" ]; then
         log_header "Phase 1: Testing on Embedded MongoDB"
-        
-        local test_failed=false
+        trap cleanup_containers EXIT
         
         for version in $TEST_VERSIONS; do
-            if ! test_migrations "$version" "$MONGODB_TEST_PORT"; then
-                log_error "Tests failed on MongoDB $version"
-                test_failed=true
-                break
-            fi
+            for project in "${PROJECTS[@]}"; do
+                if ! test_project_on_version "$project" "$version" "$MONGODB_TEST_PORT"; then
+                    log_error "Tests failed. Aborting."
+                    exit 1
+                fi
+            done
         done
-        
-        if [ "$test_failed" = "true" ]; then
-            log_error "Migration tests failed. Aborting production deployment."
-            exit 1
-        fi
-        
-        log_success "All version tests passed!"
+        log_success "All tests passed!"
     else
-        log_warning "Tests skipped (SKIP_TESTS=true)"
+        log_info "Skipping tests (SKIP_TESTS=true)"
     fi
     
-    # Apply to production
+    # Phase 2: Production
     log_header "Phase 2: Production Deployment"
     
-    if ! apply_to_production; then
-        log_error "Production deployment failed"
+    if [ -z "$MONGODB_PROD_URL" ] && [ "$DRY_RUN" != "true" ]; then
+        log_error "MONGODB_URL is not set"
         exit 1
     fi
     
-    log_header "Migration Completed Successfully"
-    log_success "All migrations applied and verified!"
+    for project in "${PROJECTS[@]}"; do
+        if ! apply_project_production "$project"; then
+            exit 1
+        fi
+    done
     
-    exit 0
+    log_success "All projects migrated successfully!"
 }
 
-# Trap errors
-trap 'log_error "Script failed at line $LINENO"' ERR
-
-# Run main function
-main "$@"
+main

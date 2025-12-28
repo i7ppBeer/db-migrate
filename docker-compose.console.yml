@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  migration-console:
+    build:
+      context: .
+      dockerfile: Dockerfile.console
+    image: mongodb-migrate-console:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      # Mount your projects directory here
+      - ../my-migration-projects/projects:/projects
+      # Mount Docker socket for running tests inside container
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - PROJECTS_DIR=/projects
+    restart: unless-stopped

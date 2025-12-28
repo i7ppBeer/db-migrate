@@ -88,15 +88,21 @@ async function loadConfig(configPath) {
     return customConfig;
   } catch (error) {
     console.error(chalk.red(`❌ Config file not found: ${configPath}`));
-    console.log(chalk.yellow('\nAvailable configs in config/:'));
+    console.log(chalk.yellow('\nAvailable project configs:'));
     try {
-      const configDir = path.resolve(process.cwd(), 'config');
-      const files = await fs.readdir(configDir);
-      files.filter(f => f.endsWith('.js')).forEach(f => {
-        console.log(chalk.gray(`  - config/${f}`));
-      });
+      const projectsDir = path.resolve(process.cwd(), 'projects');
+      const projects = await fs.readdir(projectsDir);
+      for (const project of projects) {
+        const projectConfig = path.join(projectsDir, project, 'config.js');
+        try {
+          await fs.access(projectConfig);
+          console.log(chalk.gray(`  - projects/${project}/config.js`));
+        } catch (e) {
+          // config.js doesn't exist in this project folder
+        }
+      }
     } catch (e) {
-      // config directory doesn't exist
+      // projects directory doesn't exist
     }
     process.exit(1);
   }

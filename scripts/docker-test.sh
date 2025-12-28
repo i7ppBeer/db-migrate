@@ -102,10 +102,19 @@ export MONGODB_URL="mongodb://admin:admin123@localhost:27017"
 export MONGODB_DATABASE="test_migrations"
 
 print_step "Running migrations on MongoDB ${MIN_VERSION}..."
-npm run up > /dev/null 2>&1 || print_error "Migration failed"
+for project in projects/*; do
+    if [ -d "$project" ]; then
+        print_step "  - Project: $(basename $project)"
+        node src/cli.js up -c "$project/config.js" > /dev/null 2>&1 || print_error "Migration failed for $(basename $project)"
+    fi
+done
 
 print_step "Checking migration status..."
-npm run status 2>&1 | grep -E "^│|Test Files|passed" || true
+for project in projects/*; do
+    if [ -d "$project" ]; then
+        node src/cli.js status -c "$project/config.js" 2>&1 | grep -E "^│|Test Files|passed" || true
+    fi
+done
 
 print_success "MongoDB ${MIN_VERSION} test completed"
 
@@ -153,10 +162,19 @@ export MONGODB_URL="mongodb://admin:admin123@localhost:27018"
 export MONGODB_DATABASE="test_migrations"
 
 print_step "Running migrations on MongoDB ${MAX_VERSION}..."
-npm run up > /dev/null 2>&1 || print_error "Migration failed"
+for project in projects/*; do
+    if [ -d "$project" ]; then
+        print_step "  - Project: $(basename $project)"
+        node src/cli.js up -c "$project/config.js" > /dev/null 2>&1 || print_error "Migration failed for $(basename $project)"
+    fi
+done
 
 print_step "Checking migration status..."
-npm run status 2>&1 | grep -E "^│|Test Files|passed" || true
+for project in projects/*; do
+    if [ -d "$project" ]; then
+        node src/cli.js status -c "$project/config.js" 2>&1 | grep -E "^│|Test Files|passed" || true
+    fi
+done
 
 print_success "MongoDB ${MAX_VERSION} test completed"
 
@@ -164,11 +182,21 @@ print_success "MongoDB ${MAX_VERSION} test completed"
 print_header "🔄 Test 3: Rollback Test on MongoDB ${MAX_VERSION}"
 
 print_step "Rolling back one migration..."
-npm run down > /dev/null 2>&1 || print_error "Rollback failed"
+for project in projects/*; do
+    if [ -d "$project" ]; then
+        print_step "  - Project: $(basename $project)"
+        node src/cli.js down -c "$project/config.js" > /dev/null 2>&1 || print_error "Rollback failed for $(basename $project)"
+    fi
+done
 print_success "Rollback successful"
 
 print_step "Re-applying migration..."
-npm run up > /dev/null 2>&1 || print_error "Re-migration failed"
+for project in projects/*; do
+    if [ -d "$project" ]; then
+        print_step "  - Project: $(basename $project)"
+        node src/cli.js up -c "$project/config.js" > /dev/null 2>&1 || print_error "Re-migration failed for $(basename $project)"
+    fi
+done
 print_success "Re-migration successful"
 
 # All tests passed
