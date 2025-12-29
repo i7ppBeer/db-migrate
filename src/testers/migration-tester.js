@@ -22,28 +22,28 @@ export class MigrationTester {
    * 3. Migrate back to max version
    */
   async runFullTest() {
-    console.log(chalk.blue('🧪 Starting migration test suite...\n'));
+    console.log(chalk.blue('[TEST] Starting migration test suite...\n'));
     
     try {
       // Test with minimum version
-      console.log(chalk.blue(`📦 Testing with MongoDB ${this.minVersion}...`));
+      console.log(chalk.blue(`[INIT] Testing with MongoDB ${this.minVersion}...`));
       await this.testVersion(this.minVersion, 'min');
       
       // Test with maximum version
-      console.log(chalk.blue(`\n📦 Testing with MongoDB ${this.maxVersion}...`));
+      console.log(chalk.blue(`\n[INIT] Testing with MongoDB ${this.maxVersion}...`));
       await this.testVersion(this.maxVersion, 'max');
       
       // Test upgrade path: min -> max
-      console.log(chalk.blue('\n🔄 Testing upgrade path (min -> max)...'));
+      console.log(chalk.blue('\n[UPDATE] Testing upgrade path (min -> max)...'));
       await this.testUpgradePath();
       
       // Test rollback: max -> min -> max
-      console.log(chalk.blue('\n⏮️  Testing rollback path...'));
+      console.log(chalk.blue('\n[ROLLBACK]  Testing rollback path...'));
       await this.testRollbackPath();
       
-      console.log(chalk.green('\n✅ All test scenarios passed!'));
+      console.log(chalk.green('\n[OK] All test scenarios passed!'));
     } catch (error) {
-      console.error(chalk.red('\n❌ Test failed:'), error.message);
+      console.error(chalk.red('\n[ERROR] Test failed:'), error.message);
       throw error;
     } finally {
       // Cleanup containers
@@ -74,9 +74,9 @@ export class MigrationTester {
       console.log(chalk.gray(`  Verifying migrations...`));
       await this.verifyMigrations(port);
       
-      console.log(chalk.green(`  ✅ MongoDB ${version} test passed`));
+      console.log(chalk.green(`  [OK] MongoDB ${version} test passed`));
     } catch (error) {
-      console.error(chalk.red(`  ❌ MongoDB ${version} test failed`));
+      console.error(chalk.red(`  [ERROR] MongoDB ${version} test failed`));
       throw error;
     }
   }
@@ -110,12 +110,12 @@ export class MigrationTester {
       console.log(chalk.gray(`  Verifying data integrity...`));
       await this.verifyMigrations(port);
       
-      console.log(chalk.green(`  ✅ Upgrade path test passed`));
+      console.log(chalk.green(`  [OK] Upgrade path test passed`));
       
       // Cleanup
       await this.stopContainer(`${containerName}-max`);
     } catch (error) {
-      console.error(chalk.red(`  ❌ Upgrade path test failed`));
+      console.error(chalk.red(`  [ERROR] Upgrade path test failed`));
       throw error;
     }
   }
@@ -149,12 +149,12 @@ export class MigrationTester {
       console.log(chalk.gray(`  Verifying final state...`));
       await this.verifyMigrations(port);
       
-      console.log(chalk.green(`  ✅ Rollback path test passed`));
+      console.log(chalk.green(`  [OK] Rollback path test passed`));
       
       // Cleanup
       await this.stopContainer(containerName);
     } catch (error) {
-      console.error(chalk.red(`  ❌ Rollback path test failed`));
+      console.error(chalk.red(`  [ERROR] Rollback path test failed`));
       throw error;
     }
   }

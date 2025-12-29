@@ -34,7 +34,7 @@ program
   .option('-m, --module <system>', 'Module system (esm or commonjs)', 'esm')
   .action(async (options) => {
     try {
-      console.log(chalk.blue('📦 Initializing migration project...'));
+      console.log(chalk.blue('[INIT] Initializing migration project...'));
       
       global.options = options;
       await migrateMongo.init();
@@ -45,13 +45,13 @@ program
       await fs.mkdir('k8s/secrets', { recursive: true });
       await fs.mkdir('.github/workflows', { recursive: true });
       
-      console.log(chalk.green('✅ Initialization successful!'));
+      console.log(chalk.green('[OK] Initialization successful!'));
       console.log(chalk.yellow('\nNext steps:'));
       console.log('1. Edit migrate-mongo-config.js with your MongoDB settings');
       console.log('2. Update src/config/validation-rules.js if needed');
       console.log('3. Create your first migration: npm run create <description>');
     } catch (error) {
-      console.error(chalk.red('❌ Error:'), error.message);
+      console.error(chalk.red('[ERROR] Error:'), error.message);
       process.exit(1);
     }
   });
@@ -68,11 +68,28 @@ async function loadConfig(configPath) {
     // Check if file exists
     await fs.access(absolutePath);
     
-    console.log(chalk.gray(`📁 Using config: ${configPath}`));
+    console.log(chalk.gray(`[CONFIG] Using config: ${configPath}`));
     
     // Dynamically import the config
     const configModule = await import(`file://${absolutePath}`);
     const customConfig = configModule.default;
+    
+    // Resolve migrationsDir relative to config file
+    if (customConfig.migrationsDir) {
+      const configDir = path.dirname(absolutePath);
+      // If it's not absolute, make it absolute relative to the config file
+      if (!path.isAbsolute(customConfig.migrationsDir)) {
+        customConfig.migrationsDir = path.resolve(configDir, customConfig.migrationsDir);
+      }
+    }
+
+    // Set config for migrate-mongo
+    if (migrateMongo.config.set) {
+      migrateMongo.config.set(customConfig);
+    } else {
+      // Fallback or warning if needed, but v14 should have it
+      console.warn(chalk.yellow('[WARN] migrate-mongo version might not support config.set'));
+    }
     
     // Override environment variables based on config
     if (customConfig.mongodb.url) {
@@ -87,7 +104,7 @@ async function loadConfig(configPath) {
     
     return customConfig;
   } catch (error) {
-    console.error(chalk.red(`❌ Config file not found: ${configPath}`));
+    console.error(chalk.red(`[ERROR] Config file not found: ${configPath}`));
     console.log(chalk.yellow('\nAvailable project configs:'));
     try {
       const projectsDir = path.resolve(process.cwd(), 'projects');
@@ -117,18 +134,18 @@ program
       const configPath = command.parent.opts().config;
       await loadConfig(configPath);
       
-      console.log(chalk.blue(`📝 Creating migration: ${description}...`));
+      console.log(chalk.blue(`[CREATE] Creating migration: ${description}...`));
       
       const fileName = await migrateMongo.create(description);
       const config = await migrateMongo.config.read();
       
-      console.log(chalk.green(`✅ Created: ${config.migrationsDir}/${fileName}`));
+      console.log(chalk.green(`[OK] Created: ${config.migrationsDir}/${fileName}`));
       console.log(chalk.yellow('\nRemember to:'));
       console.log('1. Implement the up() and down() functions');
       console.log('2. Run validation: npm run validate');
       console.log('3. Test locally: npm run test:local');
     } catch (error) {
-      console.error(chalk.red('❌ Error:'), error.message);
+      console.error(chalk.red('[ERROR] Error:'), error.message);
       process.exit(1);
     }
   });
@@ -138,14 +155,15 @@ program
   .command('validate')
   .description('Validate all migration files')
   .option('-f, --file <file>', 'Validate specific file')
+  .option('--allow-dangerous', 'Allow dangerous operations (treat errors as warnings)')
   .action(async (options, command) => {
     try {
       const configPath = command.parent.opts().config;
       await loadConfig(configPath);
       
-      console.log(chalk.blue('🔍 Validating migrations...\n'));
+      console.log(chalk.blue('[INFO] Validating migrations...\n'));
       
-      const validator = new MQLValidator();
+      const validator = new MQLValidator(null, { allowDangerous: options.allowDangerous });
       const config = await migrateMongo.config.read();
       
       let result;
@@ -159,22 +177,22 @@ program
       // Display results
       for (const fileResult of result.results) {
         if (fileResult.valid) {
-          console.log(chalk.green(`✅ ${fileResult.file}`));
+          console.log(chalk.green(`[OK] ${fileResult.file}`));
         } else {
-          console.log(chalk.red(`❌ ${fileResult.file}`));
+          console.log(chalk.red(`[ERROR] ${fileResult.file}`));
         }
         
         // Show errors
         if (fileResult.errors && fileResult.errors.length > 0) {
           for (const error of fileResult.errors) {
-            console.log(chalk.red(`   ❌ ${error.message}`));
+            console.log(chalk.red(`   [ERROR] ${error.message}`));
           }
         }
         
         // Show warnings
         if (fileResult.warnings && fileResult.warnings.length > 0) {
           for (const warning of fileResult.warnings) {
-            console.log(chalk.yellow(`   ⚠️  ${warning.message}`));
+            console.log(chalk.yellow(`   [WARN]  ${warning.message}`));
           }
         }
         
@@ -186,7 +204,7 @@ program
       const validFiles = result.results.filter(r => r.valid).length;
       const invalidFiles = totalFiles - validFiles;
       
-      console.log(chalk.bold('\n📊 Summary:'));
+      console.log(chalk.bold('\n[SUMMARY] Summary:'));
       console.log(`   Total files: ${totalFiles}`);
       console.log(chalk.green(`   Valid: ${validFiles}`));
       if (invalidFiles > 0) {
@@ -194,13 +212,13 @@ program
       }
       
       if (!result.valid) {
-        console.log(chalk.red('\n❌ Validation failed!'));
+        console.log(chalk.red('\n[ERROR] Validation failed!'));
         process.exit(1);
       } else {
-        console.log(chalk.green('\n✅ All validations passed!'));
+        console.log(chalk.green('\n[OK] All validations passed!'));
       }
     } catch (error) {
-      console.error(chalk.red('❌ Error:'), error.message);
+      console.error(chalk.red('[ERROR] Error:'), error.message);
       process.exit(1);
     }
   });
@@ -216,7 +234,7 @@ program
       const configPath = command.parent.opts().config;
       await loadConfig(configPath);
       
-      console.log(chalk.blue('🧪 Testing migrations locally...\n'));
+      console.log(chalk.blue('[TEST] Testing migrations locally...\n'));
       
       const tester = new MigrationTester({
         minVersion: options.minVersion,
@@ -225,9 +243,9 @@ program
       
       await tester.runFullTest();
       
-      console.log(chalk.green('\n✅ All tests passed!'));
+      console.log(chalk.green('\n[OK] All tests passed!'));
     } catch (error) {
-      console.error(chalk.red('\n❌ Test failed:'), error.message);
+      console.error(chalk.red('\n[ERROR] Test failed:'), error.message);
       process.exit(1);
     }
   });
@@ -243,40 +261,40 @@ program
       await loadConfig(configPath);
       
       if (options.dryRun) {
-        console.log(chalk.blue('🔍 Dry run - checking pending migrations...\n'));
+        console.log(chalk.blue('[INFO] Dry run - checking pending migrations...\n'));
         const { db, client } = await migrateMongo.database.connect();
         const status = await migrateMongo.status(db);
         const pending = status.filter(s => s.appliedAt === 'PENDING');
         
         if (pending.length === 0) {
-          console.log(chalk.green('✅ No pending migrations'));
+          console.log(chalk.green('[OK] No pending migrations'));
         } else {
-          console.log(chalk.yellow(`📋 ${pending.length} pending migration(s):`));
+          console.log(chalk.yellow(`[LIST] ${pending.length} pending migration(s):`));
           pending.forEach(m => console.log(`   - ${m.fileName}`));
         }
         
         await client.close();
       } else {
-        console.log(chalk.blue('⬆️  Running migrations...\n'));
+        console.log(chalk.blue('[UP]  Running migrations...\n'));
         
         const { db, client } = await migrateMongo.database.connect();
         const migrated = await migrateMongo.up(db, client);
         
         if (migrated.length === 0) {
-          console.log(chalk.green('✅ No migrations to apply'));
+          console.log(chalk.green('[OK] No migrations to apply'));
         } else {
           migrated.forEach(fileName => {
-            console.log(chalk.green(`✅ MIGRATED UP: ${fileName}`));
+            console.log(chalk.green(`[OK] MIGRATED UP: ${fileName}`));
           });
         }
         
         await client.close();
-        console.log(chalk.green('\n✅ Migration completed successfully!'));
+        console.log(chalk.green('\n[OK] Migration completed successfully!'));
       }
     } catch (error) {
-      console.error(chalk.red('❌ Migration failed:'), error.message);
+      console.error(chalk.red('[ERROR] Migration failed:'), error.message);
       if (error.migrated && error.migrated.length > 0) {
-        console.log(chalk.yellow('\n⚠️  Partially migrated:'));
+        console.log(chalk.yellow('\n[WARN]  Partially migrated:'));
         error.migrated.forEach(f => console.log(`   - ${f}`));
       }
       process.exit(1);
@@ -294,23 +312,23 @@ program
       await loadConfig(configPath);
       
       global.options = options;
-      console.log(chalk.blue('⬇️  Rolling back migration...\n'));
+      console.log(chalk.blue('[DOWN]  Rolling back migration...\n'));
       
       const { db, client } = await migrateMongo.database.connect();
       const migrated = await migrateMongo.down(db, client);
       
       if (migrated.length === 0) {
-        console.log(chalk.yellow('⚠️  No migrations to rollback'));
+        console.log(chalk.yellow('[WARN]  No migrations to rollback'));
       } else {
         migrated.forEach(fileName => {
-          console.log(chalk.green(`✅ MIGRATED DOWN: ${fileName}`));
+          console.log(chalk.green(`[OK] MIGRATED DOWN: ${fileName}`));
         });
       }
       
       await client.close();
-      console.log(chalk.green('\n✅ Rollback completed successfully!'));
+      console.log(chalk.green('\n[OK] Rollback completed successfully!'));
     } catch (error) {
-      console.error(chalk.red('❌ Rollback failed:'), error.message);
+      console.error(chalk.red('[ERROR] Rollback failed:'), error.message);
       process.exit(1);
     }
   });
@@ -324,28 +342,28 @@ program
       const configPath = command.parent.opts().config;
       await loadConfig(configPath);
       
-      console.log(chalk.blue('📊 Checking migration status...\n'));
+      console.log(chalk.blue('[SUMMARY] Checking migration status...\n'));
       
       const { db, client } = await migrateMongo.database.connect();
       const statusItems = await migrateMongo.status(db);
       
-      console.log('┌─────────────────────────────────────────┬────────────────────────┐');
-      console.log('│ Filename                                │ Applied At             │');
-      console.log('├─────────────────────────────────────────┼────────────────────────┤');
+      console.log('+-----------------------------------------+------------------------+');
+      console.log('| Filename                                | Applied At             |');
+      console.log('+-----------------------------------------+------------------------+');
       
       statusItems.forEach(item => {
         const fileName = item.fileName.padEnd(39);
         const appliedAt = item.appliedAt === 'PENDING' 
           ? chalk.yellow('PENDING'.padEnd(22))
           : item.appliedAt.padEnd(22);
-        console.log(`│ ${fileName} │ ${appliedAt} │`);
+        console.log(`| ${fileName} | ${appliedAt} |`);
       });
       
-      console.log('└─────────────────────────────────────────┴────────────────────────┘');
+      console.log('+-----------------------------------------+------------------------+');
       
       await client.close();
     } catch (error) {
-      console.error(chalk.red('❌ Error:'), error.message);
+      console.error(chalk.red('[ERROR] Error:'), error.message);
       process.exit(1);
     }
   });

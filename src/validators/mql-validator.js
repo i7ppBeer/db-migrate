@@ -8,8 +8,9 @@ import path from 'path';
 import { validationRules } from '../config/validation-rules.js';
 
 export class MQLValidator {
-  constructor(customRules = null) {
+  constructor(customRules = null, options = {}) {
     this.rules = customRules || validationRules;
+    this.options = options;
   }
 
   /**
@@ -32,51 +33,135 @@ export class MQLValidator {
     const errors = [];
     const warnings = [];
 
+    // Check for ignore comments
+    // Format: // migrate-ignore: operation1, operation2
+    const ignoreRules = [];
+    const ignoreMatch = content.match(/\/\/\s*migrate-ignore:\s*([a-zA-Z0-9_, \t]+)/);
+    if (ignoreMatch) {
+      ignoreRules.push(...ignoreMatch[1].split(',').map(s => s.trim()));
+    }
+
     // Check for forbidden database operations
     for (const operation of this.rules.forbidden.database) {
-      if (this.containsOperation(content, operation)) {
-        errors.push({
-          type: 'forbidden-database-operation',
+      if (ignoreRules.includes(operation)) {
+        warnings.push({
+          type: 'ignored-forbidden-operation',
           operation,
-          message: `Forbidden database operation: ${operation}`,
+          message: `[IGNORED] Forbidden database operation: ${operation}`,
           file: fileName,
         });
+        continue;
+      }
+
+      if (this.containsOperation(content, operation)) {
+        if (this.options.allowDangerous) {
+          warnings.push({
+            type: 'allowed-dangerous-operation',
+            operation,
+            message: `[ALLOWED] Forbidden database operation: ${operation}`,
+            file: fileName,
+          });
+        } else {
+          errors.push({
+            type: 'forbidden-database-operation',
+            operation,
+            message: `Forbidden database operation: ${operation}`,
+            file: fileName,
+          });
+        }
       }
     }
 
     // Check for forbidden collection operations
     for (const operation of this.rules.forbidden.collections) {
-      if (this.containsOperation(content, operation)) {
-        errors.push({
-          type: 'forbidden-collection-operation',
+      if (ignoreRules.includes(operation)) {
+        warnings.push({
+          type: 'ignored-forbidden-operation',
           operation,
-          message: `Forbidden collection operation: ${operation}`,
+          message: `[IGNORED] Forbidden collection operation: ${operation}`,
           file: fileName,
         });
+        continue;
+      }
+
+      if (this.containsOperation(content, operation)) {
+        if (this.options.allowDangerous) {
+          warnings.push({
+            type: 'allowed-dangerous-operation',
+            operation,
+            message: `[ALLOWED] Forbidden collection operation: ${operation}`,
+            file: fileName,
+          });
+        } else {
+          errors.push({
+            type: 'forbidden-collection-operation',
+            operation,
+            message: `Forbidden collection operation: ${operation}`,
+            file: fileName,
+          });
+        }
       }
     }
 
     // Check for forbidden system operations
     for (const operation of this.rules.forbidden.system) {
-      if (this.containsOperation(content, operation)) {
-        errors.push({
-          type: 'forbidden-system-operation',
+      if (ignoreRules.includes(operation)) {
+        warnings.push({
+          type: 'ignored-forbidden-operation',
           operation,
-          message: `Forbidden system operation: ${operation}`,
+          message: `[IGNORED] Forbidden system operation: ${operation}`,
           file: fileName,
         });
+        continue;
+      }
+
+      if (this.containsOperation(content, operation)) {
+        if (this.options.allowDangerous) {
+          warnings.push({
+            type: 'allowed-dangerous-operation',
+            operation,
+            message: `[ALLOWED] Forbidden system operation: ${operation}`,
+            file: fileName,
+          });
+        } else {
+          errors.push({
+            type: 'forbidden-system-operation',
+            operation,
+            message: `Forbidden system operation: ${operation}`,
+            file: fileName,
+          });
+        }
       }
     }
 
     // Check for forbidden admin operations
     for (const operation of this.rules.forbidden.admin) {
-      if (this.containsOperation(content, operation)) {
-        errors.push({
-          type: 'forbidden-admin-operation',
+      if (ignoreRules.includes(operation)) {
+        warnings.push({
+          type: 'ignored-forbidden-operation',
           operation,
-          message: `Forbidden admin operation: ${operation}`,
+          message: `[IGNORED] Forbidden admin operation: ${operation}`,
           file: fileName,
         });
+        continue;
+      }
+
+      if (this.containsOperation(content, operation)) {
+        if (this.options.allowDangerous) {
+          warnings.push({
+            type: 'allowed-dangerous-operation',
+            operation,
+            message: `[ALLOWED] Forbidden admin operation: ${operation}`,
+            file: fileName,
+          });
+        } else {
+          errors.push({
+            type: 'forbidden-admin-operation',
+            operation,
+            message: `Forbidden admin operation: ${operation}`,
+            file: fileName,
+          });
+        }
       }
     }
 

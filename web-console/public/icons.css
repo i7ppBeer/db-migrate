@@ -1,0 +1,23 @@
+/* Icon Styles */
+.icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    margin-right: 8px;
+    font-size: 1.2em;
+}
+
+.dir-icon {
+    color: #FFC107; /* Folder yellow */
+}
+
+.file-icon {
+    color: #4CAF50; /* MongoDB Green */
+}
+
+.config-icon {
+    color: #607D8B; /* Slate Grey */
+}

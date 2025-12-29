@@ -27,19 +27,19 @@ print_header() {
 }
 
 print_success() {
-    echo -e "${GREEN}✅ $1${NC}"
+    echo -e "${GREEN}[OK] $1${NC}"
 }
 
 print_error() {
-    echo -e "${RED}❌ $1${NC}"
+    echo -e "${RED}[ERROR] $1${NC}"
 }
 
 print_info() {
-    echo -e "${YELLOW}ℹ️  $1${NC}"
+    echo -e "${YELLOW}[INFO]  $1${NC}"
 }
 
 print_step() {
-    echo -e "${CYAN}▶️  $1${NC}"
+    echo -e "${CYAN}[STEP]  $1${NC}"
 }
 
 # Cleanup function
@@ -54,7 +54,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Main test flow
-print_header "🧪 MongoDB Migration Testing Suite"
+print_header "[TEST] MongoDB Migration Testing Suite"
 echo -e "${CYAN}Testing versions: ${MIN_VERSION} → ${MAX_VERSION}${NC}\n"
 
 # Create docker network
@@ -63,7 +63,7 @@ docker network create ${NETWORK_NAME} 2>/dev/null || true
 print_success "Docker network created"
 
 # Test 1: Minimum Version
-print_header "📦 Test 1: MongoDB ${MIN_VERSION}"
+print_header "[BUILD] Test 1: MongoDB ${MIN_VERSION}"
 
 print_step "Pulling MongoDB ${MIN_VERSION} image..."
 docker pull mongo:${MIN_VERSION} > /dev/null 2>&1
@@ -102,7 +102,7 @@ export MONGODB_URL="mongodb://admin:admin123@localhost:27017"
 export MONGODB_DATABASE="test_migrations"
 
 print_step "Running migrations on MongoDB ${MIN_VERSION}..."
-for project in projects/*; do
+for project in databases/*; do
     if [ -d "$project" ]; then
         print_step "  - Project: $(basename $project)"
         node src/cli.js up -c "$project/config.js" > /dev/null 2>&1 || print_error "Migration failed for $(basename $project)"
@@ -110,7 +110,7 @@ for project in projects/*; do
 done
 
 print_step "Checking migration status..."
-for project in projects/*; do
+for project in databases/*; do
     if [ -d "$project" ]; then
         node src/cli.js status -c "$project/config.js" 2>&1 | grep -E "^│|Test Files|passed" || true
     fi
@@ -123,7 +123,7 @@ docker stop ${CONTAINER_PREFIX}-min > /dev/null 2>&1
 docker rm ${CONTAINER_PREFIX}-min > /dev/null 2>&1
 
 # Test 2: Maximum Version
-print_header "📦 Test 2: MongoDB ${MAX_VERSION}"
+print_header "[BUILD] Test 2: MongoDB ${MAX_VERSION}"
 
 print_step "Pulling MongoDB ${MAX_VERSION} image..."
 docker pull mongo:${MAX_VERSION} > /dev/null 2>&1
@@ -200,7 +200,7 @@ done
 print_success "Re-migration successful"
 
 # All tests passed
-print_header "✅ Test Summary"
+print_header "[OK] Test Summary"
 echo -e "${GREEN}"
 echo "  ✓ MongoDB ${MIN_VERSION} migrations successful"
 echo "  ✓ MongoDB ${MAX_VERSION} migrations successful"

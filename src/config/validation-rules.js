@@ -74,7 +74,9 @@ export const validationRules = {
     ],
     
     // Dangerous collection operations
-    collections: [],
+    collections: [
+      'drop',
+    ],
     
     // System operations
     system: [
@@ -117,6 +119,7 @@ export const validationRules = {
         return true;
       },
     },
+
     
     {
       name: 'noUserManagement',

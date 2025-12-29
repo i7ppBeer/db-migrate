@@ -25,7 +25,7 @@ spec:
         - -c
         - |
           set -e
-          echo "⚠️  Starting rollback..."
+          echo "[WARN]  Starting rollback..."
           npm ci --production
           
           echo "📊 Current migration status:"
@@ -34,7 +34,7 @@ spec:
           echo "⬇️  Rolling back last migration..."
           npm run down
           
-          echo "✅ Rollback completed successfully!"
+          echo "[OK] Rollback completed successfully!"
           npm run status
         volumeMounts:
         - name: migration-code

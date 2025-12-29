@@ -9,7 +9,7 @@
 | 資料庫數 | 3 (Users, Orders, Analytics) |
 | Migrations 總數 | 18 (每個 DB 6 個) |
 | 測試環境 | Container + K8s (3 版本) |
-| 成功率 | ✅ 100% (18/18) |
+| 成功率 | [OK] 100% (18/18) |
 
 ---
 
@@ -24,27 +24,27 @@
 ---
 
 
-## ✅ 測試結果
+## [OK] 測試結果
 
 ### Container 測試 (MongoDB 8.0)
 
 ```
 Environment: Docker container
 MongoDB:     8.0
-Status:      ✅ PASSED
+Status:      [OK] PASSED
 
-Users DB:     6/6 migrations ✅
-Orders DB:    6/6 migrations ✅
-Analytics DB: 6/6 migrations ✅
+Users DB:     6/6 migrations [OK]
+Orders DB:    6/6 migrations [OK]
+Analytics DB: 6/6 migrations [OK]
 ```
 
 ### Kubernetes 測試
 
 | MongoDB | Database | Status |
 |---------|----------|--------|
-| 6.0 | Users | ✅ PASSED |
-| 7.0 | Orders | ✅ PASSED |
-| 8.0 | Analytics | ✅ PASSED |
+| 6.0 | Users | [OK] PASSED |
+| 7.0 | Orders | [OK] PASSED |
+| 8.0 | Analytics | [OK] PASSED |
 
 ---
 
@@ -52,11 +52,11 @@ Analytics DB: 6/6 migrations ✅
 
 **MongoDB 驗證**:
 ```
-✅ 3 個資料庫成功建立
-✅ 18 個集合正確創建
-✅ Schema validation 套用正確
-✅ 索引全部建立成功
-✅ Changelog 正確記錄
+[OK] 3 個資料庫成功建立
+[OK] 18 個集合正確創建
+[OK] Schema validation 套用正確
+[OK] 索引全部建立成功
+[OK] Changelog 正確記錄
 ```
 
 ---
@@ -81,14 +81,14 @@ bash scripts/k8s-multi-db-runner.sh
 
 ## 💡 結論
 
-✅ **所有測試通過** - 系統已準備好生產環境使用
+[OK] **所有測試通過** - 系統已準備好生產環境使用
 
 **驗證項目**:
-- ✅ 多資料庫獨立管理
-- ✅ MongoDB 6.0/7.0/8.0 相容性
-- ✅ Schema 驗證完整性
-- ✅ 索引策略正確性
-- ✅ 狀態追蹤準確性
+- [OK] 多資料庫獨立管理
+- [OK] MongoDB 6.0/7.0/8.0 相容性
+- [OK] Schema 驗證完整性
+- [OK] 索引策略正確性
+- [OK] 狀態追蹤準確性
 
 **測試完成**: 2025-12-23 16:18:30 UTC
 

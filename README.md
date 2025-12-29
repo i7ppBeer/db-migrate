@@ -1,6 +1,6 @@
 # MongoDB Migration Management System
 
-🚀 企業級 MongoDB 資料庫遷移管理系統，支援多資料庫、版本控制、自動化測試與 Kubernetes 部署。
+[DEPLOY] 企業級 MongoDB 資料庫遷移管理系統，支援多資料庫、版本控制、自動化測試與 Kubernetes 部署。
 
 ## ✨ 核心功能
 
@@ -20,7 +20,7 @@
 
 ---
 
-## 🚀 快速開始
+## [DEPLOY] 快速開始
 
 ### 1. 安裝
 
@@ -47,37 +47,49 @@ mongodb: {
 }
 ```
 
-### 3. 多資料庫配置
+### 3. 多資料庫配置 (推薦結構)
 
-建立獨立配置檔：
+建議採用以下目錄結構管理多個資料庫：
+
+```
+repo/
+  databases/
+    users/
+      config.js
+      migrations/
+    products/
+      config.js
+      migrations/
+```
+
+**配置檔範例 (databases/users/config.js):**
 
 ```javascript
-// config/my-users-db.js
 export default {
   mongodb: {
     url: process.env.USERS_DB_URL || "mongodb://localhost:27017",
     databaseName: process.env.USERS_DB_NAME || "users_db"
   },
-  migrationsDir: "migrations/users",
+  // 相對路徑，指向同目錄下的 migrations 資料夾
+  migrationsDir: "migrations", 
   changelogCollectionName: "changelog"
 };
 ```
 
 使用配置檔執行：
 ```bash
-export USERS_DB_URL="mongodb://localhost:27017"
-export USERS_DB_NAME="users_db"
-node src/cli.js --config config/my-users-db.js up
+# 操作 Users 資料庫
+node src/cli.js --config databases/users/config.js up
+
+# 操作 Products 資料庫
+node src/cli.js --config databases/products/config.js up
 ```
 
 ### 4. 建立 Migration
 
 ```bash
-# 單一資料庫
-npm run create "add user index"
-
-# 多資料庫
-node src/cli.js --config config/my-users-db.js create "add user index"
+# 指定設定檔來建立 Migration
+node src/cli.js create "add user index" -c databases/users/config.js
 ```
 
 Migration 範例：
@@ -113,7 +125,7 @@ node src/cli.js --config config/my-users-db.js up
 
 ---
 
-## 📦 多資料庫批次執行
+## [INIT] 多資料庫批次執行
 
 批次執行所有資料庫的 migrations：
 
@@ -128,7 +140,7 @@ bash scripts/migrate-all-databases.sh
 
 ---
 
-## ✅ 驗證與測試
+## [OK] 驗證與測試
 
 ### 本地驗證
 
@@ -152,10 +164,10 @@ MIN_VERSION=6.0 MAX_VERSION=8.0 ./scripts/docker-test.sh
 ```
 
 測試場景：
-- ✅ MongoDB 6.0 遷移測試
-- ✅ MongoDB 8.0 遷移測試
-- ✅ 升級路徑測試（6.0 → 8.0）
-- ✅ 回滾測試（up → down → up）
+- [OK] MongoDB 6.0 遷移測試
+- [OK] MongoDB 8.0 遷移測試
+- [OK] 升級路徑測試（6.0 → 8.0）
+- [OK] 回滾測試（up → down → up）
 
 ---
 

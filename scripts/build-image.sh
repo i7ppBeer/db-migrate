@@ -25,14 +25,14 @@ echo -e "${BLUE}========================================${NC}\n"
 echo -e "${BLUE}Image: ${FULL_IMAGE}${NC}\n"
 
 # Build image
-echo -e "${BLUE}📦 Building Docker image...${NC}"
+echo -e "${BLUE}[BUILD] Building Docker image...${NC}"
 docker build \
     --platform linux/amd64 \
     -t "${FULL_IMAGE}" \
     -f Dockerfile \
     .
 
-echo -e "${GREEN}✅ Image built successfully${NC}\n"
+echo -e "${GREEN}[OK] Image built successfully${NC}\n"
 
 # Tag with version
 if [ -n "$VERSION" ]; then
@@ -54,13 +54,13 @@ if [ "${PUSH_IMAGE}" = "true" ]; then
         docker push "${VERSION_TAG}"
     fi
     
-    echo -e "${GREEN}✅ Image pushed successfully${NC}"
+    echo -e "${GREEN}[OK] Image pushed successfully${NC}"
 else
     echo -e "\n${YELLOW}ℹ️  Image not pushed (set PUSH_IMAGE=true to push)${NC}"
 fi
 
 echo -e "\n${GREEN}========================================${NC}"
-echo -e "${GREEN}✅ Build completed${NC}"
+echo -e "${GREEN}[OK] Build completed${NC}"
 echo -e "${GREEN}========================================${NC}\n"
 
 echo "To push the image, run:"

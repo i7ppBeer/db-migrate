@@ -32,10 +32,10 @@ jobs:
     - name: Check for forbidden operations
       run: |
         if grep -r "dropDatabase\|createUser\|dropUser" migrations/*.js; then
-          echo "❌ Forbidden operations detected!"
+          echo "[ERROR] Forbidden operations detected!"
           exit 1
         fi
-        echo "✅ No forbidden operations found"
+        echo "[OK] No forbidden operations found"
 
   test:
     name: Test Migrations
