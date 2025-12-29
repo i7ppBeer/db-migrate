@@ -83,6 +83,11 @@ async function loadConfig(configPath) {
       }
     }
 
+    // Default moduleSystem to 'esm' if not specified, as this project is type: module
+    if (!customConfig.moduleSystem) {
+      customConfig.moduleSystem = 'esm';
+    }
+
     // Set config for migrate-mongo
     if (migrateMongo.config.set) {
       migrateMongo.config.set(customConfig);
@@ -104,22 +109,34 @@ async function loadConfig(configPath) {
     
     return customConfig;
   } catch (error) {
-    console.error(chalk.red(`[ERROR] Config file not found: ${configPath}`));
-    console.log(chalk.yellow('\nAvailable project configs:'));
-    try {
-      const projectsDir = path.resolve(process.cwd(), 'projects');
-      const projects = await fs.readdir(projectsDir);
-      for (const project of projects) {
-        const projectConfig = path.join(projectsDir, project, 'config.js');
+    console.error(chalk.red(`[ERROR] Failed to load config: ${configPath}`));
+    console.error(chalk.red(`Reason: ${error.message}`));
+    
+    if (error.code === 'ENOENT') {
+        console.log(chalk.yellow('\nAvailable project configs:'));
         try {
-          await fs.access(projectConfig);
-          console.log(chalk.gray(`  - projects/${project}/config.js`));
-        } catch (e) {
-          // config.js doesn't exist in this project folder
+        // Check both 'projects' and 'databases' directories
+        const dirsToCheck = ['projects', 'databases'];
+        for (const dirName of dirsToCheck) {
+            const projectsDir = path.resolve(process.cwd(), dirName);
+            try {
+                const projects = await fs.readdir(projectsDir);
+                for (const project of projects) {
+                    const projectConfig = path.join(projectsDir, project, 'config.js');
+                    try {
+                    await fs.access(projectConfig);
+                    console.log(chalk.gray(`  - ${dirName}/${project}/config.js`));
+                    } catch (e) {
+                    // config.js doesn't exist in this project folder
+                    }
+                }
+            } catch (e) {
+                // directory doesn't exist
+            }
         }
-      }
-    } catch (e) {
-      // projects directory doesn't exist
+        } catch (e) {
+        // ignore
+        }
     }
     process.exit(1);
   }
@@ -163,8 +180,8 @@ program
       
       console.log(chalk.blue('[INFO] Validating migrations...\n'));
       
-      const validator = new MQLValidator(null, { allowDangerous: options.allowDangerous });
       const config = await migrateMongo.config.read();
+      const validator = new MQLValidator(config.validation, { allowDangerous: options.allowDangerous });
       
       let result;
       if (options.file) {

@@ -441,6 +441,37 @@ async function loadValidationList() {
              const name = currentProjectPath.split('/').pop();
              addCheckbox(`${name} (Current)`, currentProjectPath);
         }
+
+        // Add event listener to checkboxes to update validation rules display
+        const updateRulesDisplay = async () => {
+            const selected = document.querySelectorAll('#validate-list input[type="checkbox"]:checked');
+            const rulesDisplay = document.getElementById('validation-rules-display');
+            const dbList = document.getElementById('forbidden-db-list');
+            const colList = document.getElementById('forbidden-col-list');
+            
+            if (selected.length === 1) {
+                // Only show rules if exactly one project is selected (to avoid confusion)
+                const projectPath = selected[0].value;
+                try {
+                    const res = await fetch(`/api/validation-rules?projectPath=${encodeURIComponent(projectPath)}`);
+                    const rules = await res.json();
+                    
+                    dbList.innerHTML = rules.forbidden.database.map(op => `<li>${op}</li>`).join('');
+                    colList.innerHTML = rules.forbidden.collections.map(op => `<li>${op}</li>`).join('');
+                    
+                    rulesDisplay.style.display = 'block';
+                } catch (e) {
+                    console.error('Failed to fetch rules', e);
+                    rulesDisplay.style.display = 'none';
+                }
+            } else {
+                rulesDisplay.style.display = 'none';
+            }
+        };
+
+        container.querySelectorAll('input').forEach(input => {
+            input.addEventListener('change', updateRulesDisplay);
+        });
         
     } catch (err) {
         console.error(err);
@@ -657,7 +688,8 @@ let currentEditorMode = 'code'; // 'code' or 'form'
 
 async function loadFile(fullPath) {
     try {
-        const res = await fetch(`/api/file?path=${encodeURIComponent(fullPath)}`);
+        // Add timestamp to prevent caching
+        const res = await fetch(`/api/file?path=${encodeURIComponent(fullPath)}&t=${Date.now()}`);
         if (!res.ok) throw new Error('Failed to read file');
         const data = await res.json();
         const content = data.content;
@@ -696,71 +728,49 @@ async function loadFile(fullPath) {
 }
 
 function formatCode() {
-    // With CodeMirror, we might want to use a beautifier library, 
-    // but for now let's keep the simple logic or rely on CodeMirror's auto-indent if available.
-    // Since we don't have a full formatter loaded, we'll stick to the manual one but apply to editor.
-    
     let content = editor ? editor.getValue() : document.getElementById('code-editor').value;
     
+    // 1. Try Prettier (Best)
     try {
-        // 1. Try JSON
-        const obj = JSON.parse(content);
-        const formatted = JSON.stringify(obj, null, 2);
-        if (editor) editor.setValue(formatted);
-        else document.getElementById('code-editor').value = formatted;
-        return;
+        if (window.prettier && window.prettierPlugins) {
+            const formatted = prettier.format(content, {
+                parser: "babel",
+                plugins: prettierPlugins,
+                semi: true,
+                singleQuote: true,
+                trailingComma: 'es5',
+                tabWidth: 2
+            });
+            
+            if (editor) editor.setValue(formatted);
+            else document.getElementById('code-editor').value = formatted;
+            return;
+        }
     } catch (e) {
-        // Not JSON, continue
+        console.error("Prettier formatting failed:", e);
+        // Fallthrough to fallback
     }
 
-    // 2. Try JS Object (Simple Indentation)
-    // This is a basic formatter for JS objects/files
-    let formatted = '';
-    let indent = 0;
-    const pad = '  ';
-    let inString = false;
-    let strChar = null;
-        
-        for (let i = 0; i < content.length; i++) {
-            const char = content[i];
-            
-            // Handle Strings
-            if (!inString && (char === '"' || char === "'" || char === '`')) {
-                inString = true;
-                strChar = char;
-                formatted += char;
-                continue;
+    // 2. Fallback: CodeMirror Smart Indent
+    if (editor) {
+        const totalLines = editor.lineCount();
+        editor.operation(() => {
+            for (let i = 0; i < totalLines; i++) {
+                editor.indentLine(i, "smart");
             }
-            if (inString) {
-                formatted += char;
-                if (char === strChar && content[i-1] !== '\\') {
-                    inString = false;
-                }
-                continue;
-            }
-            
-            // Handle Structure
-            if (char === '{' || char === '[') {
-                formatted += char + '\n' + pad.repeat(++indent);
-                // Skip following whitespace to avoid double spacing
-                while (content[i+1] && /\s/.test(content[i+1])) i++;
-            } else if (char === '}' || char === ']') {
-                formatted = formatted.trimEnd(); // Remove trailing whitespace/newlines
-                formatted += '\n' + pad.repeat(--indent) + char;
-            } else if (char === ',') {
-                formatted += char + '\n' + pad.repeat(indent);
-                while (content[i+1] && /\s/.test(content[i+1])) i++;
-            } else if (char === ':') {
-                formatted += ': ';
-                while (content[i+1] && /\s/.test(content[i+1])) i++;
-            } else {
-                formatted += char;
-            }
-        }
-        
-        if (editor) editor.setValue(formatted);
-        else document.getElementById('code-editor').value = formatted;
+        });
+        return;
     }
+
+    // 3. Fallback: Basic JSON
+    try {
+        const obj = JSON.parse(content);
+        const formatted = JSON.stringify(obj, null, 2);
+        document.getElementById('code-editor').value = formatted;
+    } catch (e) {
+        // Ignore
+    }
+}
 
 function switchEditorMode(mode) {
     currentEditorMode = mode;
@@ -820,6 +830,148 @@ function parseConfigToForm(content) {
     document.getElementById('cfg-extension').value = extract('migrationFileExtension');
     document.getElementById('cfg-useFileHash').value = extract('useFileHash');
     document.getElementById('cfg-moduleSystem').value = extract('moduleSystem');
+
+    // Parse Validation Rules
+    loadForbiddenOpsUI(content);
+}
+
+async function loadForbiddenOpsUI(content) {
+    try {
+        // 1. Fetch Default Rules
+        const res = await fetch('/api/default-validation-rules');
+        const defaultRules = await res.json();
+        
+        const dbContainer = document.getElementById('forbidden-db-checks');
+        const colContainer = document.getElementById('forbidden-col-checks');
+        const sysContainer = document.getElementById('forbidden-sys-checks');
+        const admContainer = document.getElementById('forbidden-adm-checks');
+        
+        dbContainer.innerHTML = '';
+        colContainer.innerHTML = '';
+        sysContainer.innerHTML = '';
+        admContainer.innerHTML = '';
+
+        // 2. Parse Current Config for Overrides
+        // We look for validation: { forbidden: { ... } }
+        // This is tricky with regex. Let's try to extract the 'validation' object string first.
+        let currentForbiddenDb = null;
+        let currentForbiddenCol = null;
+        let currentForbiddenSys = null;
+        let currentForbiddenAdm = null;
+
+        // Extract validation object block
+        // Matches validation: { ... } allowing for nested braces (simple level)
+        // A robust parser is better, but for now let's assume standard formatting or simple structure
+        // Or, we can assume if it's not present, it's default.
+        
+        // Let's try to find the 'forbidden' section inside 'validation'
+        // validation: { ... forbidden: { ... database: [ ... ], collections: [ ... ] } ... }
+        
+        // Helper to extract array from string
+        const extractArray = (str, key) => {
+            console.log(`Extracting ${key}...`);
+            // Regex to find "key:"
+            const keyRegex = new RegExp(`${key}\\s*:`);
+            const keyMatch = str.match(keyRegex);
+            if (!keyMatch) {
+                console.log(`Key ${key} not found`);
+                return null;
+            }
+            
+            // Look for [ after the key
+            const afterKey = str.slice(keyMatch.index + keyMatch[0].length);
+            const openBracketIndex = afterKey.indexOf('[');
+            if (openBracketIndex === -1) return null;
+            
+            // Find closing bracket
+            const closeBracketIndex = afterKey.indexOf(']', openBracketIndex);
+            if (closeBracketIndex === -1) return null;
+            
+            const arrayContent = afterKey.slice(openBracketIndex + 1, closeBracketIndex);
+            console.log(`Found content for ${key}:`, arrayContent);
+            
+            return arrayContent
+                .split(',')
+                .map(s => s.trim())
+                .filter(s => s)
+                .map(s => s.replace(/['"]/g, '')); // Remove quotes
+        };
+
+        // Find validation block
+        // We use a more robust approach: Find "forbidden:" and search for arrays after it.
+        // This avoids issues with matching the exact closing brace of the object.
+        const forbiddenStart = content.search(/forbidden\s*:\s*{/);
+        
+        if (forbiddenStart !== -1) {
+            // Take a chunk of text starting from forbidden
+            // We limit the chunk size to avoid scanning the whole file if it's huge, 
+            // but config files are small.
+            const forbiddenSection = content.slice(forbiddenStart);
+            
+            currentForbiddenDb = extractArray(forbiddenSection, 'database');
+            currentForbiddenCol = extractArray(forbiddenSection, 'collections');
+            currentForbiddenSys = extractArray(forbiddenSection, 'system');
+            currentForbiddenAdm = extractArray(forbiddenSection, 'admin');
+        }
+
+        // 3. Generate Checkboxes
+        const createCheckbox = (op, container, currentList, defaultList) => {
+            const div = document.createElement('div');
+            div.className = 'checkbox-item';
+            
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.id = `chk-forbid-${op}`;
+            checkbox.value = op;
+            
+            // Logic:
+            // If currentList is null (no override), use Default (Checked)
+            // If currentList exists, check if op is in it.
+            if (currentList === null) {
+                checkbox.checked = true; // Default is forbidden
+            } else {
+                checkbox.checked = currentList.includes(op);
+            }
+            
+            const label = document.createElement('label');
+            label.htmlFor = `chk-forbid-${op}`;
+            label.textContent = op;
+            
+            div.appendChild(checkbox);
+            div.appendChild(label);
+
+            // Add Tooltip
+            const desc = defaultRules.descriptions && defaultRules.descriptions[op];
+            if (desc) {
+                const helpIcon = document.createElement('span');
+                helpIcon.className = 'help-icon';
+                helpIcon.textContent = '?';
+                helpIcon.style.marginLeft = '8px';
+                helpIcon.style.cursor = 'help';
+                helpIcon.style.fontSize = '0.85em';
+                helpIcon.style.color = '#fff';
+                helpIcon.style.background = '#999';
+                helpIcon.style.borderRadius = '50%';
+                helpIcon.style.width = '16px';
+                helpIcon.style.height = '16px';
+                helpIcon.style.display = 'inline-flex';
+                helpIcon.style.alignItems = 'center';
+                helpIcon.style.justifyContent = 'center';
+                helpIcon.setAttribute('data-tooltip', desc);
+                div.appendChild(helpIcon);
+            }
+
+            container.appendChild(div);
+        };
+
+        if (defaultRules.forbidden.database) defaultRules.forbidden.database.forEach(op => createCheckbox(op, dbContainer, currentForbiddenDb, defaultRules.forbidden.database));
+        if (defaultRules.forbidden.collections) defaultRules.forbidden.collections.forEach(op => createCheckbox(op, colContainer, currentForbiddenCol, defaultRules.forbidden.collections));
+        if (defaultRules.forbidden.system) defaultRules.forbidden.system.forEach(op => createCheckbox(op, sysContainer, currentForbiddenSys, defaultRules.forbidden.system));
+        if (defaultRules.forbidden.admin) defaultRules.forbidden.admin.forEach(op => createCheckbox(op, admContainer, currentForbiddenAdm, defaultRules.forbidden.admin));
+
+    } catch (e) {
+        console.error('Error loading forbidden ops UI', e);
+    }
 }
 
 function updateCodeFromForm() {
@@ -882,6 +1034,78 @@ function updateCodeFromForm() {
     updateOrAppend('migrationFileExtension', 'cfg-extension');
     updateOrAppend('useFileHash', 'cfg-useFileHash', false);
     updateOrAppend('moduleSystem', 'cfg-moduleSystem');
+
+    // Update Validation Rules
+    // We need to reconstruct the validation object based on checkboxes
+    // Logic:
+    // 1. Get all checkboxes
+    // 2. Get default rules (we need them to know what to compare against, or just list all checked)
+    // Actually, the requirement is: "Cancel is override".
+    // If a box is UNCHECKED, it means we want to ALLOW it.
+    // But the config stores what is FORBIDDEN.
+    // So we just need to list all CHECKED items in the config.
+    // BUT, if the list of checked items is IDENTICAL to default, we can remove the override (cleaner).
+    // However, for simplicity and explicitness, let's just write what is checked.
+    // Wait, if we write everything, the config becomes huge.
+    // Better: Only write if different from default?
+    // The user said: "No config = default (all checked)".
+    // So if all are checked, we can remove the validation block?
+    // Or just write the list of checked items.
+    
+    // Let's fetch defaults again to compare? Or store them globally.
+    // For now, let's just write the list of checked items into the config.
+    
+    const getChecked = (containerId) => {
+        return Array.from(document.querySelectorAll(`#${containerId} input:checked`)).map(cb => cb.value);
+    };
+    
+    const checkedDb = getChecked('forbidden-db-checks');
+    const checkedCol = getChecked('forbidden-col-checks');
+    const checkedSys = getChecked('forbidden-sys-checks');
+    const checkedAdm = getChecked('forbidden-adm-checks');
+    
+    // We need to insert/update:
+    // validation: {
+    //   forbidden: {
+    //     database: [...],
+    //     collections: [...],
+    //     system: [...],
+    //     admin: [...]
+    //   }
+    // }
+    
+    // Construct the validation object string
+    const dbListStr = `[${checkedDb.map(s => `'${s}'`).join(', ')}]`;
+    const colListStr = `[${checkedCol.map(s => `'${s}'`).join(', ')}]`;
+    const sysListStr = `[${checkedSys.map(s => `'${s}'`).join(', ')}]`;
+    const admListStr = `[${checkedAdm.map(s => `'${s}'`).join(', ')}]`;
+    
+    const validationBlock = `
+  validation: {
+    forbidden: {
+      database: ${dbListStr},
+      collections: ${colListStr},
+      system: ${sysListStr},
+      admin: ${admListStr}
+    }
+  }`;
+
+    // Replace or Append validation block
+    // Regex to find existing validation block
+    const validationRegex = /validation\s*:\s*{[\s\S]*?}\s*,?/; // Basic match for validation: { ... }
+    
+    if (content.match(validationRegex)) {
+        // Replace existing
+        content = content.replace(validationRegex, validationBlock.trim());
+    } else {
+        // Append before the last brace
+        const lastBraceIndex = content.lastIndexOf('}');
+        if (lastBraceIndex !== -1) {
+            const before = content.slice(0, lastBraceIndex).trimEnd();
+            const needsComma = !before.endsWith(',') && !before.endsWith('{');
+            content = before + (needsComma ? ',' : '') + validationBlock + '\n};';
+        }
+    }
 
     if (editor) editor.setValue(content);
     else document.getElementById('code-editor').value = content;

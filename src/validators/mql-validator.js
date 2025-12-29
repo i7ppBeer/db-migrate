@@ -8,8 +8,14 @@ import path from 'path';
 import { validationRules } from '../config/validation-rules.js';
 
 export class MQLValidator {
-  constructor(customRules = null, options = {}) {
-    this.rules = customRules || validationRules;
+  constructor(ruleOverrides = null, options = {}) {
+    // Deep copy default rules to avoid mutation
+    this.rules = JSON.parse(JSON.stringify(validationRules));
+    
+    if (ruleOverrides) {
+      this.updateRules(ruleOverrides);
+    }
+    
     this.options = options;
   }
 
@@ -285,16 +291,24 @@ export class MQLValidator {
       ...newRules,
       forbidden: {
         ...this.rules.forbidden,
-        ...newRules.forbidden,
+        ...(newRules.forbidden || {}),
       },
       allowed: {
         ...this.rules.allowed,
-        ...newRules.allowed,
+        ...(newRules.allowed || {}),
       },
       custom: [
         ...(this.rules.custom || []),
         ...(newRules.custom || []),
       ],
+      warnings: {
+        ...this.rules.warnings,
+        ...(newRules.warnings || {}),
+        operations: [
+            ...(this.rules.warnings?.operations || []),
+            ...(newRules.warnings?.operations || [])
+        ]
+      }
     };
   }
 }

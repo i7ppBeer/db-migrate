@@ -8,7 +8,10 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/theme/eclipse.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/mode/javascript/javascript.min.js"></script>
+    <script src="https://unpkg.com/prettier@2.8.8/standalone.js"></script>
+    <script src="https://unpkg.com/prettier@2.8.8/parser-babel.js"></script>
     <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="checkbox-style.css">
     <link rel="stylesheet" href="icons.css">
     <script src="/socket.io/socket.io.js"></script>
 </head>
@@ -158,6 +161,29 @@
                                     </label>
                                     <input type="text" id="cfg-moduleSystem" placeholder="esm" disabled>
                                 </div>
+                                
+                                <div class="form-group" style="margin-top: 30px; border-top: 1px solid #eee; padding-top: 20px;">
+                                    <h3 style="margin-top: 0; color: #d32f2f;">Forbidden Operations (Dangerous)</h3>
+                                    
+                                    <div id="forbidden-ops-container" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                                        <div class="forbidden-group">
+                                            <h4 style="margin-bottom: 10px;">Database Level</h4>
+                                            <div id="forbidden-db-checks" class="checkbox-list"></div>
+                                        </div>
+                                        <div class="forbidden-group">
+                                            <h4 style="margin-bottom: 10px;">Collection Level</h4>
+                                            <div id="forbidden-col-checks" class="checkbox-list"></div>
+                                        </div>
+                                        <div class="forbidden-group">
+                                            <h4 style="margin-bottom: 10px;">System Level</h4>
+                                            <div id="forbidden-sys-checks" class="checkbox-list"></div>
+                                        </div>
+                                        <div class="forbidden-group">
+                                            <h4 style="margin-bottom: 10px;">Admin Level</h4>
+                                            <div id="forbidden-adm-checks" class="checkbox-list"></div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -175,6 +201,21 @@
                         <input type="checkbox" id="allow-dangerous-check" style="width: auto; margin: 0;">
                         <label for="allow-dangerous-check" style="margin: 0; cursor: pointer; color: var(--error-color); font-weight: 600;">Allow Dangerous Operations (e.g. drop(), deleteMany())</label>
                     </div>
+                    
+                    <div id="validation-rules-display" style="margin-bottom: 20px; padding: 15px; background: #fff3e0; border: 1px solid #ffe0b2; border-radius: 8px; display: none;">
+                        <h3 style="margin-top: 0; color: #e65100;">⚠️ Forbidden Operations (Current Config)</h3>
+                        <div class="rules-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                            <div>
+                                <h4>Database Level</h4>
+                                <ul id="forbidden-db-list" style="color: #d32f2f; font-family: monospace;"></ul>
+                            </div>
+                            <div>
+                                <h4>Collection Level</h4>
+                                <ul id="forbidden-col-list" style="color: #d32f2f; font-family: monospace;"></ul>
+                            </div>
+                        </div>
+                    </div>
+
                     <button class="btn primary" onclick="runValidate()">Run Validation</button>
                 </div>
 

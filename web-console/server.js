@@ -7,6 +7,8 @@ import fs from 'fs/promises';
 import { spawn } from 'child_process';
 import open from 'open';
 
+import { MQLValidator } from '../src/validators/mql-validator.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const toolRootDir = resolve(__dirname, '..');
@@ -263,6 +265,49 @@ app.post('/api/migrations/list', async (req, res) => {
       // If migrations dir doesn't exist, return empty
       res.json([]);
     }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API to get validation rules for a project
+app.get('/api/validation-rules', async (req, res) => {
+  try {
+    const { projectPath } = req.query;
+    let config = {};
+    
+    if (projectPath) {
+      const configPath = join(projectPath, 'config.js');
+      try {
+        await fs.access(configPath);
+        // Dynamically import the config
+        const configModule = await import(`file://${configPath}`);
+        config = configModule.default;
+      } catch (e) {
+        console.warn(`Could not load config from ${configPath}, using defaults.`);
+      }
+    }
+
+    // Use MQLValidator to merge defaults with project config
+    const validator = new MQLValidator(config.validation || null);
+    
+    res.json({
+      forbidden: validator.rules.forbidden,
+      warnings: validator.rules.warnings
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API to get default validation rules
+app.get('/api/default-validation-rules', (req, res) => {
+  try {
+    import('../src/config/validation-rules.js').then(module => {
+      res.json(module.validationRules);
+    }).catch(err => {
+      res.status(500).json({ error: err.message });
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

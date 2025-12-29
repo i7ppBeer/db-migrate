@@ -246,6 +246,8 @@ main {
     min-height: 200px;
     box-shadow: 0 4px 10px rgba(0,0,0,0.05);
     border: 1px solid var(--border-color);
+    flex: 1;
+    overflow-y: auto;
 }
 
 .view { display: none; }
@@ -343,7 +345,7 @@ input[type="text"]:focus {
     background-color: #001E2B; /* Slate Dark */
     border-radius: 12px;
     padding: 15px;
-    flex: 1;
+    flex: 0 0 35%; /* Fixed 35% height */
     display: flex;
     flex-direction: column;
     overflow: hidden;

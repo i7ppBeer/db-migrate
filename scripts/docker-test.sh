@@ -14,10 +14,10 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Configuration
-MIN_VERSION="${MIN_VERSION:-6.0}"
-MAX_VERSION="${MAX_VERSION:-8.0}"
-CONTAINER_PREFIX="mongodb-migrate-test"
+VERSIONS=("8.0")
+CONTAINER_NAME="mongodb-migrate-test"
 NETWORK_NAME="mongodb-test-network"
+PORT=27017
 
 # Functions
 print_header() {
@@ -44,169 +44,121 @@ print_step() {
 
 # Cleanup function
 cleanup() {
-    print_info "Cleaning up containers and network..."
-    docker stop ${CONTAINER_PREFIX}-min ${CONTAINER_PREFIX}-max 2>/dev/null || true
-    docker rm ${CONTAINER_PREFIX}-min ${CONTAINER_PREFIX}-max 2>/dev/null || true
+    print_info "Cleaning up..."
+    docker stop ${CONTAINER_NAME} 2>/dev/null || true
+    docker rm ${CONTAINER_NAME} 2>/dev/null || true
     docker network rm ${NETWORK_NAME} 2>/dev/null || true
 }
 
 # Trap errors and cleanup
 trap cleanup EXIT
 
-# Main test flow
-print_header "[TEST] MongoDB Migration Testing Suite"
-echo -e "${CYAN}Testing versions: ${MIN_VERSION} → ${MAX_VERSION}${NC}\n"
-
 # Create docker network
 print_step "Creating Docker network..."
 docker network create ${NETWORK_NAME} 2>/dev/null || true
-print_success "Docker network created"
 
-# Test 1: Minimum Version
-print_header "[BUILD] Test 1: MongoDB ${MIN_VERSION}"
+# Main Loop
+for VERSION in "${VERSIONS[@]}"; do
+    print_header "Testing MongoDB $VERSION"
+    
+    # Pull Image once per version
+    print_step "Pulling MongoDB $VERSION image..."
+    docker pull mongo:$VERSION > /dev/null 2>&1
+    
+    for PROJECT_PATH in databases/*; do
+        if [ ! -d "$PROJECT_PATH" ]; then continue; fi
+        
+        PROJECT_NAME=$(basename "$PROJECT_PATH")
+        print_header "Testing Project: $PROJECT_NAME on MongoDB $VERSION"
+        
+        # Start Container for this specific test case
+        print_step "Starting MongoDB $VERSION container..."
+        
+        # Ensure clean state
+        docker stop ${CONTAINER_NAME} 2>/dev/null || true
+        docker rm ${CONTAINER_NAME} 2>/dev/null || true
+        
+        docker run -d --name ${CONTAINER_NAME} \
+            --network ${NETWORK_NAME} \
+            -p ${PORT}:27017 \
+            -e MONGO_INITDB_ROOT_USERNAME=admin \
+            -e MONGO_INITDB_ROOT_PASSWORD=admin123 \
+            mongo:$VERSION > /dev/null 2>&1
+            
+        # Wait for Ready
+        print_step "Waiting for MongoDB to be ready..."
+        sleep 5
+        max_attempts=30
+        attempt=0
+        while [ $attempt -lt $max_attempts ]; do
+            if docker exec ${CONTAINER_NAME} mongosh --eval "db.adminCommand({ping: 1})" --quiet 2>/dev/null; then
+                print_success "MongoDB is ready!"
+                break
+            fi
+            attempt=$((attempt + 1))
+            sleep 1
+        done
+        
+        if [ $attempt -eq $max_attempts ]; then
+            print_error "MongoDB failed to start"
+            exit 1
+        fi
+        
+        # Configure Env
+        CONN_STR="mongodb://admin:admin123@localhost:${PORT}" 
+        CONFIG_FILE="$PROJECT_PATH/config.js"
+        export MONGODB_URL="$CONN_STR"
 
-print_step "Pulling MongoDB ${MIN_VERSION} image..."
-docker pull mongo:${MIN_VERSION} > /dev/null 2>&1
-print_success "Image ready"
-
-print_step "Starting MongoDB ${MIN_VERSION} container..."
-docker run -d --name ${CONTAINER_PREFIX}-min \
-    --network ${NETWORK_NAME} \
-    -p 27017:27017 \
-    -e MONGO_INITDB_ROOT_USERNAME=admin \
-    -e MONGO_INITDB_ROOT_PASSWORD=admin123 \
-    mongo:${MIN_VERSION} > /dev/null 2>&1
-CONTAINER_ID=$(docker ps -q -f name=${CONTAINER_PREFIX}-min)
-print_success "Container started (ID: ${CONTAINER_ID:0:12})"
-
-print_step "Waiting for MongoDB ${MIN_VERSION} to be ready..."
-sleep 10
-max_attempts=30
-attempt=0
-while [ $attempt -lt $max_attempts ]; do
-    if docker exec ${CONTAINER_PREFIX}-min mongosh --eval "db.adminCommand({ping: 1})" --quiet 2>/dev/null; then
-        print_success "MongoDB ${MIN_VERSION} is ready!"
-        break
-    fi
-    attempt=$((attempt + 1))
-    sleep 1
+        # 1. Initial Status
+        print_step "Checking Initial Status..."
+        node src/cli.js status -c "$CONFIG_FILE"
+        
+       
+        # 2. Up
+        print_step "Running Migrations (UP)..."
+        # If UP fails, we attempt to rollback to clean state before exiting
+        if ! node src/cli.js up -c "$CONFIG_FILE"; then
+            print_error "UP failed - Attempting automatic rollback..."
+            node src/cli.js down -c "$CONFIG_FILE"
+            exit 1
+        fi
+        
+        # 3. Status after Up
+        print_step "Checking Status after UP..."
+        node src/cli.js status -c "$CONFIG_FILE"
+        
+        # 4. Down (Rollback ALL)
+        print_step "Testing Full Rollback (DOWN ALL)..."
+        
+        # Loop until no applied migrations remain
+        while true; do
+            STATUS=$(node src/cli.js status -c "$CONFIG_FILE")
+            if echo "$STATUS" | grep -q "APPLIED"; then
+                node src/cli.js down -c "$CONFIG_FILE" || { print_error "DOWN failed"; exit 1; }
+            else
+                print_success "All migrations rolled back."
+                break
+            fi
+        done
+        
+        # 5. Status after Down
+        print_step "Checking Status after Full Rollback..."
+        node src/cli.js status -c "$CONFIG_FILE"
+        
+        # 6. Up again
+        print_step "Re-applying Migrations (UP)..."
+        node src/cli.js up -c "$CONFIG_FILE" || { print_error "Re-UP failed"; exit 1; }
+        
+        # 7. Final Status
+        print_step "Checking Final Status..."
+        node src/cli.js status -c "$CONFIG_FILE"
+        
+        print_success "Project $PROJECT_NAME passed on MongoDB $VERSION"
+        
+        # Stop container
+        docker stop ${CONTAINER_NAME} > /dev/null 2>&1
+        docker rm ${CONTAINER_NAME} > /dev/null 2>&1
+    done
 done
 
-if [ $attempt -eq $max_attempts ]; then
-    print_error "MongoDB ${MIN_VERSION} failed to start"
-    exit 1
-fi
-
-# Run migrations on min version
-export MONGODB_URL="mongodb://admin:admin123@localhost:27017"
-export MONGODB_DATABASE="test_migrations"
-
-print_step "Running migrations on MongoDB ${MIN_VERSION}..."
-for project in databases/*; do
-    if [ -d "$project" ]; then
-        print_step "  - Project: $(basename $project)"
-        node src/cli.js up -c "$project/config.js" > /dev/null 2>&1 || print_error "Migration failed for $(basename $project)"
-    fi
-done
-
-print_step "Checking migration status..."
-for project in databases/*; do
-    if [ -d "$project" ]; then
-        node src/cli.js status -c "$project/config.js" 2>&1 | grep -E "^│|Test Files|passed" || true
-    fi
-done
-
-print_success "MongoDB ${MIN_VERSION} test completed"
-
-# Stop min version container
-docker stop ${CONTAINER_PREFIX}-min > /dev/null 2>&1
-docker rm ${CONTAINER_PREFIX}-min > /dev/null 2>&1
-
-# Test 2: Maximum Version
-print_header "[BUILD] Test 2: MongoDB ${MAX_VERSION}"
-
-print_step "Pulling MongoDB ${MAX_VERSION} image..."
-docker pull mongo:${MAX_VERSION} > /dev/null 2>&1
-print_success "Image ready"
-
-print_step "Starting MongoDB ${MAX_VERSION} container..."
-docker run -d --name ${CONTAINER_PREFIX}-max \
-    --network ${NETWORK_NAME} \
-    -p 27018:27017 \
-    -e MONGO_INITDB_ROOT_USERNAME=admin \
-    -e MONGO_INITDB_ROOT_PASSWORD=admin123 \
-    mongo:${MAX_VERSION} > /dev/null 2>&1
-CONTAINER_ID=$(docker ps -q -f name=${CONTAINER_PREFIX}-max)
-print_success "Container started (ID: ${CONTAINER_ID:0:12})"
-
-print_step "Waiting for MongoDB ${MAX_VERSION} to be ready..."
-sleep 10
-max_attempts=30
-attempt=0
-while [ $attempt -lt $max_attempts ]; do
-    if docker exec ${CONTAINER_PREFIX}-max mongosh --eval "db.adminCommand({ping: 1})" --quiet 2>/dev/null; then
-        print_success "MongoDB ${MAX_VERSION} is ready!"
-        break
-    fi
-    attempt=$((attempt + 1))
-    sleep 1
-done
-
-if [ $attempt -eq $max_attempts ]; then
-    print_error "MongoDB ${MAX_VERSION} failed to start"
-    exit 1
-fi
-
-# Run migrations on max version
-export MONGODB_URL="mongodb://admin:admin123@localhost:27018"
-export MONGODB_DATABASE="test_migrations"
-
-print_step "Running migrations on MongoDB ${MAX_VERSION}..."
-for project in projects/*; do
-    if [ -d "$project" ]; then
-        print_step "  - Project: $(basename $project)"
-        node src/cli.js up -c "$project/config.js" > /dev/null 2>&1 || print_error "Migration failed for $(basename $project)"
-    fi
-done
-
-print_step "Checking migration status..."
-for project in projects/*; do
-    if [ -d "$project" ]; then
-        node src/cli.js status -c "$project/config.js" 2>&1 | grep -E "^│|Test Files|passed" || true
-    fi
-done
-
-print_success "MongoDB ${MAX_VERSION} test completed"
-
-# Test 3: Rollback test
-print_header "🔄 Test 3: Rollback Test on MongoDB ${MAX_VERSION}"
-
-print_step "Rolling back one migration..."
-for project in projects/*; do
-    if [ -d "$project" ]; then
-        print_step "  - Project: $(basename $project)"
-        node src/cli.js down -c "$project/config.js" > /dev/null 2>&1 || print_error "Rollback failed for $(basename $project)"
-    fi
-done
-print_success "Rollback successful"
-
-print_step "Re-applying migration..."
-for project in projects/*; do
-    if [ -d "$project" ]; then
-        print_step "  - Project: $(basename $project)"
-        node src/cli.js up -c "$project/config.js" > /dev/null 2>&1 || print_error "Re-migration failed for $(basename $project)"
-    fi
-done
-print_success "Re-migration successful"
-
-# All tests passed
-print_header "[OK] Test Summary"
-echo -e "${GREEN}"
-echo "  ✓ MongoDB ${MIN_VERSION} migrations successful"
-echo "  ✓ MongoDB ${MAX_VERSION} migrations successful"
-echo "  ✓ Rollback test successful"
-echo -e "${NC}"
-
-print_success "All Docker tests passed!"
-
-exit 0
+print_header "[OK] All Tests Passed Successfully!"

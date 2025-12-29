@@ -71,11 +71,15 @@ export const validationRules = {
       'createRole',
       'dropRole',
       'updateRole',
+      'repairDatabase',
+      'cloneDatabase',
+      'copyDatabase',
     ],
     
     // Dangerous collection operations
     collections: [
       'drop',
+      'reIndex',
     ],
     
     // System operations
@@ -97,68 +101,43 @@ export const validationRules = {
     ],
   },
 
+  // Descriptions for tooltips
+  descriptions: {
+    // Database
+    dropDatabase: 'DATA LOSS: Deletes the entire database',
+    createUser: 'SECURITY: User management should be handled by IaC/Admin',
+    dropUser: 'SECURITY: User management should be handled by IaC/Admin',
+    updateUser: 'SECURITY: User management should be handled by IaC/Admin',
+    grantRolesToUser: 'SECURITY: Role management should be handled by IaC/Admin',
+    revokeRolesFromUser: 'SECURITY: Role management should be handled by IaC/Admin',
+    createRole: 'SECURITY: Role management should be handled by IaC/Admin',
+    dropRole: 'SECURITY: Role management should be handled by IaC/Admin',
+    updateRole: 'SECURITY: Role management should be handled by IaC/Admin',
+    repairDatabase: 'BLOCKING: Global lock, high resource usage',
+    cloneDatabase: 'DEPRECATED: Can be slow and impact performance',
+    copyDatabase: 'DEPRECATED: Can be slow and impact performance',
+    
+    // Collections
+    drop: 'DATA LOSS: Deletes the entire collection',
+    reIndex: 'BLOCKING: Locks the collection, impacts availability',
+    
+    // System
+    shutdown: 'AVAILABILITY: Stops the database server',
+    killOp: 'STABILITY: Interrupts operations, can cause inconsistency',
+    killAllSessions: 'AVAILABILITY: Disconnects all users',
+    serverStatus: 'INFO: Unnecessary in migrations',
+    replSetGetStatus: 'INFO: Unnecessary in migrations',
+    isMaster: 'INFO: Unnecessary in migrations',
+    
+    // Admin
+    enableSharding: 'INFRA: Cluster configuration change',
+    shardCollection: 'INFRA: Cluster configuration change',
+    movePrimary: 'INFRA: Heavy data movement',
+    removeShard: 'INFRA: Destructive cluster change',
+  },
+
   // Custom validation functions
   custom: [
-    {
-      name: 'noDropCollection',
-      description: 'Prevent dropping collections',
-      message: 'Dropping collections is not allowed. Please remove data manually if needed.',
-      check: (code) => {
-        // More precise pattern for .drop() method call (not dropIndex, etc)
-        const dropPatterns = [
-          /(?<!drop[A-Z])\.\s*drop\s*\(/,  // .drop( but not .dropIndex, .dropDatabase, etc
-          /\.collection\s*\(\s*['"][^'"]*['"]\s*\)\s*\.drop\s*\(/,  // collection('name').drop(
-        ];
-        
-        for (const pattern of dropPatterns) {
-          if (pattern.test(code)) {
-            return false;
-          }
-        }
-        
-        return true;
-      },
-    },
-
-    
-    {
-      name: 'noUserManagement',
-      description: 'Prevent user/role management operations',
-      message: 'User/Role management operations are not allowed in migrations.',
-      check: (code) => {
-        const userPatterns = [
-          /createUser/,
-          /dropUser/,
-          /updateUser/,
-          /grantRolesToUser/,
-          /revokeRolesFromUser/,
-          /createRole/,
-          /dropRole/,
-        ];
-        
-        for (const pattern of userPatterns) {
-          if (pattern.test(code)) {
-            return false;
-          }
-        }
-        
-        return true;
-      },
-    },
-    
-    {
-      name: 'noDatabaseDrop',
-      description: 'Prevent dropping database',
-      message: 'Dropping database is strictly forbidden.',
-      check: (code) => {
-        if (/dropDatabase/.test(code)) {
-          return false;
-        }
-        
-        return true;
-      },
-    },
-    
     {
       name: 'requireIndexOptions',
       description: 'Ensure indexes have proper options (unique, ttl, etc.)',
@@ -175,7 +154,8 @@ export const validationRules = {
     operations: [
       'deleteMany',  // Could delete large amounts of data
       'updateMany',  // Could affect large amounts of data
-      'drop()',      // Could delete entire collection
+      'mapReduce',   // Heavy operation, prefer aggregation
+      'renameCollection', // Could overwrite target collection
     ],
   },
 };
