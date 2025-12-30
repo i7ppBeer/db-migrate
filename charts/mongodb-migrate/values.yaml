@@ -1,0 +1,45 @@
+image:
+  repository: my-registry/mongodb-migrate
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+podAnnotations: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+resources: {}
+  # limits:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Migration Configuration
+dryRun: false
+dbNames: [] # List of database names to migrate, e.g., ["products", "users"]
+
+# Secret Configuration
+# Name of an existing secret containing database credentials.
+# The secret must have keys in the format DB_{DBNAME}_URL (uppercase).
+# Example: DB_PRODUCTS_URL="mongodb://..."
+existingSecret: "mongodb-migrate-secrets"
