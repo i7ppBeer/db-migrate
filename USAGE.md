@@ -5,38 +5,38 @@
 > 如果無法顯示下方的 Mermaid 圖表，請參考底部的文字版流程圖。
 
 ```mermaid
-graph TD
-    subgraph Development [💻 本地開發階段]
-        A[開始] --> B{新增 Migration?}
-        B -- Yes --> C[npm run create <br/> -c projects/xxx/config.js]
-        C --> D[編輯 Migration 檔案]
-        D --> E[npm run validate]
-        E --> F[bash scripts/docker-test.sh <br/> (Docker 測試)]
+flowchart TD
+    subgraph Development ["💻 本地開發階段"]
+        A["開始"] --> B{"新增 Migration?"}
+        B -- Yes --> C["npm run create <br/> -c projects/xxx/config.js"]
+        C --> D["編輯 Migration 檔案"]
+        D --> E["npm run validate"]
+        E --> F["bash scripts/docker-test.sh <br/> (Docker 測試)"]
         F -- 失敗 --> D
-        F -- 通過 --> G[Commit & Push]
+        F -- 通過 --> G["Commit & Push"]
         B -- No --> G
     end
 
-    subgraph CI_CD [⚙️ CI/CD 階段]
-        G --> H[Build Docker Image]
-        H --> I[Push to Registry]
+    subgraph CI_CD ["⚙️ CI/CD 階段"]
+        G --> H["Build Docker Image"]
+        H --> I["Push to Registry"]
     end
 
-    subgraph Deployment [🚀 Kubernetes 部署階段]
-        I --> J[Apply ConfigMap & Secret]
-        J --> K[kubectl apply -f <br/> k8s/migration-job.yaml]
+    subgraph Deployment ["🚀 Kubernetes 部署階段"]
+        I --> J["Apply ConfigMap & Secret"]
+        J --> K["kubectl apply -f <br/> k8s/migration-job.yaml"]
         
-        K --> L[Pod 啟動: <br/> migration-runner]
+        K --> L["Pod 啟動: <br/> migration-runner"]
         
-        L --> M{SKIP_TESTS?}
-        M -- False --> N[嵌入式 MongoDB 測試 <br/> (6.0, 7.0, 8.0)]
-        N -- 失敗 --> O[Job Failed <br/> (不影響生產環境)]
-        N -- 通過 --> P[連線生產資料庫]
+        L --> M{"SKIP_TESTS?"}
+        M -- False --> N["嵌入式 MongoDB 測試 <br/> (6.0, 7.0, 8.0)"]
+        N -- 失敗 --> O["Job Failed <br/> (不影響生產環境)"]
+        N -- 通過 --> P["連線生產資料庫"]
         M -- True --> P
         
-        P --> Q[執行 Migration Up]
-        Q -- 失敗 --> R[自動 Rollback]
-        Q -- 成功 --> S[Job Completed]
+        P --> Q["執行 Migration Up"]
+        Q -- 失敗 --> R["自動 Rollback"]
+        Q -- 成功 --> S["Job Completed"]
     end
 
     style Development fill:#e1f5fe,stroke:#01579b

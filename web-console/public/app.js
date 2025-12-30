@@ -115,12 +115,15 @@ function activateStep(stepNum) {
     if (stepNum === 3) {
         loadValidationList();
     }
+    if (stepNum === 4) {
+        loadTestDbList();
+    }
 }
 
 function nextStep() {
     const current = document.querySelector('.step.active');
     const next = parseInt(current.dataset.step) + 1;
-    if (next <= 6) activateStep(next);
+    if (next <= 4) activateStep(next);
 }
 
 // Actions
@@ -506,9 +509,66 @@ function runDockerTest() {
     runCommand('bash', ['scripts/docker-test.sh']);
 }
 
+async function loadTestDbList() {
+    const select = document.getElementById('test-db-select');
+    if (!select) return;
+    
+    // Save current selection if any
+    const currentSelection = select.value;
+    
+    select.innerHTML = '<option value="">Loading...</option>';
+    
+    try {
+        const res = await fetch('/api/projects');
+        const projects = await res.json();
+        
+        select.innerHTML = '<option value="">-- Select Database --</option>';
+        
+        let foundCurrent = false;
+
+        projects.forEach(p => {
+            const option = document.createElement('option');
+            const path = `databases/${p.name}`;
+            option.value = path;
+            option.textContent = p.name;
+            
+            // Priority: 1. Previously selected in this dropdown, 2. Current global project
+            if (currentSelection === path) {
+                option.selected = true;
+                foundCurrent = true;
+            } else if (!currentSelection && currentProjectPath && currentProjectPath.endsWith(p.name)) {
+                option.selected = true;
+                foundCurrent = true;
+            }
+            
+            select.appendChild(option);
+        });
+        
+        // If current project is manual and not in the list
+        if (currentProjectPath && !foundCurrent) {
+             // Check if we already added it (manual path might match p.name logic above but let's be safe)
+             // If the loop above didn't select anything, and we have a currentProjectPath
+             const name = currentProjectPath.split('/').pop();
+             const option = document.createElement('option');
+             option.value = currentProjectPath;
+             option.textContent = `${name} (Current)`;
+             option.selected = true;
+             select.appendChild(option);
+        }
+        
+    } catch (err) {
+        console.error(err);
+        select.innerHTML = '<option value="">Error loading projects</option>';
+    }
+}
+
 function runLocalUp() {
-    if (!currentProjectPath) return alert('Select a project');
-    const configPath = `${currentProjectPath}/config.js`;
+    const select = document.getElementById('test-db-select');
+    const selectedPath = select ? select.value : currentProjectPath;
+    
+    if (!selectedPath) return alert('Please select a database first');
+    
+    const configPath = `${selectedPath}/config.js`;
     runCommand('node', ['src/cli.js', 'up', '-c', configPath, '--dry-run']);
 }
 

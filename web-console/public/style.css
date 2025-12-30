@@ -81,6 +81,10 @@ main {
     border-bottom: 1px solid var(--border-color);
     padding-bottom: 15px;
     margin-bottom: 20px;
+    z-index: 100; /* Ensure steps are above content */
+    position: relative; /* Establish stacking context */
+    background-color: var(--bg-color); /* Ensure background is opaque */
+    flex-shrink: 0; /* Prevent shrinking */
 }
 
 .step {
@@ -234,24 +238,33 @@ main {
     font-family: monospace;
     color: #5C6C75;
 }
-    background-color: var(--primary-dark);
-    color: white;
-    border-color: var(--primary-dark);
-}
 
 .content-area {
     background-color: var(--card-bg);
     padding: 30px;
     border-radius: 16px;
-    min-height: 200px;
+    min-height: 0; /* Allow shrinking below 200px if needed to fit screen */
     box-shadow: 0 4px 10px rgba(0,0,0,0.05);
     border: 1px solid var(--border-color);
-    flex: 1;
-    overflow-y: auto;
+    flex: 0 0 50%; /* Reduced to 50% to prevent overflow */
+    overflow-y: hidden; /* Let children handle scrolling (views) */
+    z-index: 1; /* Ensure content is above other elements if needed, but below modals */
+    position: relative; /* Establish stacking context */
+    display: flex;
+    flex-direction: column;
+    margin-top: 0; /* Ensure no negative margin */
 }
 
-.view { display: none; }
-.view.active { display: block; }
+.view { 
+    display: none; 
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    overflow-y: hidden; /* Let inner containers scroll */
+}
+.view.active { 
+    display: flex; 
+}
 
 .card-grid {
     display: grid;
@@ -345,7 +358,7 @@ input[type="text"]:focus {
     background-color: #001E2B; /* Slate Dark */
     border-radius: 12px;
     padding: 15px;
-    flex: 0 0 35%; /* Fixed 35% height */
+    flex: 0 0 30%; /* Fixed 30% height */
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -475,7 +488,11 @@ code {
 .two-column-layout {
     display: flex;
     gap: 20px;
-    height: 500px; /* Fixed height for the editor area */
+    flex: 1; /* Take remaining height */
+    min-height: 0; /* Allow shrinking */
+    position: relative;
+    z-index: 1;
+    overflow-y: hidden; /* Let children scroll */
 }
 
 .sidebar-list {

@@ -30,7 +30,6 @@
                 <div class="step" data-step="2" onclick="activateStep(2)">2. Manage & Edit</div>
                 <div class="step" data-step="3" onclick="activateStep(3)">3. Validate</div>
                 <div class="step" data-step="4" onclick="activateStep(4)">4. Test</div>
-                <div class="step" data-step="5" onclick="activateStep(5)">5. Deploy</div>
             </div>
 
             <div class="content-area">
@@ -73,7 +72,7 @@
                         <!-- Left: Migration List -->
                         <div class="sidebar-list">
                             <h3>Migrations</h3>
-                            <div id="migration-list-container" class="file-list" style="height: 400px; overflow-y: auto;">
+                            <div id="migration-list-container" class="file-list" style="flex: 1; overflow-y: auto;">
                                 <!-- List items -->
                             </div>
                         </div>
@@ -91,10 +90,10 @@
                             </div>
                             
                             <!-- Code Editor -->
-                            <textarea id="code-editor" style="flex: 1; width: 100%; min-height: 400px; font-family: monospace; padding: 10px; border: 1px solid #ddd; resize: vertical;" spellcheck="false"></textarea>
+                            <textarea id="code-editor" style="flex: 1; width: 100%; font-family: monospace; padding: 10px; border: 1px solid #ddd; resize: none;" spellcheck="false"></textarea>
                             
                             <!-- Config Form Editor -->
-                            <div id="config-editor" style="display: none; flex: 1; width: 100%; min-height: 400px; padding: 30px; border: 1px solid #ddd; background: #fff; overflow-y: auto; box-sizing: border-box;">
+                            <div id="config-editor" style="display: none; flex: 1; width: 100%; padding: 30px; border: 1px solid #ddd; background: #fff; overflow-y: auto; box-sizing: border-box;">
                                 <div class="form-group">
                                     <label>
                                         MongoDB Connection URL
@@ -222,24 +221,15 @@
                 <!-- Step 4: Test -->
                 <div id="view-4" class="view">
                     <h2>Run Tests</h2>
-                    <p>Run Docker-based integration tests.</p>
-                    <div class="button-group">
+                    
+                    <!-- Section 1: Docker Test -->
+                    <div>
+                        <h3 style="margin-top: 0;">Integration Test (Docker)</h3>
+                        <p style="color: #666; margin-bottom: 15px;">
+                            Run a full integration test cycle in an isolated Docker container.
+                            <span class="help-icon" data-tooltip="Starts a fresh MongoDB container, runs all migrations (up), verifies status, rolls back all migrations (down), and runs up again to ensure idempotency.">?</span>
+                        </p>
                         <button class="btn primary" onclick="runDockerTest()">Run Full Docker Test</button>
-                        <button class="btn secondary" onclick="runLocalUp()">Run Local Up (Dry Run)</button>
-                    </div>
-                </div>
-
-                <!-- Step 5: Deploy (Git) -->
-                <div id="view-5" class="view">
-                    <h2>Deploy / Commit</h2>
-                    <p>Commit your changes to the repository.</p>
-                    <div class="form-group">
-                        <label for="commit-msg">Commit Message</label>
-                        <input type="text" id="commit-msg" placeholder="feat: add user fields migration">
-                    </div>
-                    <div class="button-group">
-                        <button class="btn primary" onclick="gitCommit()">Commit & Push</button>
-                        <button class="btn secondary" onclick="gitStatus()">Check Status</button>
                     </div>
                 </div>
             </div>
