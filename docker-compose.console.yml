@@ -10,9 +10,10 @@ services:
       - "3000:3000"
     volumes:
       # Mount your projects directory here
-      - ../my-migration-projects/projects:/projects
+      #- ../my-migration-projects/projects:/projects
+      - ./databases:/databases
       # Mount Docker socket for running tests inside container
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - PROJECTS_DIR=/projects
+      - PROJECTS_DIR=/databases
     restart: unless-stopped

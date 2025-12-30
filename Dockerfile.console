@@ -24,17 +24,17 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci --only=production
+RUN npm install
 
 # Copy application code
-COPY . .
-
-# Create projects directory for volume mount
-RUN mkdir -p /projects
+COPY src ./src
+COPY web-console ./web-console
+COPY scripts ./scripts
+COPY *.js *.cjs *.json ./
+RUN mkdir -p databases
 
 # Environment variables
 ENV NODE_ENV=production
-ENV PROJECTS_DIR=/projects
 ENV PORT=3000
 
 # Expose port

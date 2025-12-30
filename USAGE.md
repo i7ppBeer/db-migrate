@@ -1,42 +1,42 @@
-# MongoDB Migration 使用流程
+# MongoDB Migration Workflow
 
-## 🔄 工作流程圖
+## 🔄 Workflow Diagram
 
-> 如果無法顯示下方的 Mermaid 圖表，請參考底部的文字版流程圖。
+> If the Mermaid diagram below does not render, please refer to the text version at the bottom.
 
 ```mermaid
 flowchart TD
-    subgraph Development ["💻 本地開發階段"]
-        A["開始"] --> B{"新增 Migration?"}
+    subgraph Development ["💻 Local Development"]
+        A["Start"] --> B{"New Migration?"}
         B -- Yes --> C["npm run create <br/> -c projects/xxx/config.js"]
-        C --> D["編輯 Migration 檔案"]
+        C --> D["Edit Migration File"]
         D --> E["npm run validate"]
-        E --> F["bash scripts/docker-test.sh <br/> (Docker 測試)"]
-        F -- 失敗 --> D
-        F -- 通過 --> G["Commit & Push"]
+        E --> F["bash scripts/docker-test.sh <br/> (Docker Test)"]
+        F -- Fail --> D
+        F -- Pass --> G["Commit & Push"]
         B -- No --> G
     end
 
-    subgraph CI_CD ["⚙️ CI/CD 階段"]
+    subgraph CI_CD ["⚙️ CI/CD Pipeline"]
         G --> H["Build Docker Image"]
         H --> I["Push to Registry"]
     end
 
-    subgraph Deployment ["🚀 Kubernetes 部署階段"]
+    subgraph Deployment ["🚀 Kubernetes Deployment"]
         I --> J["Apply ConfigMap & Secret"]
         J --> K["kubectl apply -f <br/> k8s/migration-job.yaml"]
         
-        K --> L["Pod 啟動: <br/> migration-runner"]
+        K --> L["Pod Start: <br/> migration-runner"]
         
         L --> M{"SKIP_TESTS?"}
-        M -- False --> N["嵌入式 MongoDB 測試 <br/> (6.0, 7.0, 8.0)"]
-        N -- 失敗 --> O["Job Failed <br/> (不影響生產環境)"]
-        N -- 通過 --> P["連線生產資料庫"]
+        M -- False --> N["Embedded MongoDB Test <br/> (6.0, 7.0, 8.0)"]
+        N -- Fail --> O["Job Failed <br/> (Safe, Prod untouched)"]
+        N -- Pass --> P["Connect to Prod DB"]
         M -- True --> P
         
-        P --> Q["執行 Migration Up"]
-        Q -- 失敗 --> R["自動 Rollback"]
-        Q -- 成功 --> S["Job Completed"]
+        P --> Q["Execute Migration Up"]
+        Q -- Fail --> R["Auto Rollback"]
+        Q -- Success --> S["Job Completed"]
     end
 
     style Development fill:#e1f5fe,stroke:#01579b
@@ -44,26 +44,26 @@ flowchart TD
     style Deployment fill:#e8f5e9,stroke:#2e7d32
 ```
 
-### 📄 文字版流程圖 (Text Version)
+### 📄 Text Version
 
 ```text
 +-----------------------------------------------------------------------+
-|                        💻 本地開發階段 (Development)                   |
+|                        💻 Local Development                            |
 +-----------------------------------------------------------------------+
 |                                                                       |
-|  [開始] --> <新增 Migration?> -- Yes --> [npm run create]             |
+|  [Start] --> <New Migration?> -- Yes --> [npm run create]             |
 |                  |                          |                         |
 |                  No                         v                         |
-|                  |                  [編輯 Migration 檔案]             |
+|                  |                  [Edit Migration File]             |
 |                  |                          |                         |
 |                  |                          v                         |
 |                  |                  [npm run validate]                |
 |                  |                          |                         |
 |                  |                          v                         |
 |                  |               [bash scripts/docker-test.sh]        |
-|                  |                     (Docker 測試)                  |
+|                  |                     (Docker Test)                  |
 |                  |                          |                         |
-|                  |        (失敗) <----------+----------> (通過)       |
+|                  |        (Fail) <----------+----------> (Pass)       |
 |                  |          |                               |         |
 |                  v          +-------------------------------+         |
 |            [Commit & Push] <--------------------------------+         |
@@ -72,7 +72,7 @@ flowchart TD
                    |
                    v
 +-----------------------------------------------------------------------+
-|                        ⚙️ CI/CD 階段                                  |
+|                        ⚙️ CI/CD Pipeline                               |
 +-----------------------------------------------------------------------+
 |                  |                                                    |
 |                  v                                                    |
@@ -82,7 +82,7 @@ flowchart TD
                                         |
                                         v
 +-----------------------------------------------------------------------+
-|                        🚀 Kubernetes 部署階段                          |
+|                        🚀 Kubernetes Deployment                        |
 +-----------------------------------------------------------------------+
 |                                       |                               |
 |    [Apply ConfigMap & Secret] <-------+                               |
@@ -91,62 +91,62 @@ flowchart TD
 |    [kubectl apply -f k8s/migration-job.yaml]                          |
 |              |                                                        |
 |              v                                                        |
-|    [Pod 啟動: migration-runner]                                       |
+|    [Pod Start: migration-runner]                                      |
 |              |                                                        |
 |              v                                                        |
-|        <SKIP_TESTS?> -- False --> [嵌入式 MongoDB 測試]               |
+|        <SKIP_TESTS?> -- False --> [Embedded MongoDB Test]             |
 |              |                        (6.0, 7.0, 8.0)                 |
 |              |                               |                        |
-|              True                     (失敗) | (通過)                 |
+|              True                     (Fail) | (Pass)                 |
 |              |                          |    |                        |
 |              |                          v    v                        |
-|              +-------------------> [連線生產資料庫]                   |
+|              +-------------------> [Connect to Prod DB]               |
 |                                         |                             |
 |                                         v                             |
-|                                 [執行 Migration Up]                   |
+|                                 [Execute Migration Up]                |
 |                                         |                             |
-|                                (失敗) <-+-> (成功)                    |
+|                                (Fail) <-+-> (Success)                 |
 |                                  |            |                       |
 |                                  v            v                       |
-|                           [自動 Rollback]   [Job Completed]           |
+|                           [Auto Rollback]   [Job Completed]           |
 |                                                                       |
 +-----------------------------------------------------------------------+
 ```
 
-## 📝 常用指令
+## 📝 Common Commands
 
-### 1. 初始化與建立
+### 1. Initialize & Create
 ```bash
-# 建立新的 migration 檔案
-node src/cli.js create "add-user-fields" -c projects/users/config.js
+# Create a new migration file
+node src/cli.js create "add-user-fields" -c databases/users/config.js
 ```
 
-### 2. 驗證與測試
+### 2. Validate & Test
 ```bash
-# 驗證 migration 語法與規則
+# Validate migration syntax and rules
 npm run validate
 
-# 執行完整 Docker 整合測試 (包含 6.0 -> 8.0 升級與 Rollback)
+# Run full Docker integration test (includes 6.0 -> 8.0 upgrade & rollback)
 bash scripts/docker-test.sh
 ```
 
-### 3. 手動執行 (本地開發)
+### 3. Manual Execution (Local)
 ```bash
-# 執行特定專案的 migration
-node src/cli.js up -c projects/orders/config.js
+# Run migration for a specific project
+node src/cli.js up -c databases/orders/config.js
 
-# 查看狀態
-node src/cli.js status -c projects/orders/config.js
+# Check status
+node src/cli.js status -c databases/orders/config.js
 
 # Rollback
-node src/cli.js down -c projects/orders/config.js
+node src/cli.js down -c databases/orders/config.js
 ```
 
-### 4. Kubernetes 部署
+### 4. Kubernetes Deployment
 ```bash
-# 部署 Migration Job
+# Deploy Migration Job
 kubectl apply -f k8s/migration-job.yaml
 
-# 查看日誌
+# Check logs
 kubectl logs -f job/mongodb-migration -n mongodb-migrations
 ```

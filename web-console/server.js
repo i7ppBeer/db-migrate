@@ -98,6 +98,16 @@ app.post('/api/databases', async (req, res) => {
 
   // Don't change this, unless you know what you're doing
   moduleSystem: 'esm',
+
+  // Validation rules
+  validation: {
+    forbidden: {
+      database: ['dropDatabase', 'createUser', 'dropUser', 'updateUser', 'grantRolesToUser', 'revokeRolesFromUser', 'createRole', 'dropRole', 'updateRole', 'repairDatabase', 'cloneDatabase', 'copyDatabase'],
+      collections: ['drop', 'reIndex'],
+      system: ['shutdown', 'killOp', 'killAllSessions', 'serverStatus', 'replSetGetStatus', 'isMaster'],
+      admin: ['enableSharding', 'shardCollection', 'movePrimary', 'removeShard']
+    }
+  }
 };
 `;
     await fs.writeFile(join(dbDir, 'config.js'), configContent);

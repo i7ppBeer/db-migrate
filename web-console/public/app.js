@@ -1152,7 +1152,8 @@ function updateCodeFromForm() {
 
     // Replace or Append validation block
     // Regex to find existing validation block
-    const validationRegex = /validation\s*:\s*{[\s\S]*?}\s*,?/; // Basic match for validation: { ... }
+    // Match validation: { forbidden: { ... } } - handles nested braces by matching specific structure
+    const validationRegex = /validation\s*:\s*\{\s*forbidden\s*:\s*\{[\s\S]*?\}\s*\}\s*,?/;
     
     if (content.match(validationRegex)) {
         // Replace existing
