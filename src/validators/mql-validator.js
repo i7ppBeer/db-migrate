@@ -30,6 +30,29 @@ export class MQLValidator {
   }
 
   /**
+   * Extract function body from migration content
+   * @param {string} content - Migration file content
+   * @param {string} functionName - Function name (up or down)
+   * @returns {string} Function body
+   */
+  extractFunctionBody(content, functionName) {
+    // Match both 'export const up = async' and 'async up' formats
+    const patterns = [
+      new RegExp(`export\\s+const\\s+${functionName}\\s*=\\s*async\\s*\\([^)]*\\)\\s*=>\\s*{([\\s\\S]*?)}\\s*;?`, 'm'),
+      new RegExp(`async\\s+${functionName}\\s*\\([^)]*\\)\\s*{([\\s\\S]*?)}`, 'm'),
+    ];
+    
+    for (const regex of patterns) {
+      const match = content.match(regex);
+      if (match) {
+        return match[1];
+      }
+    }
+    
+    return '';
+  }
+
+  /**
    * Validate migration content
    * @param {string} content - Migration file content
    * @param {string} fileName - File name for error reporting
@@ -38,6 +61,13 @@ export class MQLValidator {
   validateContent(content, fileName = 'unknown') {
     const errors = [];
     const warnings = [];
+
+    // Extract up() and down() function bodies
+    const upBody = this.extractFunctionBody(content, 'up');
+    const downBody = this.extractFunctionBody(content, 'down');
+
+    // Check if up() creates collections - if so, allow drop in down()
+    const hasCreateCollection = this.containsOperation(upBody, 'createCollection');
 
     // Check for ignore comments
     // Format: // migrate-ignore: operation1, operation2
@@ -88,6 +118,20 @@ export class MQLValidator {
           file: fileName,
         });
         continue;
+      }
+
+      // Special case: Allow 'drop' or 'dropCollection' in down() if up() has createCollection
+      if ((operation === 'drop' || operation === 'dropCollection') && hasCreateCollection) {
+        const hasDropInDown = this.containsOperation(downBody, operation);
+        if (hasDropInDown && !this.containsOperation(upBody, operation)) {
+          warnings.push({
+            type: 'allowed-drop-for-create',
+            operation,
+            message: `[ALLOWED] ${operation} in down() because up() creates collection`,
+            file: fileName,
+          });
+          continue; // Skip the forbidden check for this operation
+        }
       }
 
       if (this.containsOperation(content, operation)) {

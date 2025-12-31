@@ -79,6 +79,7 @@ export const validationRules = {
     // Dangerous collection operations
     collections: [
       'drop',
+      'dropCollection',
       'reIndex',
     ],
     
@@ -119,6 +120,7 @@ export const validationRules = {
     
     // Collections
     drop: 'DATA LOSS: Deletes the entire collection',
+    dropCollection: 'DATA LOSS: Deletes the entire collection',
     reIndex: 'BLOCKING: Locks the collection, impacts availability',
     
     // System
