@@ -1,7 +1,7 @@
 export default {
   mongodb: {
     url: process.env.MONGODB_URL || "mongodb://localhost:27017",
-    databaseName: process.env.USERS_DB_NAME || "users_db"
+    databaseName: process.env.USERS_DB_NAME || "users"
   },
   migrationsDir: "migrations",
   changelogCollectionName: "changelog",

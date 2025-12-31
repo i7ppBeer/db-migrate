@@ -1,0 +1,53 @@
+# MongoDB Configuration
+mongodb:
+  databases:
+    - name: products
+      host: mongodb.mongodb.svc.cluster.local
+      port: 27017
+      username: products_user
+      password: products_pwd
+      database: products
+    - name: users
+      host: mongodb.mongodb.svc.cluster.local
+      port: 27017
+      username: users_user
+      password: users_pwd
+      database: users
+
+# Override mongodb-migrate subchart values
+mongodb-migrate:
+  runMode: deployment  # Use Job instead of Deployment
+  image:
+    repository: mongodb-migrate
+    pullPolicy: IfNotPresent
+    tag: "latest"
+  
+  # Resource limits
+  resources:
+    limits:
+      cpu: 200m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  
+  # Migration Configuration
+  dryRun: false
+  dbNames:
+    # - products
+    - users
+  
+  # Use the auto-generated secret
+  existingSecret: "migration-app-mongodb-secret"
+  
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    fsGroup: 1001
+  
+  securityContext:
+    capabilities:
+      drop:
+      - ALL
+    readOnlyRootFilesystem: false
+    allowPrivilegeEscalation: false

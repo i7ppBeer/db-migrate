@@ -35,6 +35,7 @@ tolerations: []
 affinity: {}
 
 # Migration Configuration
+runMode: job # Options: "job" or "deployment"
 dryRun: false
 dbNames: [] # List of database names to migrate, e.g., ["products", "users"]
 

@@ -4,7 +4,8 @@ services:
   migration-console:
     build:
       context: .
-      dockerfile: Dockerfile.console
+      dockerfile: Dockerfile
+      target: console
     image: mongodb-migrate-console:latest
     ports:
       - "3000:3000"

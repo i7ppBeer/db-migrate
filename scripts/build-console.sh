@@ -5,7 +5,7 @@ IMAGE_NAME="mongodb-migrate-console"
 TAG="latest"
 
 echo "🏗️  Building Web Console Docker Image..."
-docker build -f Dockerfile.console -t ${IMAGE_NAME}:${TAG} .
+docker build --target console -t ${IMAGE_NAME}:${TAG} .
 
 echo "[OK] Build successful: ${IMAGE_NAME}:${TAG}"
 echo ""

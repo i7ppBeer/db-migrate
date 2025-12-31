@@ -1,5 +1,7 @@
-# Multi-stage Dockerfile for MongoDB Migration Testing and Execution
-# Uses official MongoDB Docker images for testing via Docker-in-Docker
+# Multi-stage Dockerfile for MongoDB Migration
+# Build targets: 
+#   - migration (default): Production migration runner
+#   - console: Web console for development
 
 FROM node:20-slim AS base
 
@@ -19,34 +21,29 @@ RUN apt-get update && apt-get install -y \
     && apt-get install -y docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
-# Install mongosh (MongoDB Shell) - works with all MongoDB versions
-RUN curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc | \
-    gpg --dearmor -o /usr/share/keyrings/mongodb-8.0.gpg && \
-    echo "deb [ signed-by=/usr/share/keyrings/mongodb-8.0.gpg ] http://repo.mongodb.org/apt/debian $(lsb_release -cs)/mongodb-org/8.0 main" | \
-    tee /etc/apt/sources.list.d/mongodb-org-8.0.list && \
-    apt-get update && \
-    apt-get install -y mongodb-mongosh && \
-    rm -rf /var/lib/apt/lists/*
-
-# Create directories
-RUN mkdir -p /data/db /var/log/mongodb && \
-    chmod -R 777 /data/db /var/log/mongodb
-
 # Set working directory
 WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
 
-# Install Node.js dependencies
+#############################################
+# Migration Stage (Production)
+#############################################
+FROM base AS migration
+
+# Install production dependencies only
 RUN npm ci --only=production
 
 # Copy application code
 COPY . .
 
-# Copy migration runner script
-COPY scripts/k8s-migration-runner.sh /usr/local/bin/migration-runner
-RUN chmod +x /usr/local/bin/migration-runner
+# Make scripts executable
+RUN chmod +x scripts/*.sh
+
+# Create directories
+RUN mkdir -p /data/db /var/log/mongodb && \
+    chmod -R 777 /data/db /var/log/mongodb
 
 # Create non-root user
 RUN useradd -m mongodb-migrate || echo "User exists" && \
@@ -63,5 +60,33 @@ ENV MONGODB_TEST_MODE=enabled
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD node -e "console.log('OK')" || exit 1
 
-# Default command (will be overridden by K8s Job)
-CMD ["migration-runner"]
+# Default command (will be overridden by K8s)
+CMD ["/bin/bash", "-c", "/app/scripts/k8s-runner.sh"]
+
+#############################################
+# Console Stage (Development)
+#############################################
+FROM base AS console
+
+# Install git for version control features
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+# Install all dependencies (including dev dependencies)
+RUN npm install
+
+# Copy application code
+COPY src ./src
+COPY web-console ./web-console
+COPY scripts ./scripts
+COPY *.js *.cjs *.json ./
+RUN mkdir -p databases
+
+# Environment variables
+ENV NODE_ENV=production
+ENV PORT=3000
+
+# Expose port
+EXPOSE 3000
+
+# Start Web Console
+CMD ["npm", "run", "console"]

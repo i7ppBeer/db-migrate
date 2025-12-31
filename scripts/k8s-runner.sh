@@ -1,13 +1,31 @@
 #!/bin/bash
-set -e
+# Note: Not using 'set -e' here to allow error handling
+
+# Trap handler for cleanup
+cleanup() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ] && [ "$MIGRATION_FAILED" = "true" ] && [ "$DRY_RUN" != "true" ]; then
+        echo "========================================"
+        echo "[TRAP] Caught exit, running rollback..."
+        echo "========================================"
+        node src/cli.js down -c "$CURRENT_CONFIG" 2>&1 || true
+        echo "========================================"
+    fi
+}
+
+trap cleanup EXIT
 
 # Colors
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m'
 
 log_info() { echo -e "${BLUE}ℹ️  $1${NC}"; }
 log_success() { echo -e "${GREEN}✅ $1${NC}"; }
+log_warning() { echo -e "${YELLOW}⚠️  $1${NC}"; }
+log_error() { echo -e "${RED}❌ $1${NC}"; }
 
 # Check inputs
 if [ -z "$DB_NAMES" ]; then
@@ -47,7 +65,18 @@ for DB in "${DBS[@]}"; do
     fi
 
     log_info "Running migration for $DB..."
-    node src/cli.js $CMD -c "$CONFIG_FILE"
+    
+    # Store config for trap handler
+    export CURRENT_CONFIG="$CONFIG_FILE"
+    export MIGRATION_FAILED=false
+    
+    # Run migration
+    if ! node src/cli.js $CMD -c "$CONFIG_FILE" 2>&1; then
+        export MIGRATION_FAILED=true
+        log_error "Migration failed for $DB!"
+        exit 1
+    fi
+    
     log_success "Migration step complete for $DB"
 done
 

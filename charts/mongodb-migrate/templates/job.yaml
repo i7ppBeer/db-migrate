@@ -1,15 +1,13 @@
-{{- if eq .Values.runMode "deployment" }}
-apiVersion: apps/v1
-kind: Deployment
+{{- if eq .Values.runMode "job" }}
+apiVersion: batch/v1
+kind: Job
 metadata:
-  name: {{ include "mongodb-migrate.fullname" . }}
+  name: {{ include "mongodb-migrate.fullname" . }}-{{ now | date "20060102-150405" }}
   labels:
     {{- include "mongodb-migrate.labels" . | nindent 4 }}
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      {{- include "mongodb-migrate.selectorLabels" . | nindent 6 }}
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
   template:
     metadata:
       {{- with .Values.podAnnotations }}
@@ -19,6 +17,7 @@ spec:
       labels:
         {{- include "mongodb-migrate.selectorLabels" . | nindent 8 }}
     spec:
+      restartPolicy: Never
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -31,9 +30,8 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          # Run migration and then sleep to prevent crash loop in Deployment
           command: ["/bin/bash", "-c"]
-          args: ["/app/scripts/k8s-runner.sh && echo 'Migration completed, sleeping...' && sleep infinity"]
+          args: ["/app/scripts/k8s-runner.sh"]
           env:
             - name: DB_NAMES
               value: "{{ join "," .Values.dbNames }}"
