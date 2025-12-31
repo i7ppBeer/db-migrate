@@ -2,6 +2,11 @@
 
 ## 🔄 Workflow Diagram
 
+> 📌 **Visual Formats Available:**
+> - **Draw.io**: [workflow-diagram.drawio](docs/workflow-diagram.drawio) - Open with VS Code Draw.io Integration or [draw.io](https://app.diagrams.net/)
+> - **Mermaid**: See below (renders on GitHub)
+> - **Text**: See bottom of this section
+
 > If the Mermaid diagram below does not render, please refer to the text version at the bottom.
 
 ```mermaid

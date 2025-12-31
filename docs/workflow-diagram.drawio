@@ -1,0 +1,194 @@
+<mxfile host="app.diagrams.net" modified="2025-12-31T00:00:00.000Z" agent="5.0" version="24.0.0" etag="draw.io" type="device">
+  <diagram name="MongoDB Migration Workflow" id="mongodb-migration-workflow">
+    <mxGraphModel dx="1422" dy="794" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        
+        <!-- Local Development Section -->
+        <mxCell id="dev-container" value="💻 Local Development" style="swimlane;fontStyle=1;childLayout=stackLayout;horizontal=1;startSize=40;fillColor=#E1F5FE;horizontalStack=0;resizeParent=1;resizeParentMax=0;resizeLast=0;collapsible=1;marginBottom=0;swimlaneFillColor=#E1F5FE;strokeColor=#01579B;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="400" height="520" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="start" value="Start" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#B3E5FC;strokeColor=#01579B;" vertex="1" parent="dev-container">
+          <mxGeometry x="150" y="60" width="100" height="40" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="new-migration" value="New Migration?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#B3E5FC;strokeColor=#01579B;" vertex="1" parent="dev-container">
+          <mxGeometry x="135" y="130" width="130" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="npm-create" value="npm run create&#xa;-c databases/xxx/config.js" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#B3E5FC;strokeColor=#01579B;" vertex="1" parent="dev-container">
+          <mxGeometry x="240" y="240" width="140" height="50" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="edit-file" value="Edit Migration File" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#B3E5FC;strokeColor=#01579B;" vertex="1" parent="dev-container">
+          <mxGeometry x="240" y="310" width="140" height="40" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="validate" value="npm run validate" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#B3E5FC;strokeColor=#01579B;" vertex="1" parent="dev-container">
+          <mxGeometry x="240" y="370" width="140" height="40" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="docker-test" value="bash scripts/docker-test.sh&#xa;(Docker Test)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#B3E5FC;strokeColor=#01579B;" vertex="1" parent="dev-container">
+          <mxGeometry x="240" y="430" width="140" height="50" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="commit-push" value="Commit &amp; Push" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#4FC3F7;strokeColor=#01579B;fontStyle=1;" vertex="1" parent="dev-container">
+          <mxGeometry x="30" y="330" width="120" height="40" as="geometry" />
+        </mxCell>
+        
+        <!-- CI/CD Pipeline Section -->
+        <mxCell id="cicd-container" value="⚙️ CI/CD Pipeline" style="swimlane;fontStyle=1;childLayout=stackLayout;horizontal=1;startSize=40;fillColor=#FFF3E0;horizontalStack=0;resizeParent=1;resizeParentMax=0;resizeLast=0;collapsible=1;marginBottom=0;swimlaneFillColor=#FFF3E0;strokeColor=#FF6F00;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="480" y="40" width="400" height="200" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="build-image" value="Build Docker Image" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE0B2;strokeColor=#FF6F00;" vertex="1" parent="cicd-container">
+          <mxGeometry x="130" y="70" width="140" height="40" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="push-registry" value="Push to Registry" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE0B2;strokeColor=#FF6F00;" vertex="1" parent="cicd-container">
+          <mxGeometry x="130" y="130" width="140" height="40" as="geometry" />
+        </mxCell>
+        
+        <!-- Kubernetes Deployment Section -->
+        <mxCell id="k8s-container" value="🚀 Kubernetes Deployment" style="swimlane;fontStyle=1;childLayout=stackLayout;horizontal=1;startSize=40;fillColor=#E8F5E9;horizontalStack=0;resizeParent=1;resizeParentMax=0;resizeLast=0;collapsible=1;marginBottom=0;swimlaneFillColor=#E8F5E9;strokeColor=#2E7D32;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="920" y="40" width="440" height="640" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="apply-config" value="Apply ConfigMap &amp; Secret" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;" vertex="1" parent="k8s-container">
+          <mxGeometry x="150" y="60" width="140" height="40" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="kubectl-apply" value="kubectl apply -f&#xa;k8s/migration-job.yaml" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;" vertex="1" parent="k8s-container">
+          <mxGeometry x="150" y="120" width="140" height="50" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="pod-start" value="Pod Start:&#xa;migration-runner" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;" vertex="1" parent="k8s-container">
+          <mxGeometry x="150" y="190" width="140" height="50" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="skip-tests" value="SKIP_TESTS?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;" vertex="1" parent="k8s-container">
+          <mxGeometry x="160" y="260" width="120" height="80" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="embedded-test" value="Embedded MongoDB Test&#xa;(6.0, 7.0, 8.0)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;" vertex="1" parent="k8s-container">
+          <mxGeometry x="300" y="270" width="120" height="60" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="job-failed" value="Job Failed&#xa;(Safe, Prod untouched)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFCCBC;strokeColor=#D84315;" vertex="1" parent="k8s-container">
+          <mxGeometry x="300" y="360" width="120" height="50" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="connect-prod" value="Connect to Prod DB" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;" vertex="1" parent="k8s-container">
+          <mxGeometry x="150" y="390" width="140" height="40" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="execute-migration" value="Execute Migration Up" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;" vertex="1" parent="k8s-container">
+          <mxGeometry x="150" y="450" width="140" height="40" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="auto-rollback" value="Auto Rollback" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFCCBC;strokeColor=#D84315;" vertex="1" parent="k8s-container">
+          <mxGeometry x="280" y="520" width="120" height="40" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="job-completed" value="Job Completed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#81C784;strokeColor=#2E7D32;fontStyle=1;" vertex="1" parent="k8s-container">
+          <mxGeometry x="20" y="520" width="120" height="40" as="geometry" />
+        </mxCell>
+        
+        <!-- Arrows in Local Development -->
+        <mxCell id="arrow1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#01579B;" edge="1" parent="1" source="start" target="new-migration">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow2" value="Yes" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#01579B;" edge="1" parent="1" source="new-migration" target="npm-create">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow3" value="No" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#01579B;" edge="1" parent="1" source="new-migration" target="commit-push">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#01579B;" edge="1" parent="1" source="npm-create" target="edit-file">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#01579B;" edge="1" parent="1" source="edit-file" target="validate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#01579B;" edge="1" parent="1" source="validate" target="docker-test">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow7" value="Fail" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#D32F2F;" edge="1" parent="1" source="docker-test" target="edit-file">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="460" y="525" />
+              <mxPoint x="460" y="390" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="arrow8" value="Pass" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;" edge="1" parent="1" source="docker-test" target="commit-push">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Arrows CI/CD -->
+        <mxCell id="arrow9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#FF6F00;" edge="1" parent="1" source="commit-push" target="build-image">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#FF6F00;" edge="1" parent="1" source="build-image" target="push-registry">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Arrows K8s -->
+        <mxCell id="arrow11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;" edge="1" parent="1" source="push-registry" target="apply-config">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;" edge="1" parent="1" source="apply-config" target="kubectl-apply">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;" edge="1" parent="1" source="kubectl-apply" target="pod-start">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;" edge="1" parent="1" source="pod-start" target="skip-tests">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow15" value="False" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;" edge="1" parent="1" source="skip-tests" target="embedded-test">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow16" value="Fail" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#D32F2F;" edge="1" parent="1" source="embedded-test" target="job-failed">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow17" value="Pass" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;" edge="1" parent="1" source="embedded-test" target="connect-prod">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow18" value="True" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;" edge="1" parent="1" source="skip-tests" target="connect-prod">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow19" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;" edge="1" parent="1" source="connect-prod" target="execute-migration">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow20" value="Fail" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#D32F2F;" edge="1" parent="1" source="execute-migration" target="auto-rollback">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="arrow21" value="Success" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;" edge="1" parent="1" source="execute-migration" target="job-completed">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
