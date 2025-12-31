@@ -75,16 +75,16 @@ jobs:
       env:
         MONGODB_URL: mongodb://admin:admin123@localhost:27017/products?authSource=admin
       run: |
-        npm run status -- --db products
-        npm run up -- --db products
-        npm run status -- --db products
+        npm run status -- -c databases/products/config.js
+        npm run up -- -c databases/products/config.js
+        npm run status -- -c databases/products/config.js
     
     - name: Test rollback (products)
       env:
         MONGODB_URL: mongodb://admin:admin123@localhost:27017/products?authSource=admin
       run: |
-        npm run down -- --db products
-        npm run up -- --db products
+        npm run down -- -c databases/products/config.js
+        npm run up -- -c databases/products/config.js
     
     - name: Cleanup
       if: always()
