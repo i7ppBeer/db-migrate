@@ -26,8 +26,11 @@ jobs:
     - name: Install dependencies
       run: npm ci
     
-    - name: Run validation
-      run: npm run validate
+    - name: Run validation (products)
+      run: npm run validate -- -c databases/products/config.js
+    
+    - name: Run validation (users)
+      run: npm run validate -- -c databases/users/config.js
     
     - name: Check for forbidden operations
       run: |
