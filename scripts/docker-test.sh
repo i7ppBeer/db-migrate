@@ -69,6 +69,13 @@ for VERSION in "${VERSIONS[@]}"; do
         if [ ! -d "$PROJECT_PATH" ]; then continue; fi
         
         PROJECT_NAME=$(basename "$PROJECT_PATH")
+        
+        # Skip test databases with intentional failures
+        if [[ "$PROJECT_NAME" == "dangerous_legacy" || "$PROJECT_NAME" == "users" ]]; then
+            print_info "Skipping $PROJECT_NAME (contains test migrations)"
+            continue
+        fi
+        
         print_header "Testing Project: $PROJECT_NAME on MongoDB $VERSION"
         
         # Start Container for this specific test case
