@@ -117,81 +117,84 @@ jobs:
         chmod +x scripts/docker-test.sh
         MIN_VERSION=6.0 MAX_VERSION=7.0 ./scripts/docker-test.sh
 
-  deploy-staging:
-    name: Deploy to Staging
-    runs-on: ubuntu-latest
-    needs: [test, docker-test]
-    if: github.ref == 'refs/heads/develop'
-    environment: staging
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Setup kubectl
-      uses: azure/setup-kubectl@v3
-    
-    - name: Configure Kubernetes
-      env:
-        KUBE_CONFIG: ${{ secrets.KUBE_CONFIG_STAGING }}
-      run: |
-        mkdir -p $HOME/.kube
-        echo "$KUBE_CONFIG" > $HOME/.kube/config
-    
-    - name: Create MongoDB secret
-      env:
-        MONGODB_URL: ${{ secrets.MONGODB_URL_STAGING }}
-      run: |
-        kubectl create secret generic mongodb-credentials \
-          --from-literal=MONGODB_URL="$MONGODB_URL" \
-          --namespace=mongodb-migrations \
-          --dry-run=client -o yaml | kubectl apply -f -
-    
-    - name: Deploy migrations
-      run: |
-        chmod +x scripts/k8s-deploy.sh
-        NAMESPACE=mongodb-migrations ./scripts/k8s-deploy.sh
+  # Deployment jobs are disabled by default - they require actual K8s cluster configuration
+  # Uncomment and configure KUBE_CONFIG_STAGING/PRODUCTION and MONGODB_URL_STAGING/PRODUCTION secrets to enable
+  # 
+  # deploy-staging:
+  #   name: Deploy to Staging
+  #   runs-on: ubuntu-latest
+  #   needs: [test, docker-test]
+  #   if: github.ref == 'refs/heads/develop'
+  #   environment: staging
+  #   
+  #   steps:
+  #   - uses: actions/checkout@v4
+  #   
+  #   - name: Setup kubectl
+  #     uses: azure/setup-kubectl@v3
+  #   
+  #   - name: Configure Kubernetes
+  #     env:
+  #       KUBE_CONFIG: ${{ secrets.KUBE_CONFIG_STAGING }}
+  #     run: |
+  #       mkdir -p $HOME/.kube
+  #       echo "$KUBE_CONFIG" > $HOME/.kube/config
+  #   
+  #   - name: Create MongoDB secret
+  #     env:
+  #       MONGODB_URL: ${{ secrets.MONGODB_URL_STAGING }}
+  #     run: |
+  #       kubectl create secret generic mongodb-credentials \
+  #         --from-literal=MONGODB_URL="$MONGODB_URL" \
+  #         --namespace=mongodb-migrations \
+  #         --dry-run=client -o yaml | kubectl apply -f -
+  #   
+  #   - name: Deploy migrations
+  #     run: |
+  #       chmod +x scripts/k8s-deploy.sh
+  #       NAMESPACE=mongodb-migrations ./scripts/k8s-deploy.sh
 
-  deploy-production:
-    name: Deploy to Production
-    runs-on: ubuntu-latest
-    needs: [test, docker-test]
-    if: github.ref == 'refs/heads/main'
-    environment: production
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Setup kubectl
-      uses: azure/setup-kubectl@v3
-    
-    - name: Configure Kubernetes
-      env:
-        KUBE_CONFIG: ${{ secrets.KUBE_CONFIG_PRODUCTION }}
-      run: |
-        mkdir -p $HOME/.kube
-        echo "$KUBE_CONFIG" > $HOME/.kube/config
-    
-    - name: Create MongoDB secret
-      env:
-        MONGODB_URL: ${{ secrets.MONGODB_URL_PRODUCTION }}
-      run: |
-        kubectl create secret generic mongodb-credentials \
-          --from-literal=MONGODB_URL="$MONGODB_URL" \
-          --namespace=mongodb-migrations \
-          --dry-run=client -o yaml | kubectl apply -f -
-    
-    - name: Deploy migrations
-      run: |
-        chmod +x scripts/k8s-deploy.sh
-        NAMESPACE=mongodb-migrations TIMEOUT=900 ./scripts/k8s-deploy.sh
-    
-    - name: Verify deployment
-      run: |
-        kubectl get jobs -n mongodb-migrations
-        kubectl logs -n mongodb-migrations -l app=mongodb-migration --tail=50
-    
-    - name: Create deployment tag
-      if: success()
-      run: |
-        git tag "deployment-$(date +%Y%m%d-%H%M%S)"
-        git push origin --tags
+  # deploy-production:
+  #   name: Deploy to Production
+  #   runs-on: ubuntu-latest
+  #   needs: [test, docker-test]
+  #   if: github.ref == 'refs/heads/main'
+  #   environment: production
+  #   
+  #   steps:
+  #   - uses: actions/checkout@v4
+  #   
+  #   - name: Setup kubectl
+  #     uses: azure/setup-kubectl@v3
+  #   
+  #   - name: Configure Kubernetes
+  #     env:
+  #       KUBE_CONFIG: ${{ secrets.KUBE_CONFIG_PRODUCTION }}
+  #     run: |
+  #       mkdir -p $HOME/.kube
+  #       echo "$KUBE_CONFIG" > $HOME/.kube/config
+  #   
+  #   - name: Create MongoDB secret
+  #     env:
+  #       MONGODB_URL: ${{ secrets.MONGODB_URL_PRODUCTION }}
+  #     run: |
+  #       kubectl create secret generic mongodb-credentials \
+  #         --from-literal=MONGODB_URL="$MONGODB_URL" \
+  #         --namespace=mongodb-migrations \
+  #         --dry-run=client -o yaml | kubectl apply -f -
+  #   
+  #   - name: Deploy migrations
+  #     run: |
+  #       chmod +x scripts/k8s-deploy.sh
+  #       NAMESPACE=mongodb-migrations TIMEOUT=900 ./scripts/k8s-deploy.sh
+  #   
+  #   - name: Verify deployment
+  #     run: |
+  #       kubectl get jobs -n mongodb-migrations
+  #       kubectl logs -n mongodb-migrations -l app=mongodb-migration --tail=50
+  #   
+  #   - name: Create deployment tag
+  #     if: success()
+  #     run: |
+  #       git tag "deployment-$(date +%Y%m%d-%H%M%S)"
+  #       git push origin --tags
