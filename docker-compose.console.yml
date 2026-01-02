@@ -7,14 +7,13 @@ services:
       dockerfile: Dockerfile
       target: console
     image: mongodb-migrate-console:latest
-    ports:
-      - "3000:3000"
+    network_mode: host
     volumes:
       # Mount your projects directory here
       #- ../my-migration-projects/projects:/projects
-      - ./databases:/databases
+      - ./databases:/app/databases
       # Mount Docker socket for running tests inside container
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - PROJECTS_DIR=/databases
+      - PROJECTS_DIR=/app/databases
     restart: unless-stopped
