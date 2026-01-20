@@ -1,0 +1,269 @@
+# ============================================================
+# Azure DevOps Pipeline for DB-Migrate
+# Build and Deploy Migration Images
+# ============================================================
+
+trigger:
+  branches:
+    include:
+      - main
+      - release/*
+  paths:
+    include:
+      - migrations/**
+      - src/**
+      - Dockerfile*
+      - package*.json
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  # Container Registry (請根據實際環境修改)
+  containerRegistry: 'YourAzureContainerRegistry'  # Azure DevOps Service Connection 名稱
+  imageRepository: 'db-migrate'
+  dockerfilePath: 'Dockerfile.migrations'
+  
+  # Version tagging
+  tag: '$(Build.BuildId)'
+  semanticVersion: '2.0.$(Build.BuildId)'
+
+stages:
+# ============================================================
+# Stage 1: CI - Test & Validate
+# ============================================================
+- stage: CI
+  displayName: 'CI: Test & Validate'
+  jobs:
+  - job: Test
+    displayName: 'Run Tests'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: NodeTool@0
+      inputs:
+        versionSpec: '20.x'
+      displayName: 'Install Node.js'
+
+    - script: npm ci
+      displayName: 'Install Dependencies'
+
+    - script: npm run lint
+      displayName: 'Lint Code'
+
+    - script: npm test
+      displayName: 'Run Unit Tests'
+
+  - job: ValidateMigrations
+    displayName: 'Validate Migrations'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: NodeTool@0
+      inputs:
+        versionSpec: '20.x'
+      displayName: 'Install Node.js'
+
+    - script: npm ci
+      displayName: 'Install Dependencies'
+
+    - script: |
+        echo "Validating migration files..."
+        node src/cli.js validate --database databases/mongodb/test-success
+        node src/cli.js validate --database databases/mariadb/test-success
+      displayName: 'Validate Migration Syntax'
+
+# ============================================================
+# Stage 2: Build - Create Docker Image
+# ============================================================
+- stage: Build
+  displayName: 'Build: Create Image'
+  dependsOn: CI
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+  jobs:
+  - job: BuildImage
+    displayName: 'Build & Push Image'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    # Build base image
+    - task: Docker@2
+      displayName: 'Build Base Image'
+      inputs:
+        command: build
+        dockerfile: 'Dockerfile'
+        buildContext: '.'
+        arguments: '--target runner -t $(imageRepository):base'
+        tags: 'base'
+
+    # Build migration image
+    - task: Docker@2
+      displayName: 'Build Migration Image'
+      inputs:
+        command: build
+        dockerfile: '$(dockerfilePath)'
+        buildContext: '.'
+        arguments: |
+          --build-arg BASE_IMAGE=$(imageRepository):base
+          --build-arg MIGRATIONS_PATH=./migrations
+          --build-arg BUILD_VERSION=$(semanticVersion)
+          --build-arg GIT_COMMIT=$(Build.SourceVersion)
+          --build-arg BUILD_DATE=$(Build.BuildNumber)
+        tags: |
+          $(tag)
+          $(semanticVersion)
+          latest
+
+    # Push to registry
+    - task: Docker@2
+      displayName: 'Push to Registry'
+      inputs:
+        command: push
+        containerRegistry: '$(containerRegistry)'
+        repository: '$(imageRepository)'
+        tags: |
+          $(tag)
+          $(semanticVersion)
+          latest
+
+    # Save image info for deployment
+    - script: |
+        echo "##vso[task.setvariable variable=imageTag;isOutput=true]$(semanticVersion)"
+        echo "Image built: $(imageRepository):$(semanticVersion)"
+      name: imageInfo
+      displayName: 'Output Image Info'
+
+# ============================================================
+# Stage 3: Deploy to Staging
+# ============================================================
+- stage: DeployStaging
+  displayName: 'Deploy: Staging'
+  dependsOn: Build
+  condition: succeeded()
+  variables:
+    imageTag: $[stageDependencies.Build.BuildImage.outputs['imageInfo.imageTag']]
+  jobs:
+  - deployment: DeployToStaging
+    displayName: 'Deploy to Staging'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'staging'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+
+          - task: HelmInstaller@1
+            displayName: 'Install Helm'
+            inputs:
+              helmVersionToInstall: 'latest'
+
+          - task: Kubernetes@1
+            displayName: 'Create/Update Secret'
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceEndpoint: 'staging-k8s-connection'
+              namespace: 'staging'
+              command: 'apply'
+              useConfigurationFile: false
+              secretType: 'generic'
+              secretName: 'mongodb-staging-secret'
+              # 密碼應從 Azure Key Vault 或 Variable Group 取得
+              secretArguments: '--from-literal=mongodb-password=$(STAGING_DB_PASSWORD)'
+
+          - task: HelmDeploy@0
+            displayName: 'Helm Deploy to Staging'
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceEndpoint: 'staging-k8s-connection'
+              namespace: 'staging'
+              command: 'upgrade'
+              chartType: 'FilePath'
+              chartPath: 'charts/db-migrate'
+              releaseName: 'db-migrate-staging'
+              overrideValues: |
+                image.repository=$(containerRegistry)/$(imageRepository)
+                image.tag=$(imageTag)
+                mongodb.host=mongodb-staging.staging.svc.cluster.local
+                mongodb.database=staging_db
+                mongodb.auth.enabled=true
+                mongodb.auth.username=admin
+                mongodb.auth.existingSecret=mongodb-staging-secret
+                migration.command=up
+                migration.validation.enabled=true
+
+          - script: |
+              echo "Waiting for migration job to complete..."
+              kubectl wait --for=condition=complete job -l app.kubernetes.io/instance=db-migrate-staging -n staging --timeout=300s
+            displayName: 'Wait for Migration'
+
+# ============================================================
+# Stage 4: Deploy to Production (Manual Approval)
+# ============================================================
+- stage: DeployProduction
+  displayName: 'Deploy: Production'
+  dependsOn: DeployStaging
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  variables:
+    imageTag: $[stageDependencies.Build.BuildImage.outputs['imageInfo.imageTag']]
+  jobs:
+  - deployment: DeployToProduction
+    displayName: 'Deploy to Production'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'production'  # 此環境應設定 Approval Gate
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+
+          - task: HelmInstaller@1
+            displayName: 'Install Helm'
+            inputs:
+              helmVersionToInstall: 'latest'
+
+          - task: Kubernetes@1
+            displayName: 'Verify Secret Exists'
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceEndpoint: 'production-k8s-connection'
+              namespace: 'production'
+              command: 'get'
+              arguments: 'secret mongodb-production-secret'
+            continueOnError: false
+
+          - task: HelmDeploy@0
+            displayName: 'Helm Deploy to Production'
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceEndpoint: 'production-k8s-connection'
+              namespace: 'production'
+              command: 'upgrade'
+              chartType: 'FilePath'
+              chartPath: 'charts/db-migrate'
+              releaseName: 'db-migrate-production'
+              overrideValues: |
+                image.repository=$(containerRegistry)/$(imageRepository)
+                image.tag=$(imageTag)
+                mongodb.host=mongodb-production.production.svc.cluster.local
+                mongodb.database=production_db
+                mongodb.auth.enabled=true
+                mongodb.auth.username=admin
+                mongodb.auth.existingSecret=mongodb-production-secret
+                migration.command=up
+                migration.validation.enabled=true
+                migration.validation.allowDangerous=false
+                job.backoffLimit=5
+                job.ttlSecondsAfterFinished=86400
+
+          - script: |
+              echo "Waiting for migration job to complete..."
+              kubectl wait --for=condition=complete job -l app.kubernetes.io/instance=db-migrate-production -n production --timeout=600s
+              
+              echo "Migration completed successfully!"
+              kubectl logs -l app.kubernetes.io/instance=db-migrate-production -n production --tail=100
+            displayName: 'Wait and Verify Migration'

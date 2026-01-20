@@ -1,30 +1,41 @@
 {
-  "name": "mongodb-migrate-ddl",
-  "version": "1.0.0",
-  "description": "MongoDB DDL migration management with validation and automated testing",
-  "main": "src/index.js",
+  "name": "db-migrate",
+  "version": "2.0.0",
+  "description": "Multi-database migration management (MongoDB & MariaDB/MySQL) with validation and testing",
+  "main": "src/cli.js",
   "type": "module",
+  "bin": {
+    "db-migrate": "./src/cli.js"
+  },
   "scripts": {
-    "init": "node src/cli.js init",
-    "create": "node src/cli.js create",
-    "validate": "node src/cli.js validate",
-    "test:local": "node src/cli.js test-local",
+    "start": "node src/cli.js --help",
+    "status": "node src/cli.js status",
     "up": "node src/cli.js up",
     "down": "node src/cli.js down",
-    "status": "node src/cli.js status",
+    "validate": "node src/cli.js validate",
+    "test:migration": "node src/cli.js test",
+    "test:all": "node src/cli.js test-all",
     "test": "vitest",
     "test:integration": "vitest run test/integration.test.js",
     "lint": "eslint .",
-    "docker:test": "bash scripts/docker-test.sh",
-    "k8s:deploy": "bash scripts/k8s-deploy.sh",
-    "console": "node web-console/server.js"
+    "console": "node web-console/server.js",
+    "docker:up": "docker compose up -d mongodb mariadb",
+    "docker:down": "docker compose down",
+    "docker:test": "docker compose run --rm test-all",
+    "docker:build": "docker build -t db-migrate:2.0.0 --target runner .",
+    "k8s:setup": "bash scripts/setup-k8s-dev.sh",
+    "run:tests": "bash scripts/run-tests.sh"
   },
   "keywords": [
     "mongodb",
+    "mariadb",
+    "mysql",
     "migration",
     "ddl",
+    "dcl",
     "database",
-    "kubernetes"
+    "kubernetes",
+    "helm"
   ],
   "author": "i7ppBeer",
   "license": "MIT",
@@ -34,6 +45,7 @@
     "express": "^5.2.1",
     "migrate-mongo": "^14.0.7",
     "mongodb": "^6.10.0",
+    "mysql2": "^3.16.1",
     "open": "^11.0.0",
     "socket.io": "^4.8.3"
   },

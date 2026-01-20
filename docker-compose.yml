@@ -1,0 +1,125 @@
+# ============================================================
+# Docker Compose for Database Migration Testing
+# Includes: MongoDB, MariaDB, Migration Runner
+# ============================================================
+
+services:
+  # ──────────────────────────────────────────────────────────
+  # MongoDB
+  # ──────────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7
+    container_name: migrate-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=migrate_test
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - migrate-network
+
+  # ──────────────────────────────────────────────────────────
+  # MariaDB
+  # ──────────────────────────────────────────────────────────
+  mariadb:
+    image: mariadb:11
+    container_name: migrate-mariadb
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=rootpass
+      - MYSQL_DATABASE=migrate_test
+      - MYSQL_USER=migrate
+      - MYSQL_PASSWORD=migratepass
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - migrate-network
+
+  # ──────────────────────────────────────────────────────────
+  # Migration Runner - MongoDB
+  # ──────────────────────────────────────────────────────────
+  runner-mongodb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: migrate-runner-mongodb
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      - DB_TYPE=mongodb
+      - DB_HOST=mongodb
+      - DB_PORT=27017
+      - DB_NAME=migrate_test
+    volumes:
+      - ./databases/mongodb/test-success:/app/migrations:ro
+    networks:
+      - migrate-network
+
+  # ──────────────────────────────────────────────────────────
+  # Migration Runner - MariaDB
+  # ──────────────────────────────────────────────────────────
+  runner-mariadb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: migrate-runner-mariadb
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      - DB_TYPE=mariadb
+      - DB_HOST=mariadb
+      - DB_PORT=3306
+      - DB_NAME=migrate_test
+      - DB_USER=migrate
+      - DB_PASSWORD=migratepass
+    volumes:
+      - ./databases/mariadb/test-success:/app/migrations:ro
+    networks:
+      - migrate-network
+
+  # ──────────────────────────────────────────────────────────
+  # Test Runner - Run all tests
+  # ──────────────────────────────────────────────────────────
+  test-all:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: migrate-test-all
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      mariadb:
+        condition: service_healthy
+    environment:
+      - DB_TYPE=all
+    volumes:
+      - ./databases:/app/databases:ro
+      - ./reports:/app/reports
+    command: ["test-all", "-o", "/app/reports"]
+    networks:
+      - migrate-network
+
+volumes:
+  mongodb_data:
+  mariadb_data:
+
+networks:
+  migrate-network:
+    driver: bridge

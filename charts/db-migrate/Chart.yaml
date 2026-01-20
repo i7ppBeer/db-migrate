@@ -1,0 +1,16 @@
+apiVersion: v2
+name: db-migrate
+description: Multi-database migration management (MongoDB & MariaDB/MySQL)
+type: application
+version: 2.0.0
+appVersion: "2.0.0"
+keywords:
+  - database
+  - migration
+  - mongodb
+  - mariadb
+  - mysql
+  - devops
+maintainers:
+  - name: DevOps Team
+    email: devops@example.com

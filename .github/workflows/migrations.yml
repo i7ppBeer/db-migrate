@@ -1,0 +1,254 @@
+# ============================================================
+# GitHub Actions - Build & Deploy Migrations
+# ============================================================
+
+name: Build and Deploy Migrations
+
+on:
+  push:
+    branches: [main, release/*]
+    paths:
+      - 'migrations/**'
+      - 'src/**'
+      - 'Dockerfile*'
+      - 'package*.json'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deploy to environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/db-migrate
+
+jobs:
+  # ============================================================
+  # Job 1: Test & Validate
+  # ============================================================
+  test:
+    name: Test & Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run Tests
+        run: npm test
+
+      - name: Validate Migrations
+        run: |
+          node src/cli.js validate --database databases/mongodb/test-success
+          node src/cli.js validate --database databases/mariadb/test-success
+
+  # ============================================================
+  # Job 2: Build Image
+  # ============================================================
+  build:
+    name: Build Image
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Build base image
+      - name: Build Base Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runner
+          push: false
+          load: true
+          tags: db-migrate:base
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Build and push migration image
+      - name: Build and Push Migration Image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.migrations
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BASE_IMAGE=db-migrate:base
+            MIGRATIONS_PATH=./migrations
+            BUILD_VERSION=${{ steps.meta.outputs.version }}
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Output Image Info
+        run: |
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          echo "Tag: ${{ steps.meta.outputs.version }}"
+          echo "Digest: ${{ steps.build.outputs.digest }}"
+
+  # ============================================================
+  # Job 3: Deploy to Staging
+  # ============================================================
+  deploy-staging:
+    name: Deploy to Staging
+    needs: build
+    runs-on: ubuntu-latest
+    environment: staging
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'latest'
+
+      - name: Setup Kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Configure Kubernetes
+        run: |
+          echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > kubeconfig
+          echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
+
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install db-migrate-staging ./charts/db-migrate \
+            --namespace staging \
+            --create-namespace \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ needs.build.outputs.image_tag }} \
+            --set mongodb.host=mongodb-staging.staging.svc.cluster.local \
+            --set mongodb.database=staging_db \
+            --set mongodb.auth.enabled=true \
+            --set mongodb.auth.username=admin \
+            --set mongodb.auth.existingSecret=mongodb-staging-secret \
+            --set migration.command=up \
+            --set migration.validation.enabled=true \
+            --wait \
+            --timeout=5m
+
+      - name: Wait for Migration Job
+        run: |
+          kubectl wait --for=condition=complete job \
+            -l app.kubernetes.io/instance=db-migrate-staging \
+            -n staging \
+            --timeout=300s
+          
+          echo "=== Migration Logs ==="
+          kubectl logs -l app.kubernetes.io/instance=db-migrate-staging -n staging --tail=50
+
+  # ============================================================
+  # Job 4: Deploy to Production (Manual Approval)
+  # ============================================================
+  deploy-production:
+    name: Deploy to Production
+    needs: [build, deploy-staging]
+    runs-on: ubuntu-latest
+    environment: production  # Requires manual approval
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'latest'
+
+      - name: Setup Kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Configure Kubernetes
+        run: |
+          echo "${{ secrets.PRODUCTION_KUBECONFIG }}" | base64 -d > kubeconfig
+          echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
+
+      - name: Verify Secret Exists
+        run: |
+          if ! kubectl get secret mongodb-production-secret -n production; then
+            echo "ERROR: mongodb-production-secret not found!"
+            echo "Please create the secret before deploying."
+            exit 1
+          fi
+
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install db-migrate-production ./charts/db-migrate \
+            --namespace production \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ needs.build.outputs.image_tag }} \
+            --set mongodb.host=mongodb-production.production.svc.cluster.local \
+            --set mongodb.database=production_db \
+            --set mongodb.auth.enabled=true \
+            --set mongodb.auth.username=admin \
+            --set mongodb.auth.existingSecret=mongodb-production-secret \
+            --set migration.command=up \
+            --set migration.validation.enabled=true \
+            --set migration.validation.allowDangerous=false \
+            --set job.backoffLimit=5 \
+            --set job.ttlSecondsAfterFinished=86400 \
+            --wait \
+            --timeout=10m
+
+      - name: Wait for Migration Job
+        run: |
+          kubectl wait --for=condition=complete job \
+            -l app.kubernetes.io/instance=db-migrate-production \
+            -n production \
+            --timeout=600s
+          
+          echo "=== Migration Completed Successfully ==="
+          kubectl logs -l app.kubernetes.io/instance=db-migrate-production -n production --tail=100

@@ -1,6 +1,0 @@
-dependencies:
-- name: mongodb-migrate
-  repository: file://../mongodb-migrate
-  version: 0.1.0
-digest: sha256:0e6f572d12fdf40c99895cdc3702abf8f83869f00c4a5058df692d7d0ae2dea3
-generated: "2025-12-31T09:34:25.206905409+08:00"

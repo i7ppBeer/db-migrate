@@ -1,0 +1,148 @@
+# ============================================================
+# Docker Compose for Local Migration Testing
+# 用於本地測試 Migration Image
+# ============================================================
+#
+# 使用方式:
+#   docker compose -f docker-compose.local-test.yml up -d mongodb
+#   docker compose -f docker-compose.local-test.yml run --rm migration up
+#   docker compose -f docker-compose.local-test.yml run --rm migration down
+#
+# ============================================================
+
+services:
+  # ──────────────────────────────────────────────────────────
+  # MongoDB (測試用)
+  # ──────────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7
+    container_name: test-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=test_db
+    volumes:
+      - mongodb_test_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - test-network
+
+  # ──────────────────────────────────────────────────────────
+  # MongoDB (帶認證)
+  # ──────────────────────────────────────────────────────────
+  mongodb-auth:
+    image: mongo:7
+    container_name: test-mongodb-auth
+    ports:
+      - "27018:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=testpassword
+      - MONGO_INITDB_DATABASE=test_db
+    volumes:
+      - mongodb_auth_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "-u", "admin", "-p", "testpassword", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - test-network
+
+  # ──────────────────────────────────────────────────────────
+  # MariaDB (測試用)
+  # ──────────────────────────────────────────────────────────
+  mariadb:
+    image: mariadb:11
+    container_name: test-mariadb
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=rootpass
+      - MYSQL_DATABASE=test_db
+      - MYSQL_USER=migrate
+      - MYSQL_PASSWORD=migratepass
+    volumes:
+      - mariadb_test_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - test-network
+
+  # ──────────────────────────────────────────────────────────
+  # Migration Runner (從本地 Image 或 Registry 拉取)
+  # ──────────────────────────────────────────────────────────
+  migration:
+    # 可以改成 registry 的 image，例如:
+    # image: myregistry.azurecr.io/db-migrate:v1.0.0
+    image: ${MIGRATION_IMAGE:-db-migrate:v1.0.0}
+    container_name: test-migration
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      - DB_TYPE=${DB_TYPE:-mongodb}
+      - DB_HOST=${DB_HOST:-mongodb}
+      - DB_PORT=${DB_PORT:-27017}
+      - DB_NAME=${DB_NAME:-test_db}
+      - DB_USER=${DB_USER:-}
+      - DB_PASSWORD=${DB_PASSWORD:-}
+    networks:
+      - test-network
+    # 如果要覆蓋 image 中的 migrations，可以 mount 本地目錄
+    # volumes:
+    #   - ./my-migrations:/app/migrations:ro
+
+  # ──────────────────────────────────────────────────────────
+  # Migration Runner (連接帶認證的 MongoDB)
+  # ──────────────────────────────────────────────────────────
+  migration-auth:
+    image: ${MIGRATION_IMAGE:-db-migrate:v1.0.0}
+    container_name: test-migration-auth
+    depends_on:
+      mongodb-auth:
+        condition: service_healthy
+    environment:
+      - DB_TYPE=mongodb
+      - DB_HOST=mongodb-auth
+      - DB_PORT=27017
+      - DB_NAME=test_db
+      - DB_USER=admin
+      - DB_PASSWORD=testpassword
+    networks:
+      - test-network
+
+  # ──────────────────────────────────────────────────────────
+  # Migration Runner (MariaDB)
+  # ──────────────────────────────────────────────────────────
+  migration-mariadb:
+    image: ${MIGRATION_IMAGE:-db-migrate:v1.0.0}
+    container_name: test-migration-mariadb
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      - DB_TYPE=mariadb
+      - DB_HOST=mariadb
+      - DB_PORT=3306
+      - DB_NAME=test_db
+      - DB_USER=migrate
+      - DB_PASSWORD=migratepass
+    networks:
+      - test-network
+
+networks:
+  test-network:
+    driver: bridge
+
+volumes:
+  mongodb_test_data:
+  mongodb_auth_data:
+  mariadb_test_data:

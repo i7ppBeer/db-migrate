@@ -1,92 +1,72 @@
-# Multi-stage Dockerfile for MongoDB Migration
-# Build targets: 
-#   - migration (default): Production migration runner
-#   - console: Web console for development
+# ============================================================
+# Multi-Database Migration Runner Dockerfile
+# Supports: MongoDB, MariaDB/MySQL
+# ============================================================
 
-FROM node:20-slim AS base
+FROM node:20-alpine AS base
 
-# Install Docker CLI and basic utilities
-RUN apt-get update && apt-get install -y \
+# Install common dependencies
+RUN apk add --no-cache \
+    bash \
     curl \
-    wget \
-    gnupg \
-    lsb-release \
-    ca-certificates \
-    procps \
-    apt-transport-https \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" \
-    | tee /etc/apt/sources.list.d/docker.list > /dev/null \
-    && apt-get update \
-    && apt-get install -y docker-ce-cli \
-    && rm -rf /var/lib/apt/lists/*
+    mysql-client \
+    mongodb-tools
 
-# Set working directory
 WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
 
-#############################################
-# Migration Stage (Production)
-#############################################
-FROM base AS migration
+# ============================================================
+# Development stage
+# ============================================================
+FROM base AS development
 
-# Install production dependencies only
-RUN npm ci --only=production
-
-# Copy application code
-COPY . .
-
-# Make scripts executable
-RUN chmod +x scripts/*.sh
-
-# Create directories
-RUN mkdir -p /data/db /var/log/mongodb && \
-    chmod -R 777 /data/db /var/log/mongodb
-
-# Create non-root user
-RUN useradd -m mongodb-migrate || echo "User exists" && \
-    chown -R mongodb-migrate:mongodb-migrate /app /data/db /var/log/mongodb 2>/dev/null || \
-    chown -R 1001:1001 /app /data/db /var/log/mongodb
-
-USER mongodb-migrate
-
-# Set environment variables
-ENV NODE_ENV=production
-ENV MONGODB_TEST_MODE=enabled
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD node -e "console.log('OK')" || exit 1
-
-# Default command (will be overridden by K8s)
-CMD ["/bin/bash", "-c", "/app/scripts/k8s-runner.sh"]
-
-#############################################
-# Console Stage (Development)
-#############################################
-FROM base AS console
-
-# Install git for version control features
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
-
-# Install all dependencies (including dev dependencies)
 RUN npm install
 
-# Copy application code
-COPY src ./src
-COPY web-console ./web-console
-COPY scripts ./scripts
-COPY *.js *.cjs *.json ./
-RUN mkdir -p databases
+COPY . .
+
+ENV NODE_ENV=development
+
+CMD ["npm", "run", "dev"]
+
+# ============================================================
+# Production stage
+# ============================================================
+FROM base AS production
+
+RUN npm ci --only=production
+
+COPY src/ ./src/
+
+# ⚠️ 遷移檔案會在建置時由 CI/CD 複製進來
+# COPY migrations/ ./migrations/
+
+ENV NODE_ENV=production
+
+# Default command
+CMD ["node", "src/cli.js", "--help"]
+
+# ============================================================
+# Migration Runner stage
+# For running migrations in CI/CD
+# ============================================================
+FROM production AS runner
+
+# Copy entrypoint script
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 # Environment variables
-ENV NODE_ENV=production
-ENV PORT=3000
+ENV DB_TYPE=mongodb
+ENV DB_HOST=localhost
+ENV DB_PORT=27017
+ENV DB_NAME=migrations
+ENV CONFIG_PATH=/app/config/config.js
+ENV MIGRATIONS_DIR=/app/migrations
 
-# Expose port
-EXPOSE 3000
+# Mount points
+VOLUME ["/app/config", "/app/migrations"]
 
-# Start Web Console
-CMD ["npm", "run", "console"]
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["up"]
