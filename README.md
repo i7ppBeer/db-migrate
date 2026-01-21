@@ -13,6 +13,7 @@
 - **統一 CLI**: 單一命令行界面管理所有資料庫遷移
 - **驗證規則**: 自動檢測危險操作、空 down()、孤立 drop、DCL 操作等問題
 - **Up-Down-Up 測試**: 確保遷移可以正確回滾和重新應用
+- **Sanity Check**: 內建 Pre-Check / Post-Check / Auto-Rollback 機制
 - **報表生成**: 支援 JSON、HTML 格式
 - **容器化**: Docker 和 Kubernetes (Helm) 部署支援
 
@@ -97,7 +98,7 @@ export default {
 };
 ```
 
-**多實例配置** (`config.js`):
+**多實例配置 - MongoDB** (`config.js`):
 ```javascript
 export default {
   type: 'mongodb',
@@ -119,6 +120,39 @@ export default {
         databaseName: 'app_secondary'
       },
       changelogCollectionName: 'changelog'
+    }
+  ]
+};
+```
+
+**多實例配置 - MariaDB/MySQL** (`config.js`):
+```javascript
+export default {
+  type: 'mariadb',
+  migrationsDir: './migrations',  // 共用遷移目錄
+  
+  instances: [
+    {
+      name: 'mariadb-primary',
+      mariadb: {
+        host: 'localhost',
+        port: 3306,
+        database: 'app_primary',
+        user: 'root',
+        password: 'password'
+      },
+      changelogTable: '_migrations'
+    },
+    {
+      name: 'mariadb-secondary',
+      mariadb: {
+        host: 'localhost',
+        port: 3307,
+        database: 'app_secondary',
+        user: 'root',
+        password: 'password'
+      },
+      changelogTable: '_migrations'
     }
   ]
 };
@@ -162,9 +196,16 @@ node src/cli.js -c <config-path> up
 # Dry Run - 只顯示會執行什麼，不實際執行
 node src/cli.js -c <config-path> up --dry-run
 
+# 啟用 Sanity Check (Pre-Check / Post-Check / Auto-Rollback)
+node src/cli.js -c <config-path> up --sanity-check
+
+# 啟用 Sanity Check 但禁用自動回滾
+node src/cli.js -c <config-path> up --sanity-check --no-auto-rollback
+
 # 範例
 node src/cli.js -c databases/mongodb/test-success/config.js up
 node src/cli.js -c databases/mariadb/test-success/config.js up --dry-run
+node src/cli.js -c databases/mongodb/test-success/config.js up --sanity-check
 ```
 
 #### 3. 回滾遷移 (`down`)
@@ -394,7 +435,8 @@ db-migrate/
 │   ├── cli.js                   # 統一 CLI 入口
 │   ├── core/
 │   │   ├── base-adapter.js      # 適配器基類
-│   │   └── reporter.js          # 報表生成器
+│   │   ├── reporter.js          # 報表生成器
+│   │   └── sanity-checker.js    # Sanity Check 框架
 │   └── adapters/
 │       ├── index.js             # 適配器工廠
 │       ├── mongodb-adapter.js   # MongoDB 適配器
@@ -452,6 +494,47 @@ export async function down(db, client) {
 }
 ```
 
+### MongoDB with Sanity Check (.js)
+
+```javascript
+// 20250101000002-add-phone-field.js
+
+// Pre-Check: 在執行前驗證前置條件
+export const preCheck = async ({ db }) => {
+  const collections = await db.listCollections({ name: 'users' }).toArray();
+  if (collections.length === 0) {
+    return { success: false, error: 'Collection "users" does not exist' };
+  }
+  return { success: true, details: ['Collection "users" exists'] };
+};
+
+// Up Migration
+export const up = async (db, client) => {
+  await db.collection('users').updateMany(
+    { phone: { $exists: false } },
+    { $set: { phone: '', phoneVerified: false } }
+  );
+  await db.collection('users').createIndex({ phone: 1 }, { sparse: true });
+};
+
+// Post-Check (Sanity Check): 驗證遷移結果
+export const postCheck = async ({ db }) => {
+  const missing = await db.collection('users').countDocuments({ 
+    phone: { $exists: false } 
+  });
+  if (missing > 0) {
+    return { success: false, error: `${missing} documents missing phone field` };
+  }
+  return { success: true, details: ['All users have phone field'] };
+};
+
+// Down Migration
+export const down = async (db, client) => {
+  await db.collection('users').dropIndex('phone_1');
+  await db.collection('users').updateMany({}, { $unset: { phone: '', phoneVerified: '' } });
+};
+```
+
 ### MariaDB/MySQL (.sql)
 
 ```sql
@@ -470,6 +553,31 @@ CREATE INDEX idx_users_name ON users(name);
 
 -- +migrate Down
 DROP TABLE IF EXISTS users;
+```
+
+### MariaDB/MySQL with Sanity Check (.sql)
+
+```sql
+-- 20250101000002-add-phone-column.sql
+
+-- +sanity PreCheck
+-- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='phone'
+-- END_CHECK
+
+-- +migrate Up
+ALTER TABLE users ADD COLUMN phone VARCHAR(20) DEFAULT NULL;
+ALTER TABLE users ADD COLUMN phone_verified BOOLEAN DEFAULT FALSE;
+CREATE INDEX idx_users_phone ON users(phone);
+
+-- +sanity PostCheck
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='phone'
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.statistics WHERE table_name='users' AND index_name='idx_users_phone'
+-- END_CHECK
+
+-- +migrate Down
+DROP INDEX idx_users_phone ON users;
+ALTER TABLE users DROP COLUMN phone_verified;
+ALTER TABLE users DROP COLUMN phone;
 ```
 
 ---
@@ -656,6 +764,29 @@ helm upgrade --install my-migration ./charts/db-migrate \
   --set mariadb.existingSecret=my-mariadb-secret
 ```
 
+#### 啟用 Sanity Check
+
+```bash
+# 啟用 Sanity Check (Pre-Check / Post-Check / Auto-Rollback)
+helm upgrade --install my-migration ./charts/db-migrate \
+  --set mongodb.enabled=true \
+  --set mongodb.host=mongodb \
+  --set mongodb.database=myapp \
+  --set migration.command=up \
+  --set migration.sanityCheck.enabled=true \
+  --set migration.sanityCheck.autoRollback=true \
+  --set migration.sanityCheck.timeoutMs=30000
+
+# 啟用 Sanity Check 但停用 Auto-Rollback
+helm upgrade --install my-migration ./charts/db-migrate \
+  --set mongodb.enabled=true \
+  --set mongodb.host=mongodb \
+  --set mongodb.database=myapp \
+  --set migration.command=up \
+  --set migration.sanityCheck.enabled=true \
+  --set migration.sanityCheck.autoRollback=false
+```
+
 #### 執行不同指令
 
 ```bash
@@ -670,6 +801,13 @@ helm upgrade --install migration-up ./charts/db-migrate \
   --set mongodb.host=mongodb \
   --set mongodb.database=myapp \
   --set migration.command=up
+
+# 執行遷移 (帶 Sanity Check)
+helm upgrade --install migration-up ./charts/db-migrate \
+  --set mongodb.host=mongodb \
+  --set mongodb.database=myapp \
+  --set migration.command=up \
+  --set migration.sanityCheck.enabled=true
 
 # 回滾
 helm upgrade --install migration-down ./charts/db-migrate \

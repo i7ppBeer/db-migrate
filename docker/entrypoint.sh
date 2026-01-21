@@ -25,6 +25,9 @@ echo -e "${BLUE}═════════════════════�
 : ${DB_PASSWORD:=}
 : ${CONFIG_PATH:=/app/config/config.js}
 : ${MIGRATIONS_DIR:=/app/migrations}
+: ${SANITY_CHECK_ENABLED:=false}
+: ${SANITY_CHECK_AUTO_ROLLBACK:=true}
+: ${SANITY_CHECK_TIMEOUT:=30000}
 
 echo -e "\n${YELLOW}Configuration:${NC}"
 echo "  Database Type: $DB_TYPE"
@@ -32,6 +35,11 @@ echo "  Database Host: $DB_HOST:$DB_PORT"
 echo "  Database Name: $DB_NAME"
 echo "  Config Path:   $CONFIG_PATH"
 echo "  Migrations:    $MIGRATIONS_DIR"
+echo "  Sanity Check:  $SANITY_CHECK_ENABLED"
+if [ "$SANITY_CHECK_ENABLED" = "true" ]; then
+    echo "    Auto-Rollback: $SANITY_CHECK_AUTO_ROLLBACK"
+    echo "    Timeout:       ${SANITY_CHECK_TIMEOUT}ms"
+fi
 
 # Wait for database to be ready
 wait_for_database() {
@@ -82,7 +90,12 @@ export default {
     }
   },
   migrationsDir: '${MIGRATIONS_DIR}',
-  changelogCollectionName: 'changelog'
+  changelogCollectionName: 'changelog',
+  sanityCheck: {
+    enabled: ${SANITY_CHECK_ENABLED},
+    autoRollback: ${SANITY_CHECK_AUTO_ROLLBACK},
+    timeoutMs: ${SANITY_CHECK_TIMEOUT}
+  }
 };
 EOFCONFIG
         else
@@ -97,7 +110,12 @@ export default {
     password: '${DB_PASSWORD:-}'
   },
   migrationsDir: '${MIGRATIONS_DIR}',
-  changelogTable: '_migrations'
+  changelogTable: '_migrations',
+  sanityCheck: {
+    enabled: ${SANITY_CHECK_ENABLED},
+    autoRollback: ${SANITY_CHECK_AUTO_ROLLBACK},
+    timeoutMs: ${SANITY_CHECK_TIMEOUT}
+  }
 };
 EOFCONFIG
         fi
@@ -113,7 +131,17 @@ run_command() {
     
     echo -e "\n${BLUE}[EXEC] db-migrate $cmd${NC}"
     
-    node /app/src/cli.js -c "$CONFIG_PATH" "$cmd" "$@"
+    local extra_args=()
+    
+    # Add sanity check flag if enabled
+    if [ "$SANITY_CHECK_ENABLED" = "true" ]; then
+        extra_args+=("--sanity-check")
+        if [ "$SANITY_CHECK_AUTO_ROLLBACK" = "false" ]; then
+            extra_args+=("--no-auto-rollback")
+        fi
+    fi
+    
+    node /app/src/cli.js -c "$CONFIG_PATH" "$cmd" "${extra_args[@]}" "$@"
 }
 
 # Main

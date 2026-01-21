@@ -130,12 +130,25 @@ program
   .command('up')
   .description('Run pending migrations')
   .option('--dry-run', 'Show what would be run without executing')
+  .option('--sanity-check', 'Enable sanity check (pre-check, post-check, auto-rollback)')
+  .option('--no-auto-rollback', 'Disable auto-rollback on sanity check failure')
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     let adapter;
     
     try {
       adapter = await getAdapter(options);
+      
+      // Override sanity check settings from CLI
+      if (options.sanityCheck) {
+        adapter.config.sanityCheck = {
+          ...adapter.config.sanityCheck,
+          enabled: true,
+          autoRollback: options.autoRollback !== false,
+          verbose: true
+        };
+      }
+      
       await adapter.connect();
       
       if (options.dryRun) {
@@ -149,7 +162,15 @@ program
       
       console.log(chalk.blue(`\n[UP] Running migrations (${adapter.dbType})...`));
       
-      const result = await adapter.up();
+      // Use sanity check method if enabled
+      let result;
+      if (options.sanityCheck && typeof adapter.upWithSanityCheck === 'function') {
+        console.log(chalk.cyan('   Sanity Check: ENABLED'));
+        console.log(chalk.cyan(`   Auto-Rollback: ${options.autoRollback !== false ? 'ENABLED' : 'DISABLED'}`));
+        result = await adapter.upWithSanityCheck({ verbose: true });
+      } else {
+        result = await adapter.up();
+      }
       
       if (result.applied.length > 0) {
         console.log(chalk.green(`\n✅ Applied ${result.applied.length} migration(s):`));
@@ -158,6 +179,21 @@ program
         }
       } else {
         console.log(chalk.gray('\n   No pending migrations.'));
+      }
+      
+      // Show sanity check results if available
+      if (result.sanityResults && result.sanityResults.length > 0) {
+        console.log(chalk.cyan('\n📋 Sanity Check Results:'));
+        for (const sr of result.sanityResults) {
+          if (sr.success) {
+            console.log(chalk.green(`   ✅ ${sr.file}: PASSED (${sr.duration}ms)`));
+          } else {
+            console.log(chalk.red(`   ❌ ${sr.file}: FAILED - ${sr.error}`));
+            if (sr.rolledBack) {
+              console.log(chalk.yellow(`      ⏪ Auto-rolled back`));
+            }
+          }
+        }
       }
       
       if (result.errors.length > 0) {

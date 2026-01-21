@@ -676,464 +676,419 @@ jobs:
 
 ---
 
-## 五、DDL 新增欄位 Sanity Check 與自動回滾
+## 五、Sanity Check 機制與自動回滾
 
 ### 為什麼需要 Sanity Check？
 
-新增欄位看似簡單，但可能因為以下原因失敗：
+新增欄位、建立索引等操作看似簡單，但可能因為以下原因失敗：
 - 欄位名稱已存在
 - 資料類型不相容
 - NOT NULL 沒有 DEFAULT 值（大表會鎖表）
 - 外鍵參照的表/欄位不存在
 - 磁碟空間不足
 
-### 5.1 Sanity Check 流程
+**本系統提供內建的 Sanity Check 框架**，支援：
+- **Pre-Check**: 執行前的前置條件檢查
+- **Post-Check**: 執行後的結果驗證
+- **Auto-Rollback**: 檢查失敗時自動回滾
+
+### 5.1 啟用 Sanity Check
+
+#### 方式一：CLI 旗標
+
+```bash
+# 啟用 sanity check 執行遷移
+npm run up -c databases/products/config.js --sanity-check
+
+# 啟用 sanity check 但禁用自動回滾
+npm run up -c databases/products/config.js --sanity-check --no-auto-rollback
+```
+
+#### 方式二：Config 設定
+
+```javascript
+// databases/products/config.js
+export default {
+  mongodb: {
+    url: process.env.MONGO_URL,
+    databaseName: 'products'
+  },
+  migrationsDir: './migrations',
+  
+  // Sanity Check 設定
+  sanityCheck: {
+    enabled: true,           // 啟用 sanity check
+    autoRollback: true,      // 檢查失敗時自動回滾
+    timeoutMs: 30000,        // 檢查超時（毫秒）
+    verbose: true            // 顯示詳細日誌
+  }
+};
+```
+
+### 5.2 Sanity Check 流程
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                    DDL 新增欄位完整流程                                   │
+│                    Sanity Check 完整流程                                  │
 └─────────────────────────────────────────────────────────────────────────┘
 
   ┌──────────────────────────────────────────────────────────────────────┐
   │                        Phase 1: Pre-Check                            │
   ├──────────────────────────────────────────────────────────────────────┤
-  │  1. 檢查欄位是否已存在                                                │
-  │  2. 檢查資料類型是否有效                                              │
-  │  3. 檢查 NOT NULL + DEFAULT 組合                                     │
-  │  4. 檢查外鍵參照是否有效                                              │
-  │  5. 預估執行時間（基於表大小）                                        │
+  │  執行 migration 檔案中定義的 preCheck() 函數                           │
+  │  - 檢查前置條件是否滿足                                               │
+  │  - 返回 { success: true/false, error: '...' }                        │
   └──────────────────────────────────────────────────────────────────────┘
                                     │
-                                    │ 全部通過 ✓
+                            Pre-Check 通過 ✓
                                     ▼
   ┌──────────────────────────────────────────────────────────────────────┐
   │                        Phase 2: Execute UP                           │
   ├──────────────────────────────────────────────────────────────────────┤
-  │  1. 開始 Transaction（如適用）                                        │
-  │  2. 執行 ALTER TABLE ADD COLUMN                                      │
-  │  3. 執行資料填充（如需要）                                            │
-  │  4. 加入約束（NOT NULL, CHECK 等）                                   │
+  │  執行 migration 的 up() 函數                                          │
   └──────────────────────────────────────────────────────────────────────┘
                                     │
-                                    │ 成功 ✓
+                               執行成功 ✓
                                     ▼
   ┌──────────────────────────────────────────────────────────────────────┐
   │                        Phase 3: Post-Check (Sanity)                  │
   ├──────────────────────────────────────────────────────────────────────┤
-  │  1. 確認欄位確實存在                                                  │
-  │  2. 確認欄位類型正確                                                  │
-  │  3. 確認約束已套用                                                    │
-  │  4. 確認索引已建立（如有）                                            │
-  │  5. 執行自訂驗證查詢                                                  │
+  │  執行 migration 檔案中定義的 postCheck() 函數                          │
+  │  - 驗證遷移結果是否正確                                               │
+  │  - 返回 { success: true/false, error: '...' }                        │
   └──────────────────────────────────────────────────────────────────────┘
                                     │
                     ┌───────────────┴───────────────┐
                     │                               │
-                 成功 ✓                          失敗 ✗
+              Post-Check 通過 ✓              Post-Check 失敗 ✗
                     │                               │
                     ▼                               ▼
            ┌──────────────┐                ┌──────────────────┐
-           │   Commit     │                │  Auto Rollback   │
-           │   完成！     │                │  執行 DOWN       │
-           └──────────────┘                └──────────────────┘
+           │   ✅ 完成！   │                │  Auto Rollback   │
+           └──────────────┘                │  執行 down()     │
+                                           └──────────────────┘
 ```
 
-### 5.2 Migration 寫法（含 Sanity Check）
+### 5.3 MongoDB Migration 寫法（含 Sanity Check）
+
+在 migration 檔案中 export `preCheck` 和 `postCheck` 函數：
+
+```javascript
+// 20250115-add-phone-to-users.js
+
+/**
+ * Pre-Check: 驗證前置條件
+ * @param {Object} context - { db, client, config }
+ * @returns {Promise<{success: boolean, error?: string, details?: string[]}>}
+ */
+export const preCheck = async ({ db }) => {
+  // 檢查 users collection 是否存在
+  const collections = await db.listCollections({ name: 'users' }).toArray();
+  if (collections.length === 0) {
+    return { 
+      success: false, 
+      error: 'Collection "users" does not exist' 
+    };
+  }
+  
+  // 檢查是否已有 phone 欄位
+  const sample = await db.collection('users').findOne({ phone: { $exists: true } });
+  if (sample) {
+    return { 
+      success: false, 
+      error: 'Field "phone" already exists in some documents' 
+    };
+  }
+  
+  return { 
+    success: true,
+    details: ['Collection "users" exists', 'Field "phone" not yet added']
+  };
+};
+
+/**
+ * Up Migration
+ */
+export const up = async (db, client) => {
+  // 新增 phone 欄位到所有使用者
+  await db.collection('users').updateMany(
+    { phone: { $exists: false } },
+    { 
+      $set: { 
+        phone: '',
+        phoneVerified: false 
+      } 
+    }
+  );
+  
+  // 建立索引
+  await db.collection('users').createIndex(
+    { phone: 1 }, 
+    { sparse: true, background: true }
+  );
+};
+
+/**
+ * Post-Check (Sanity Check): 驗證遷移結果
+ * @param {Object} context - { db, client, config }
+ * @returns {Promise<{success: boolean, error?: string, details?: string[]}>}
+ */
+export const postCheck = async ({ db }) => {
+  // 1. 確認所有文件都有 phone 欄位
+  const missingPhone = await db.collection('users').countDocuments({ 
+    phone: { $exists: false } 
+  });
+  
+  if (missingPhone > 0) {
+    return { 
+      success: false, 
+      error: `${missingPhone} documents still missing phone field` 
+    };
+  }
+  
+  // 2. 確認索引存在
+  const indexes = await db.collection('users').indexes();
+  const phoneIndex = indexes.find(idx => idx.key?.phone === 1);
+  
+  if (!phoneIndex) {
+    return { 
+      success: false, 
+      error: 'Index on phone field not found' 
+    };
+  }
+  
+  const totalUsers = await db.collection('users').countDocuments();
+  return { 
+    success: true,
+    details: [
+      `All ${totalUsers} users have phone field`,
+      'Index "phone_1" created successfully'
+    ]
+  };
+};
+
+/**
+ * Down Migration (Rollback)
+ */
+export const down = async (db, client) => {
+  // 移除索引
+  try {
+    await db.collection('users').dropIndex('phone_1');
+  } catch (e) {
+    // Index might not exist
+  }
+  
+  // 移除欄位
+  await db.collection('users').updateMany(
+    {},
+    { $unset: { phone: '', phoneVerified: '' } }
+  );
+};
+```
+
+### 5.4 MariaDB/MySQL Migration 寫法（含 Sanity Check）
+
+SQL 格式使用特殊註解標記：
 
 ```sql
 -- +migrate Up
 -- ============================================================
 -- Migration: add-phone-to-users
--- Description: 新增 phone 欄位到 users 表
--- Author: developer@company.com
--- Date: 2025-01-15
 -- ============================================================
 
--- Pre-Check: 確認欄位不存在（冪等性）
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns 
-        WHERE table_name = 'user' AND column_name = 'phone'
-    ) THEN
-        RAISE NOTICE 'Column phone already exists, skipping...';
-        RETURN;
-    END IF;
-    
-    -- Step 1: 新增允許 NULL 的欄位（避免鎖表）
-    ALTER TABLE "user" ADD COLUMN phone VARCHAR(20);
-    
-    -- Step 2: 填充預設值（批次處理）
-    -- 對大表使用批次更新避免長時間鎖定
-    UPDATE "user" SET phone = '' WHERE phone IS NULL;
-    
-    -- Step 3: 加入 NOT NULL 約束
-    ALTER TABLE "user" ALTER COLUMN phone SET NOT NULL;
-    ALTER TABLE "user" ALTER COLUMN phone SET DEFAULT '';
-    
-END $$;
+-- +sanity PreCheck
+-- 此 SQL 的結果會被解讀為 sanity check 結果
+-- 返回 success=1 表示通過，success=0 表示失敗
+SELECT 
+  CASE 
+    WHEN NOT EXISTS (
+      SELECT 1 FROM information_schema.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'user' 
+      AND COLUMN_NAME = 'phone'
+    ) THEN 1
+    ELSE 0
+  END AS success,
+  CASE 
+    WHEN EXISTS (
+      SELECT 1 FROM information_schema.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'user' 
+      AND COLUMN_NAME = 'phone'
+    ) THEN 'Column phone already exists'
+    ELSE NULL
+  END AS error;
+-- -sanity PreCheck
 
--- Post-Check (Sanity Check): 驗證欄位正確建立
-DO $$
-DECLARE
-    v_column_exists BOOLEAN;
-    v_is_nullable VARCHAR(3);
-    v_data_type VARCHAR(50);
-BEGIN
-    -- 檢查欄位存在
-    SELECT EXISTS (
-        SELECT 1 FROM information_schema.columns 
-        WHERE table_name = 'user' AND column_name = 'phone'
-    ) INTO v_column_exists;
-    
-    IF NOT v_column_exists THEN
-        RAISE EXCEPTION 'SANITY CHECK FAILED: Column phone does not exist!';
-    END IF;
-    
-    -- 檢查資料類型
-    SELECT data_type, is_nullable 
-    INTO v_data_type, v_is_nullable
-    FROM information_schema.columns 
-    WHERE table_name = 'user' AND column_name = 'phone';
-    
-    IF v_data_type != 'character varying' THEN
-        RAISE EXCEPTION 'SANITY CHECK FAILED: Column phone has wrong type: %', v_data_type;
-    END IF;
-    
-    IF v_is_nullable != 'NO' THEN
-        RAISE EXCEPTION 'SANITY CHECK FAILED: Column phone should be NOT NULL!';
-    END IF;
-    
-    RAISE NOTICE 'SANITY CHECK PASSED: Column phone created successfully';
-END $$;
+-- 主要遷移 SQL
+ALTER TABLE `user` ADD COLUMN phone VARCHAR(20) DEFAULT '';
+ALTER TABLE `user` ALTER COLUMN phone SET NOT NULL;
+CREATE INDEX idx_user_phone ON `user`(phone);
+
+-- +sanity PostCheck
+-- 驗證欄位已正確建立
+SELECT 
+  CASE 
+    WHEN EXISTS (
+      SELECT 1 FROM information_schema.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'user' 
+      AND COLUMN_NAME = 'phone'
+      AND DATA_TYPE = 'varchar'
+      AND IS_NULLABLE = 'NO'
+    ) THEN 1
+    ELSE 0
+  END AS success,
+  CASE 
+    WHEN NOT EXISTS (
+      SELECT 1 FROM information_schema.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'user' 
+      AND COLUMN_NAME = 'phone'
+    ) THEN 'Column phone was not created'
+    ELSE NULL
+  END AS error;
+-- -sanity PostCheck
 
 -- +migrate Down
--- ============================================================
--- Rollback: 移除 phone 欄位
--- Warning: 此操作會刪除所有 phone 資料！
--- ============================================================
-ALTER TABLE "user" DROP COLUMN IF EXISTS phone;
+DROP INDEX idx_user_phone ON `user`;
+ALTER TABLE `user` DROP COLUMN phone;
 ```
 
-### 5.3 JavaScript 版本（MongoDB）
+### 5.5 內建 Sanity Check Helpers
+
+系統提供內建的 helper 函數簡化常見檢查：
+
+#### MongoDB Helpers
 
 ```javascript
-// 20250115-add-phone-to-users.js
-export const up = async (db, client) => {
-  const session = client.startSession();
-  
-  try {
-    await session.withTransaction(async () => {
-      // ========================================
-      // Pre-Check
-      // ========================================
-      console.log('[PRE-CHECK] Starting pre-flight checks...');
-      
-      // 檢查 collection 是否存在
-      const collections = await db.listCollections({ name: 'users' }).toArray();
-      if (collections.length === 0) {
-        throw new Error('SANITY CHECK FAILED: Collection "users" does not exist!');
-      }
-      
-      // 檢查是否已有 phone 欄位的文件
-      const sampleDoc = await db.collection('users').findOne({ phone: { $exists: true } });
-      if (sampleDoc) {
-        console.log('[PRE-CHECK] Field "phone" already exists, checking schema...');
-      }
-      
-      console.log('[PRE-CHECK] All checks passed ✓');
-      
-      // ========================================
-      // Execute Migration
-      // ========================================
-      console.log('[MIGRATE] Adding phone field to all users...');
-      
-      const result = await db.collection('users').updateMany(
-        { phone: { $exists: false } },  // 只更新沒有 phone 的文件
-        { 
-          $set: { 
-            phone: '',
-            phoneVerified: false,
-            phoneUpdatedAt: new Date()
-          } 
-        }
-      );
-      
-      console.log(`[MIGRATE] Updated ${result.modifiedCount} documents`);
-      
-      // 建立索引
-      await db.collection('users').createIndex(
-        { phone: 1 }, 
-        { 
-          sparse: true,  // 允許 null/空值
-          background: true 
-        }
-      );
-      
-      console.log('[MIGRATE] Index created on phone field');
-      
-      // ========================================
-      // Post-Check (Sanity Check)
-      // ========================================
-      console.log('[SANITY] Running post-migration checks...');
-      
-      // 1. 確認所有文件都有 phone 欄位
-      const docsWithoutPhone = await db.collection('users').countDocuments({ 
-        phone: { $exists: false } 
-      });
-      
-      if (docsWithoutPhone > 0) {
-        throw new Error(
-          `SANITY CHECK FAILED: ${docsWithoutPhone} documents still missing phone field!`
-        );
-      }
-      
-      // 2. 確認索引存在
-      const indexes = await db.collection('users').indexes();
-      const phoneIndex = indexes.find(idx => idx.key && idx.key.phone === 1);
-      
-      if (!phoneIndex) {
-        throw new Error('SANITY CHECK FAILED: Index on phone field not found!');
-      }
-      
-      // 3. 自訂業務邏輯檢查（範例：確認資料完整性）
-      const totalUsers = await db.collection('users').countDocuments();
-      const usersWithPhone = await db.collection('users').countDocuments({ 
-        phone: { $exists: true } 
-      });
-      
-      if (totalUsers !== usersWithPhone) {
-        throw new Error(
-          `SANITY CHECK FAILED: User count mismatch! ` +
-          `Total: ${totalUsers}, With phone: ${usersWithPhone}`
-        );
-      }
-      
-      console.log('[SANITY] All checks passed ✓');
-      console.log(`[SANITY] Total users with phone field: ${usersWithPhone}`);
-    });
-    
-  } catch (error) {
-    // ========================================
-    // Auto Rollback on Error
-    // ========================================
-    console.error('[ERROR] Migration failed:', error.message);
-    console.log('[ROLLBACK] Initiating automatic rollback...');
-    
-    // Transaction 會自動 abort，但我們記錄一下
-    throw error;  // 重新拋出讓框架處理回滾
-    
-  } finally {
-    await session.endSession();
-  }
-};
+import { MongoDBChecks } from '../src/core/sanity-checker.js';
 
-export const down = async (db, client) => {
-  console.log('[ROLLBACK] Removing phone field from users...');
-  
-  // 移除索引
-  try {
-    await db.collection('users').dropIndex('phone_1');
-    console.log('[ROLLBACK] Index dropped');
-  } catch (e) {
-    console.log('[ROLLBACK] Index not found, skipping...');
-  }
-  
-  // 移除欄位
-  const result = await db.collection('users').updateMany(
-    {},
-    { 
-      $unset: { 
-        phone: '',
-        phoneVerified: '',
-        phoneUpdatedAt: ''
-      } 
-    }
-  );
-  
-  console.log(`[ROLLBACK] Removed phone field from ${result.modifiedCount} documents`);
-};
+// 使用內建 helper
+export const preCheck = MongoDBChecks.createCollectionExistsCheck('users', true);
+export const postCheck = MongoDBChecks.createFieldExistsCheck('users', 'phone');
 ```
 
-### 5.4 自動回滾觸發機制
+可用的 helper：
+- `MongoDBChecks.collectionExists(db, name)` - 檢查 collection 是否存在
+- `MongoDBChecks.indexExists(db, collection, indexName)` - 檢查索引是否存在
+- `MongoDBChecks.allDocumentsHaveField(db, collection, field)` - 檢查所有文件是否有欄位
+- `MongoDBChecks.createCollectionExistsCheck(name, shouldExist)` - 建立 collection 存在檢查
+- `MongoDBChecks.createFieldExistsCheck(collection, field)` - 建立欄位存在檢查
+
+#### SQL Helpers
 
 ```javascript
-// src/runners/migration-runner.js
-export class MigrationRunner {
-  
-  async runWithSanityCheck(migration, config) {
-    const startTime = Date.now();
-    let rollbackNeeded = false;
-    
-    try {
-      // ========================================
-      // Phase 1: Pre-Check
-      // ========================================
-      console.log('\n' + '='.repeat(60));
-      console.log(`[PHASE 1] Pre-Check: ${migration.name}`);
-      console.log('='.repeat(60));
-      
-      if (migration.preCheck) {
-        const preCheckResult = await migration.preCheck(this.db);
-        if (!preCheckResult.success) {
-          throw new Error(`Pre-Check Failed: ${preCheckResult.error}`);
-        }
-      }
-      
-      // ========================================
-      // Phase 2: Execute UP
-      // ========================================
-      console.log('\n' + '='.repeat(60));
-      console.log(`[PHASE 2] Execute: ${migration.name}`);
-      console.log('='.repeat(60));
-      
-      await migration.up(this.db, this.client);
-      rollbackNeeded = true;  // 從這裡開始，失敗需要回滾
-      
-      // ========================================
-      // Phase 3: Post-Check (Sanity)
-      // ========================================
-      console.log('\n' + '='.repeat(60));
-      console.log(`[PHASE 3] Sanity Check: ${migration.name}`);
-      console.log('='.repeat(60));
-      
-      if (migration.sanityCheck) {
-        const sanityResult = await migration.sanityCheck(this.db);
-        if (!sanityResult.success) {
-          throw new Error(`Sanity Check Failed: ${sanityResult.error}`);
-        }
-      }
-      
-      // ========================================
-      // Success
-      // ========================================
-      const duration = Date.now() - startTime;
-      console.log('\n' + '='.repeat(60));
-      console.log(`[SUCCESS] Migration completed in ${duration}ms`);
-      console.log('='.repeat(60));
-      
-      return { success: true, duration };
-      
-    } catch (error) {
-      // ========================================
-      // Auto Rollback
-      // ========================================
-      console.error('\n' + '!'.repeat(60));
-      console.error(`[FAILED] ${error.message}`);
-      console.error('!'.repeat(60));
-      
-      if (rollbackNeeded) {
-        console.log('\n[AUTO-ROLLBACK] Starting automatic rollback...');
-        
-        try {
-          await migration.down(this.db, this.client);
-          console.log('[AUTO-ROLLBACK] Rollback completed successfully');
-        } catch (rollbackError) {
-          console.error('[AUTO-ROLLBACK] Rollback FAILED:', rollbackError.message);
-          console.error('[CRITICAL] Manual intervention required!');
-          
-          // 發送緊急告警
-          await this.sendAlert({
-            level: 'CRITICAL',
-            message: 'Migration rollback failed',
-            migration: migration.name,
-            error: rollbackError.message
-          });
-        }
-      }
-      
-      return { 
-        success: false, 
-        error: error.message,
-        rolledBack: rollbackNeeded
-      };
-    }
-  }
-}
+import { SQLChecks } from '../src/core/sanity-checker.js';
+
+// 可在自訂 adapter 中使用
+const helpers = adapter.getSanityCheckHelpers();
 ```
 
-### 5.5 CLI 使用範例
+可用的 helper：
+- `SQLChecks.tableExists(connection, table, database)`
+- `SQLChecks.columnExists(connection, table, column, database)`
+- `SQLChecks.indexExists(connection, table, index, database)`
+- `SQLChecks.getColumnInfo(connection, table, column, database)`
+- `SQLChecks.createTableExistsCheck(table, database, shouldExist)`
+- `SQLChecks.createColumnCheck(table, column, database, expectedType, expectedNullable)`
+
+### 5.6 CLI 輸出範例
 
 ```bash
-# 執行遷移（含 Sanity Check）
-npm run up -c databases/users/config.js
+$ npm run up -c databases/users/config.js --sanity-check
 
-# 輸出範例：
-# ============================================================
-# [PHASE 1] Pre-Check: 20250115-add-phone-to-users
-# ============================================================
-# [PRE-CHECK] Checking if column exists... OK
-# [PRE-CHECK] Checking table size... 1,234,567 rows
-# [PRE-CHECK] Estimated execution time: ~30 seconds
-# [PRE-CHECK] All checks passed ✓
-#
-# ============================================================
-# [PHASE 2] Execute: 20250115-add-phone-to-users
-# ============================================================
-# [MIGRATE] Adding column phone...
-# [MIGRATE] Filling default values...
-# [MIGRATE] Setting NOT NULL constraint...
-# [MIGRATE] Done!
-#
-# ============================================================
-# [PHASE 3] Sanity Check: 20250115-add-phone-to-users
-# ============================================================
-# [SANITY] Verifying column exists... OK
-# [SANITY] Verifying data type... OK (VARCHAR(20))
-# [SANITY] Verifying NOT NULL constraint... OK
-# [SANITY] All checks passed ✓
-#
-# ============================================================
-# [SUCCESS] Migration completed in 28453ms
-# ============================================================
+[UP] Running migrations (mongodb)...
+   Sanity Check: ENABLED
+   Auto-Rollback: ENABLED
+
+🔍 Running 20250115-add-phone-to-users.js with sanity checks...
+
+════════════════════════════════════════════════════════════
+[PHASE 1] Pre-Check
+════════════════════════════════════════════════════════════
+✅ Pre-Check Passed
+   • Collection "users" exists
+   • Field "phone" not yet added
+
+════════════════════════════════════════════════════════════
+[PHASE 2] Execute Migration
+════════════════════════════════════════════════════════════
+✅ Migration Executed
+
+════════════════════════════════════════════════════════════
+[PHASE 3] Sanity Check (Post-Check)
+════════════════════════════════════════════════════════════
+✅ Sanity Check Passed
+   • All 1234 users have phone field
+   • Index "phone_1" created successfully
+
+════════════════════════════════════════════════════════════
+✅ Migration completed successfully in 1523ms
+════════════════════════════════════════════════════════════
+
+✅ Applied 1 migration(s):
+   20250115-add-phone-to-users.js
+
+📋 Sanity Check Results:
+   ✅ 20250115-add-phone-to-users.js: PASSED (1523ms)
 ```
 
-### 5.6 失敗時的自動回滾輸出
+### 5.7 自動回滾輸出範例
 
 ```bash
-# ============================================================
-# [PHASE 1] Pre-Check: 20250115-add-phone-to-users
-# ============================================================
-# [PRE-CHECK] All checks passed ✓
-#
-# ============================================================
-# [PHASE 2] Execute: 20250115-add-phone-to-users
-# ============================================================
-# [MIGRATE] Adding column phone...
-# [MIGRATE] Filling default values...
-# [MIGRATE] Done!
-#
-# ============================================================
-# [PHASE 3] Sanity Check: 20250115-add-phone-to-users
-# ============================================================
-# [SANITY] Verifying column exists... OK
-# [SANITY] Verifying data type... FAILED!
-#
-# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-# [FAILED] Sanity Check Failed: Column phone has wrong type: TEXT
-# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-#
-# [AUTO-ROLLBACK] Starting automatic rollback...
-# [ROLLBACK] Removing column phone...
-# [ROLLBACK] Done!
-# [AUTO-ROLLBACK] Rollback completed successfully
-#
-# ============================================================
-# [RESULT] Migration FAILED and was rolled back
-# ============================================================
-# Exit code: 1
+$ npm run up -c databases/users/config.js --sanity-check
+
+[UP] Running migrations (mongodb)...
+   Sanity Check: ENABLED
+   Auto-Rollback: ENABLED
+
+🔍 Running 20250115-add-phone-to-users.js with sanity checks...
+
+════════════════════════════════════════════════════════════
+[PHASE 1] Pre-Check
+════════════════════════════════════════════════════════════
+✅ Pre-Check Passed
+
+════════════════════════════════════════════════════════════
+[PHASE 2] Execute Migration
+════════════════════════════════════════════════════════════
+✅ Migration Executed
+
+════════════════════════════════════════════════════════════
+[PHASE 3] Sanity Check (Post-Check)
+════════════════════════════════════════════════════════════
+❌ Sanity Check Failed: 50 documents still missing phone field
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+[AUTO-ROLLBACK] Initiating automatic rollback...
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+✅ Rollback Completed
+
+📋 Sanity Check Results:
+   ❌ 20250115-add-phone-to-users.js: FAILED - 50 documents still missing phone field
+      ⏪ Auto-rolled back
+
+❌ Errors:
+   20250115-add-phone-to-users.js: 50 documents still missing phone field
 ```
 
-### 5.7 常見 Sanity Check 項目
+### 5.8 Sanity Check 核心程式碼位置
 
-| 檢查項目 | SQL 範例 | 說明 |
-|----------|----------|------|
-| 欄位存在 | `SELECT column_name FROM information_schema.columns WHERE...` | 確認 DDL 成功 |
-| 資料類型正確 | `SELECT data_type FROM information_schema.columns WHERE...` | 避免類型錯誤 |
-| 約束已套用 | `SELECT is_nullable FROM information_schema.columns WHERE...` | 確認 NOT NULL |
-| 索引已建立 | `SELECT indexname FROM pg_indexes WHERE...` | 效能保證 |
-| 資料完整性 | `SELECT COUNT(*) WHERE column IS NULL` | 確認資料填充 |
-| 外鍵有效 | `SELECT COUNT(*) FROM child LEFT JOIN parent...` | 參照完整性 |
+| 檔案 | 說明 |
+|------|------|
+| [src/core/sanity-checker.js](../src/core/sanity-checker.js) | Sanity Check 核心框架 |
+| [src/adapters/mongodb-adapter.js](../src/adapters/mongodb-adapter.js) | MongoDB `upWithSanityCheck()` |
+| [src/adapters/mariadb-adapter.js](../src/adapters/mariadb-adapter.js) | MariaDB `upWithSanityCheck()` |
+
+### 5.9 常見 Sanity Check 項目
+
+| 檢查類型 | MongoDB 範例 | SQL 範例 |
+|----------|-------------|----------|
+| 欄位/欄位存在 | `{ field: { $exists: true } }` | `information_schema.COLUMNS` |
+| 資料類型正確 | N/A (schemaless) | `DATA_TYPE = 'varchar'` |
+| 索引已建立 | `db.collection.indexes()` | `information_schema.STATISTICS` |
+| 資料完整性 | `countDocuments({ field: null })` | `SELECT COUNT(*) WHERE col IS NULL` |
 
 ---
 
@@ -1182,6 +1137,57 @@ databases/
 ### 3.1 冪等性設計原則
 
 DCL 必須是**冪等的**（執行多次結果相同），因為權限狀態可能被手動修改。
+
+#### MongoDB 冪等寫法
+
+```javascript
+// _platform/dcl/20250101000001-create-app-user.js
+
+export const up = async (db, client) => {
+  const adminDb = client.db('admin');
+  
+  // ✅ 正確：冪等寫法 - 先檢查使用者是否存在
+  const existingUser = await adminDb.command({
+    usersInfo: { user: 'app_user', db: 'myapp' }
+  }).catch(() => ({ users: [] }));
+  
+  if (existingUser.users.length === 0) {
+    // 使用者不存在，建立新使用者
+    await adminDb.command({
+      createUser: 'app_user',
+      pwd: process.env.APP_USER_PASSWORD || 'changeme',
+      roles: [
+        { role: 'readWrite', db: 'myapp' },
+        { role: 'read', db: 'myapp_analytics' }
+      ]
+    });
+  } else {
+    // 使用者已存在，更新角色（確保權限正確）
+    await adminDb.command({
+      updateUser: 'app_user',
+      roles: [
+        { role: 'readWrite', db: 'myapp' },
+        { role: 'read', db: 'myapp_analytics' }
+      ]
+    });
+  }
+};
+
+export const down = async (db, client) => {
+  const adminDb = client.db('admin');
+  
+  // ✅ 正確：冪等寫法 - 忽略不存在的使用者
+  try {
+    await adminDb.command({
+      dropUser: 'app_user'
+    });
+  } catch (err) {
+    if (err.code !== 11) { // 11 = UserNotFound
+      throw err;
+    }
+  }
+};
+```
 
 #### PostgreSQL 冪等寫法
 
@@ -1710,6 +1716,8 @@ export class DDLSanityChecker {
 
 ### 情境 1：開發者新增資料表
 
+**MariaDB/MySQL/PostgreSQL 版本：**
+
 ```bash
 # 1. 建立遷移檔案
 npm run create -c databases/products/config.js "create-orders-table"
@@ -1743,6 +1751,82 @@ DROP INDEX CONCURRENTLY IF EXISTS idx_order_user_id;
 DROP TABLE IF EXISTS "order";
 ```
 
+**MongoDB 版本：**
+
+```bash
+# 1. 建立遷移檔案
+npm run create -c databases/products/config.js "create-orders-collection"
+
+# 2. 編輯遷移檔案
+```
+
+```javascript
+// 20250120000001-create-orders-collection.js
+
+export const up = async (db, client) => {
+  // 建立帶有 Schema 驗證的 Collection
+  await db.createCollection('orders', {
+    validator: {
+      $jsonSchema: {
+        bsonType: 'object',
+        required: ['userId', 'totalAmount', 'status', 'createdAt'],
+        properties: {
+          userId: { 
+            bsonType: 'objectId',
+            description: 'Reference to user - required'
+          },
+          totalAmount: { 
+            bsonType: 'decimal',
+            minimum: 0,
+            description: 'Order total amount - required'
+          },
+          status: { 
+            enum: ['pending', 'processing', 'completed', 'cancelled'],
+            description: 'Order status - required'
+          },
+          items: {
+            bsonType: 'array',
+            items: {
+              bsonType: 'object',
+              required: ['productId', 'quantity', 'price'],
+              properties: {
+                productId: { bsonType: 'objectId' },
+                quantity: { bsonType: 'int', minimum: 1 },
+                price: { bsonType: 'decimal', minimum: 0 }
+              }
+            }
+          },
+          createdAt: { bsonType: 'date' },
+          updatedAt: { bsonType: 'date' }
+        }
+      }
+    },
+    validationLevel: 'moderate',
+    validationAction: 'error'
+  });
+  
+  // 建立索引
+  await db.collection('orders').createIndex(
+    { userId: 1 },
+    { name: 'idx_orders_userId', background: true }
+  );
+  
+  await db.collection('orders').createIndex(
+    { status: 1 },
+    { name: 'idx_orders_status', background: true }
+  );
+  
+  await db.collection('orders').createIndex(
+    { createdAt: -1 },
+    { name: 'idx_orders_createdAt', background: true }
+  );
+};
+
+export const down = async (db, client) => {
+  await db.collection('orders').drop();
+};
+```
+
 ```bash
 # 3. 驗證
 npm run validate -c databases/products/config.js
@@ -1755,6 +1839,8 @@ git add . && git commit -m "feat: add orders table"
 ```
 
 ### 情境 2：平台團隊建立應用程式帳號
+
+**PostgreSQL 版本：**
 
 ```bash
 # 1. 建立 DCL 遷移
@@ -1791,7 +1877,70 @@ REVOKE CONNECT ON DATABASE products FROM products_app;
 DROP USER IF EXISTS products_app;
 ```
 
+**MongoDB 版本：**
+
+```bash
+# 1. 建立 DCL 遷移
+npm run create -c databases/_platform/config.js "create-products-app-user"
+```
+
+```javascript
+// _platform/dcl/20250120000001-create-products-app-user.js
+
+export const up = async (db, client) => {
+  const adminDb = client.db('admin');
+  
+  // 冪等寫法：先檢查使用者是否存在
+  const userInfo = await adminDb.command({
+    usersInfo: { user: 'products_app', db: 'products' }
+  }).catch(() => ({ users: [] }));
+  
+  if (userInfo.users.length === 0) {
+    // 建立應用程式專用帳號
+    await adminDb.command({
+      createUser: 'products_app',
+      pwd: process.env.PRODUCTS_APP_PASSWORD || 'changeme',
+      roles: [
+        // 對 products 資料庫有讀寫權限
+        { role: 'readWrite', db: 'products' },
+        // 對 products_analytics 只有讀取權限
+        { role: 'read', db: 'products_analytics' }
+      ],
+      mechanisms: ['SCRAM-SHA-256'],
+      customData: {
+        createdBy: 'migration',
+        purpose: 'Products service application account'
+      }
+    });
+  } else {
+    // 使用者已存在，確保角色正確
+    await adminDb.command({
+      updateUser: 'products_app',
+      roles: [
+        { role: 'readWrite', db: 'products' },
+        { role: 'read', db: 'products_analytics' }
+      ]
+    });
+  }
+};
+
+export const down = async (db, client) => {
+  const adminDb = client.db('admin');
+  
+  try {
+    await adminDb.command({ dropUser: 'products_app' });
+  } catch (err) {
+    // 使用者不存在時忽略錯誤 (UserNotFound = 11)
+    if (err.code !== 11) {
+      throw err;
+    }
+  }
+};
+```
+
 ### 情境 3：新增欄位（安全方式）
+
+**MariaDB/MySQL/PostgreSQL 版本：**
 
 ```bash
 npm run create -c databases/users/config.js "add-phone-to-users"
@@ -1813,7 +1962,143 @@ ALTER TABLE "user" ALTER COLUMN phone SET DEFAULT '';
 ALTER TABLE "user" DROP COLUMN IF EXISTS phone;
 ```
 
+**MongoDB 版本：**
+
+```bash
+npm run create -c databases/users/config.js "add-phone-to-users"
+```
+
+```javascript
+// 20250120000001-add-phone-to-users.js
+
+// Pre-Check: 驗證前置條件
+export const preCheck = async ({ db }) => {
+  const collections = await db.listCollections({ name: 'users' }).toArray();
+  if (collections.length === 0) {
+    return { success: false, error: 'Collection "users" does not exist' };
+  }
+  
+  // 檢查是否已有 phone 欄位的文件
+  const hasPhone = await db.collection('users').findOne({ phone: { $exists: true } });
+  if (hasPhone) {
+    return { 
+      success: false, 
+      error: 'Field "phone" already exists in some documents' 
+    };
+  }
+  
+  return { success: true, details: ['Collection exists', 'Field not yet added'] };
+};
+
+export const up = async (db, client) => {
+  // 1. 批次更新所有文件，新增 phone 欄位
+  // 使用 bulkWrite 處理大量資料時更有效率
+  const batchSize = 1000;
+  let processed = 0;
+  
+  while (true) {
+    const result = await db.collection('users').updateMany(
+      { phone: { $exists: false } },
+      { 
+        $set: { 
+          phone: '',
+          phoneVerified: false 
+        } 
+      },
+      { limit: batchSize }
+    );
+    
+    processed += result.modifiedCount;
+    
+    if (result.modifiedCount < batchSize) {
+      break; // 所有文件都已處理
+    }
+  }
+  
+  console.log(`Updated ${processed} documents with phone field`);
+  
+  // 2. 建立索引（background: true 避免阻塞）
+  await db.collection('users').createIndex(
+    { phone: 1 },
+    { 
+      name: 'idx_users_phone',
+      sparse: true,      // 只索引有 phone 欄位的文件
+      background: true   // 背景建立，不阻塞其他操作
+    }
+  );
+  
+  // 3. 更新 Schema Validation（如果有的話）
+  await db.command({
+    collMod: 'users',
+    validator: {
+      $jsonSchema: {
+        bsonType: 'object',
+        properties: {
+          phone: {
+            bsonType: 'string',
+            pattern: '^[0-9+\\-\\s]*$',
+            description: 'Phone number'
+          },
+          phoneVerified: {
+            bsonType: 'bool',
+            description: 'Phone verification status'
+          }
+        }
+      }
+    },
+    validationLevel: 'moderate'
+  }).catch(() => {
+    // Collection 可能沒有啟用 validation，忽略錯誤
+  });
+};
+
+// Post-Check: 驗證遷移結果
+export const postCheck = async ({ db }) => {
+  // 檢查是否還有文件缺少 phone 欄位
+  const missing = await db.collection('users').countDocuments({
+    phone: { $exists: false }
+  });
+  
+  if (missing > 0) {
+    return { 
+      success: false, 
+      error: `${missing} documents still missing phone field` 
+    };
+  }
+  
+  // 檢查索引是否建立成功
+  const indexes = await db.collection('users').indexes();
+  const phoneIndex = indexes.find(idx => idx.name === 'idx_users_phone');
+  
+  if (!phoneIndex) {
+    return { success: false, error: 'Index idx_users_phone not found' };
+  }
+  
+  return { 
+    success: true, 
+    details: ['All users have phone field', 'Index created successfully'] 
+  };
+};
+
+export const down = async (db, client) => {
+  // 1. 移除索引
+  try {
+    await db.collection('users').dropIndex('idx_users_phone');
+  } catch (e) {
+    // 索引可能不存在
+  }
+  
+  // 2. 移除欄位
+  await db.collection('users').updateMany(
+    {},
+    { $unset: { phone: '', phoneVerified: '' } }
+  );
+};
+```
+
 ### 情境 4：危險操作需要例外處理
+
+**MariaDB/MySQL/PostgreSQL 版本：**
 
 ```bash
 # 需要刪除舊表（經審核批准）
@@ -1834,12 +2119,53 @@ DROP TABLE IF EXISTS legacy_temp_data;
 SELECT 1; -- placeholder
 ```
 
+**MongoDB 版本：**
+
+```bash
+# 需要刪除舊 Collection（經審核批准）
+npm run create -c databases/products/config.js "drop-legacy-temp-collection"
+```
+
+```javascript
+// 20250120000001-drop-legacy-temp-collection.js
+
+/**
+ * migrate-ignore: drop
+ * 審核單號: SEC-2025-001
+ * 審核人: dba@company.com
+ * 原因: 清理已廢棄的暫存 Collection，無業務資料
+ */
+
+export const up = async (db, client) => {
+  // 先檢查 Collection 是否存在
+  const collections = await db.listCollections({ name: 'legacy_temp_data' }).toArray();
+  
+  if (collections.length > 0) {
+    // 記錄刪除前的文件數量（供審計）
+    const count = await db.collection('legacy_temp_data').countDocuments();
+    console.log(`Dropping legacy_temp_data collection with ${count} documents`);
+    
+    await db.collection('legacy_temp_data').drop();
+  } else {
+    console.log('Collection legacy_temp_data does not exist, skipping');
+  }
+};
+
+export const down = async (db, client) => {
+  // 無法回滾（Collection 已刪除）
+  // 需要從備份還原
+  console.warn('WARNING: Cannot rollback drop operation. Restore from backup if needed.');
+};
+```
+
 ```bash
 # 使用 --allow-dangerous 旗標（需審核權限）
 npm run validate -c databases/products/config.js --allow-dangerous
 ```
 
 ### 情境 5：大表新增索引（零停機）
+
+**MariaDB/MySQL/PostgreSQL 版本：**
 
 ```sql
 -- +migrate Up
@@ -1856,6 +2182,93 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_created_at
 
 -- +migrate Down
 DROP INDEX CONCURRENTLY IF EXISTS idx_orders_created_at;
+```
+
+**MongoDB 版本：**
+
+```javascript
+// 20250120000001-add-orders-index.js
+
+/**
+ * 大 Collection 新增索引（零停機）
+ * MongoDB 預設使用背景建立索引，不會阻塞讀寫操作
+ */
+
+export const preCheck = async ({ db }) => {
+  // 檢查 Collection 是否存在
+  const collections = await db.listCollections({ name: 'orders' }).toArray();
+  if (collections.length === 0) {
+    return { success: false, error: 'Collection "orders" does not exist' };
+  }
+  
+  // 檢查索引是否已存在
+  const indexes = await db.collection('orders').indexes();
+  const existingIndex = indexes.find(idx => idx.name === 'idx_orders_createdAt');
+  if (existingIndex) {
+    return { 
+      success: false, 
+      error: 'Index idx_orders_createdAt already exists' 
+    };
+  }
+  
+  // 估算文件數量，提醒可能需要的時間
+  const count = await db.collection('orders').estimatedDocumentCount();
+  const details = [`Collection has approximately ${count.toLocaleString()} documents`];
+  
+  if (count > 1000000) {
+    details.push('⚠️ Large collection - index creation may take several minutes');
+  }
+  
+  return { success: true, details };
+};
+
+export const up = async (db, client) => {
+  const startTime = Date.now();
+  
+  // 建立索引（background: true 確保不阻塞其他操作）
+  await db.collection('orders').createIndex(
+    { createdAt: -1 },  // 降序，方便查詢最新訂單
+    {
+      name: 'idx_orders_createdAt',
+      background: true,  // 背景建立，不阻塞讀寫
+      expireAfterSeconds: undefined  // 如需 TTL 索引可設定
+    }
+  );
+  
+  const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+  console.log(`Index created in ${duration} seconds`);
+};
+
+export const postCheck = async ({ db }) => {
+  // 驗證索引建立成功
+  const indexes = await db.collection('orders').indexes();
+  const newIndex = indexes.find(idx => idx.name === 'idx_orders_createdAt');
+  
+  if (!newIndex) {
+    return { success: false, error: 'Index was not created' };
+  }
+  
+  // 檢查索引狀態
+  return { 
+    success: true, 
+    details: [
+      `Index ${newIndex.name} created successfully`,
+      `Index key: ${JSON.stringify(newIndex.key)}`
+    ]
+  };
+};
+
+export const down = async (db, client) => {
+  try {
+    await db.collection('orders').dropIndex('idx_orders_createdAt');
+    console.log('Index idx_orders_createdAt dropped');
+  } catch (err) {
+    if (err.code !== 27) { // 27 = IndexNotFound
+      throw err;
+    }
+    console.log('Index not found, skipping drop');
+  }
+};
 ```
 
 ---

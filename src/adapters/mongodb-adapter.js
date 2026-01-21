@@ -4,6 +4,7 @@
  */
 
 import { BaseAdapter } from '../core/base-adapter.js';
+import { SanityChecker, MongoDBChecks } from '../core/sanity-checker.js';
 import migrateMongo from 'migrate-mongo';
 import { MongoClient } from 'mongodb';
 import fs from 'fs/promises';
@@ -15,6 +16,19 @@ export class MongoDBAdapter extends BaseAdapter {
     this.dbType = 'mongodb';
     this.client = null;
     this.db = null;
+    this.sanityChecker = new SanityChecker({
+      enabled: config.sanityCheck?.enabled ?? false,
+      autoRollback: config.sanityCheck?.autoRollback ?? true,
+      timeoutMs: config.sanityCheck?.timeoutMs ?? 30000,
+      verbose: config.sanityCheck?.verbose ?? true
+    });
+  }
+
+  /**
+   * Get sanity check helpers for MongoDB
+   */
+  getSanityCheckHelpers() {
+    return MongoDBChecks;
   }
 
   /**
@@ -123,6 +137,97 @@ export class MongoDBAdapter extends BaseAdapter {
       result.applied = migrated;
     } catch (error) {
       result.errors.push(error.message);
+    }
+
+    return result;
+  }
+
+  /**
+   * Run migration with sanity check
+   * Supports preCheck and postCheck functions exported from migration files
+   * 
+   * @param {Object} options
+   * @param {boolean} options.verbose - Enable verbose logging
+   * @returns {Promise<Object>}
+   */
+  async upWithSanityCheck(options = {}) {
+    const result = {
+      applied: [],
+      errors: [],
+      sanityResults: []
+    };
+
+    // Get pending migrations
+    const statusResult = await migrateMongo.status(this.db);
+    const pending = statusResult.filter(m => m.appliedAt === 'PENDING');
+
+    if (pending.length === 0) {
+      return result;
+    }
+
+    // Process each pending migration
+    for (const migration of pending) {
+      const filePath = path.join(this.config.migrationsDir, migration.fileName);
+      
+      try {
+        // Dynamically import the migration file
+        const migrationModule = await import(`file://${filePath}`);
+        
+        const context = {
+          db: this.db,
+          client: this.client,
+          config: this.config
+        };
+
+        // Configure sanity checker for this migration
+        const checker = new SanityChecker({
+          enabled: true,
+          autoRollback: this.config.sanityCheck?.autoRollback ?? true,
+          timeoutMs: this.config.sanityCheck?.timeoutMs ?? 30000,
+          verbose: options.verbose ?? this.config.sanityCheck?.verbose ?? true
+        });
+
+        // Run with sanity check if preCheck or postCheck are defined
+        if (migrationModule.preCheck || migrationModule.postCheck) {
+          console.log(`\n🔍 Running ${migration.fileName} with sanity checks...`);
+          
+          const sanityResult = await checker.runWithSanityCheck({
+            up: async () => {
+              await migrateMongo.up(this.db, this.client);
+            },
+            down: async () => {
+              await migrateMongo.down(this.db, this.client);
+            },
+            preCheck: migrationModule.preCheck,
+            postCheck: migrationModule.postCheck,
+            context
+          });
+
+          result.sanityResults.push({
+            file: migration.fileName,
+            ...sanityResult
+          });
+
+          if (sanityResult.success) {
+            result.applied.push(migration.fileName);
+          } else {
+            result.errors.push(`${migration.fileName}: ${sanityResult.error}`);
+            if (!sanityResult.rolledBack) {
+              break; // Stop processing if sanity check failed without rollback
+            }
+          }
+        } else {
+          // No sanity checks defined, run normally
+          const migrated = await migrateMongo.up(this.db, this.client);
+          if (migrated.length > 0) {
+            result.applied.push(...migrated);
+          }
+          break; // migrate-mongo.up() processes all pending at once
+        }
+      } catch (error) {
+        result.errors.push(`${migration.fileName}: ${error.message}`);
+        break;
+      }
     }
 
     return result;

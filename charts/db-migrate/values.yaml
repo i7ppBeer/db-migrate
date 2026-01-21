@@ -330,6 +330,12 @@ migration:
     enabled: true                  # 是否執行驗證
     allowDangerous: false          # 是否允許危險操作 (DROP DATABASE 等)
     failOnWarning: false           # 警告是否視為失敗
+  
+  # Sanity Check 設定 (Pre-Check / Post-Check / Auto-Rollback)
+  sanityCheck:
+    enabled: false                 # 是否啟用 Sanity Check
+    autoRollback: true             # Sanity Check 失敗時是否自動回滾
+    timeoutMs: 30000               # Sanity Check 超時時間 (毫秒)
 
 # ============================================================
 # Job Configuration (Kubernetes Job 設定)

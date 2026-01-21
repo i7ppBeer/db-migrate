@@ -1,186 +1,452 @@
-# Database Migration Management System 即將推出
+# 未來新聞稿 (Internal Press Release)
 
-**預計發布日期**：2026 年 Q2
-
-我們正在開發全新的 **Database Migration Management System**，這是一套企業級資料庫遷移管理解決方案，旨在解決困擾業界多年的資料庫變更管理難題。
+> *這是一份 AWS Working Backwards 風格的內部文件，用於在開發前釐清產品願景與客戶價值。*
 
 ---
 
-## 我們要解決的問題
+## db-migrate 正式發布：終結「資料庫變更恐懼症」
 
-### 🔥 業界現況：資料庫變更仍是高風險作業
+**開發團隊不再害怕週五部署資料庫變更**
 
-根據我們的調查，**78% 的生產環境事故與資料庫變更相關**。即使在 2026 年的今天，多數團隊仍面臨以下痛點：
+---
 
-#### 痛點一：一次失誤，數小時停機
+**2026 年 Q2** — 今天，我們發布 db-migrate，一套專為解決「資料庫變更恐懼症」而生的遷移管理系統。
 
-> *「大促當天，工程師在千萬級訂單表上跑了 CREATE INDEX，全站鎖死 4 小時，損失超過 2000 萬。」*
+### 我們要解決的問題
+
+在與超過 50 個開發團隊深度訪談後，我們發現一個驚人的事實：
+
+> **「我們的 down migration 從來沒測過。」**
+
+這不是個案，而是業界常態。以下是我們收集到的真實痛點：
+
+---
+
+#### 😰 痛點一：回滾腳本永遠沒測過
+
+*「寫 down migration 只是為了通過 Code Review，從來沒人真的跑過。直到出事那天，才發現根本跑不動。」*
+
+**數據**：90% 的團隊從未在部署前測試過回滾腳本。
+
+**後果**：當生產環境出問題需要回滾時，平均需要 2-4 小時手動修復，而不是預期的 5 分鐘自動回滾。
+
+---
+
+#### 😱 痛點二：危險操作悄悄混入
+
+*「Junior 工程師不小心在 migration 裡寫了 DROP DATABASE，Code Review 沒注意到就合併了。」*
+
+**數據**：65% 的資料庫相關生產事故，源於未被 Review 發現的危險操作。
+
+**後果**：資料永久丟失、服務長時間中斷、客戶信任受損。
+
+---
+
+#### 😤 痛點三：遷移執行完才知道有問題
+
+*「Migration 跑完說成功，結果業務邏輯全壞了。因為欄位加了，但資料沒填對。」*
+
+**數據**：40% 的遷移問題在執行後數小時甚至數天才被發現。
+
+**後果**：發現太晚，已經無法簡單回滾，需要寫補償腳本修復資料。
+
+---
+
+#### 😵 痛點四：權限管理混亂
+
+*「開發者可以直接改資料庫權限，有人不小心把 root 密碼寫進 migration 裡 commit 上去了。」*
+
+**數據**：25% 的安全事件與資料庫權限變更相關。
+
+**後果**：敏感資訊外洩、權限被濫用、合規審計失敗。
+
+---
+
+### 我們的解決方案
+
+db-migrate 針對上述每一個痛點，提供對應的解決機制：
+
+| 痛點 | 解決方案 | 效果 |
+|------|----------|------|
+| 回滾腳本沒測過 | **Up-Down-Up 三階段強制測試** | 回滾成功率 30% → 95% |
+| 危險操作混入 | **危險操作自動攔截 + 智慧配對檢測** | 危險操作 100% 攔截或標記 |
+| 執行完才知有問題 | **Sanity Check + 自動回滾** | 問題發現時間：數小時 → 數秒 |
+| 權限管理混亂 | **DDL/DCL 強制分離** | 權限變更必須獨立審核 |
+
+---
+
+### 客戶證言
+
+> *「導入 db-migrate 後，我們終於敢在週五下午部署資料庫變更了。因為我們知道，就算出問題，5 分鐘內就能自動回滾。」*
+>
 > — 某電商平台 SRE 主管
 
-**現實情況：**
-- 大表執行 `ALTER TABLE` 會鎖表數分鐘甚至數小時
-- `CREATE INDEX` 未加 `CONCURRENTLY` 導致服務中斷
-- 缺乏自動檢測機制，全靠人工 review 把關
+---
 
-#### 痛點二：回滾腳本形同虛設
+### 可用性
 
-> *「我們的 down migration 從來沒測過。出事那天才發現根本跑不動。」*  
-> — 某金融科技公司 Tech Lead
-
-**現實情況：**
-- 90% 的團隊只測 up()，從不測 down()
-- 回滾腳本語法錯誤、邏輯錯誤在事故當下才被發現
-- 緊急回滾失敗，事故時間被迫延長
-
-#### 痛點三：誰改了什麼？沒人知道
-
-> *「開發環境能跑，生產環境報錯。查了兩天才發現有人偷偷手動改過 schema。」*  
-> — 某 SaaS 公司後端工程師
-
-**現實情況：**
-- 開發/測試/生產環境 schema 版本不一致
-- 手動執行 SQL 沒有記錄，無法追溯
-- 多人同時開發，遷移衝突頻繁
-
-#### 痛點四：權限管理混亂
-
-> *「新人不小心在 migration 裡寫了 GRANT ALL，差點開了後門。」*  
-> — 某企業資安長
-
-**現實情況：**
-- DDL（表結構）和 DCL（權限）混在一起
-- 開發者可能無意間授予過大權限
-- 缺乏分層審核機制
+db-migrate 現已開源（MIT 授權），支援 MongoDB 與 MariaDB/MySQL，提供 CLI、Docker Image 與 Kubernetes Helm Chart。
 
 ---
 
-## 我們的解決方案
+# 常見問題 (FAQ)
 
-### 🛡️ 自動攔截危險操作
+## 客戶常見問題
 
-系統在部署前自動掃描遷移腳本，識別並攔截高風險操作：
+### Q1: 為什麼現有的遷移工具解決不了這些問題？
 
-| 風險等級 | 操作類型 | 系統行為 |
-|----------|----------|----------|
-| 🔴 致命 | `DROP DATABASE`、`TRUNCATE` | 強制阻止，需雙重審核 |
-| 🟠 高危 | `DROP TABLE`、`DROP COLUMN` | 需 DBA 審核放行 |
-| 🟡 警告 | `DELETE` 無 WHERE、非 CONCURRENTLY 索引 | 顯示警告，建議修改 |
-| 🟢 安全 | Create/Drop 配對 | 智慧放行 |
+**A:** 現有工具（migrate-mongo、Flyway、Liquibase）專注於「版本控制」——記錄哪些遷移已執行。但這不是真正的問題所在。
 
-### 🔄 Up-Down-Up 三階段強制測試
+真正的問題是：
+- **沒有機制強制測試回滾** → 工具不會阻止你部署未測試的回滾腳本
+- **沒有機制攔截危險操作** → DROP DATABASE 可以堂而皇之地通過
+- **沒有機制驗證執行結果** → 執行「成功」不代表結果「正確」
 
-解決「回滾腳本沒測過」的問題：
-
-```
-Stage 1: UP    → 執行遷移，確認語法正確
-Stage 2: DOWN  → 執行回滾，確認腳本存在且可用
-Stage 3: UP    → 再次執行，確認回滾後狀態正確
-```
-
-**只有三階段全部通過，才允許部署到生產環境。**
-
-### ✅ Sanity Check + 自動回滾
-
-執行後立即驗證結果，失敗時自動回滾：
-
-```
-執行 ALTER TABLE → 檢查欄位是否存在 → 檢查類型是否正確 → 失敗則自動 DOWN
-```
-
-### 📂 DDL / DCL 強制分離
-
-透過目錄結構實現權責分離，開發者無法直接修改權限設定：
-
-```
-databases/
-├── _platform/    ← DCL：僅平台團隊可修改
-├── products/     ← DDL：產品團隊
-└── orders/       ← DDL：訂單團隊
-```
+db-migrate 不是要取代版本控制，而是在版本控制之上，加上「安全機制」。
 
 ---
 
-## 預期效益
+### Q2: 什麼是「Up-Down-Up 三階段強制測試」？為什麼這很重要？
 
-| 指標 | 改善幅度 |
+**A:** 這是 db-migrate 的核心機制：
+
+```
+UP (升級) → DOWN (回滾) → UP (再次升級)
+```
+
+**為什麼這很重要？**
+
+想像一個場景：你寫了一個 migration 新增欄位，然後寫了 down migration 刪除欄位。看起來很完美，對吧？
+
+但如果：
+- down migration 有語法錯誤？
+- down migration 刪錯欄位？
+- down migration 之後，up migration 跑不動了（因為有殘留資料）？
+
+這些問題，只有**真的跑過一遍**才會發現。Up-Down-Up 確保：
+1. UP 可以執行 ✓
+2. DOWN 可以回滾 ✓
+3. 回滾後再 UP 還是可以執行 ✓（證明回滾是乾淨的）
+
+---
+
+### Q3: 什麼是「危險操作自動攔截」？會不會誤判？
+
+**A:** 系統會自動偵測以下危險操作：
+
+| 類型 | 危險操作 |
 |------|----------|
-| 資料庫相關生產事故 | 減少 90% |
-| 回滾成功率 | 從 30% 提升至 95% |
-| Schema 不一致問題 | 完全消除 |
-| 遷移審核時間 | 減少 60%（自動化檢測） |
-| 權限相關資安事件 | 減少 80% |
+| 資料刪除 | `DROP TABLE`, `DROP DATABASE`, `TRUNCATE`, `db.collection.drop()` |
+| 權限變更 | `GRANT`, `REVOKE`, `CREATE USER`, `ALTER USER` |
+| 結構變更 | `DROP COLUMN` (可能導致資料丟失) |
+
+**會不會誤判？**
+
+會，而且這是故意的。我們寧可誤判，也不願漏判。
+
+但我們提供了「智慧配對」機制來減少誤判：
+
+```javascript
+// 這種情況會自動放行
+export const up = async (db) => {
+  await db.createCollection('temp_orders'); // CREATE
+};
+export const down = async (db) => {
+  await db.collection('temp_orders').drop(); // DROP ← 自動放行，因為有配對
+};
+```
+
+如果確實需要執行危險操作，使用 `-- migrate-ignore: drop` 註解並說明原因。
 
 ---
 
-## 規劃功能
+### Q4: 什麼是「Sanity Check」？和一般的測試有什麼不同？
 
-### 第一階段（Q2 2026）
-- [x] 危險操作靜態分析
-- [x] Up-Down-Up 三階段測試
-- [x] migrate-ignore 放行機制
-- [x] Web Console 管理介面
+**A:** Sanity Check 是**執行後的自動驗證**，確保「執行成功」等於「結果正確」。
 
-### 第二階段（Q3 2026）
-- [ ] Sanity Check 框架
-- [ ] 自動回滾機制
-- [ ] Slack/Teams 告警整合
-- [ ] 執行時間預估（基於表大小）
+**舉個例子**：
 
-### 第三階段（Q4 2026）
-- [ ] AI 輔助 Review（自動建議修改）
-- [ ] 跨環境 Schema 差異比對
-- [ ] 合規報告自動生成
-- [ ] 多租戶支援
+你要給所有用戶新增 `phone` 欄位，預設值為空字串：
 
----
+```javascript
+export const up = async (db) => {
+  await db.collection('users').updateMany({}, { $set: { phone: '' } });
+};
+```
 
-## 技術規格（規劃中）
+執行後，MongoDB 回傳 `{ acknowledged: true }`。成功了？
 
-| 項目 | 規格 |
-|------|------|
-| **支援資料庫** | MongoDB 6.0+、PostgreSQL 12+、MySQL 8.0+ |
-| **遷移格式** | JavaScript (ESM)、SQL |
-| **部署方式** | Kubernetes Job、Docker、CLI |
-| **整合** | GitHub Actions、GitLab CI、Jenkins |
+不一定。可能：
+- 有些文件因為 filter 條件問題沒被更新
+- 更新過程中有文件被其他程序寫入
 
----
+**Sanity Check 會驗證結果**：
 
-## 搶先體驗
+```javascript
+export const postCheck = async ({ db }) => {
+  const missing = await db.collection('users').countDocuments({ 
+    phone: { $exists: false } 
+  });
+  
+  if (missing > 0) {
+    return { 
+      success: false, 
+      error: `還有 ${missing} 筆資料沒有 phone 欄位` 
+    };
+  }
+  return { success: true };
+};
+```
 
-我們正在招募 **Early Access 測試夥伴**。如果您的團隊：
-
-- 管理 10+ 個資料庫
-- 每月執行 20+ 次 schema 變更
-- 曾因資料庫變更導致生產事故
-
-歡迎聯繫我們，成為首批使用者並參與功能設計！
-
-### 聯繫方式
-
-- 📧 Email: migration-preview@example.com
-- 💬 GitHub Discussions: [加入討論](https://github.com/i7ppBeer/mongodb-migrate/discussions)
-- 📝 需求調查表: [填寫問卷](https://forms.example.com/migration-survey)
+如果 `postCheck` 失敗，系統會**自動執行 down() 回滾**。
 
 ---
 
-## 常見問題
+### Q5: 自動回滾不會造成更大的問題嗎？
 
-### Q: 這和現有的 migrate-mongo / sql-migrate 有什麼不同？
+**A:** 這是很多人的擔心，讓我解釋為什麼自動回滾是安全的：
 
-**A:** 現有工具只提供基本的版本控制。我們額外提供：
-- 危險操作自動攔截
-- Up-Down-Up 強制測試
-- DDL/DCL 分離管理
-- Sanity Check + 自動回滾
+**前提條件**：
+- 你的 migration 已經通過 Up-Down-Up 測試
+- 這代表 down migration 是**驗證過可以執行的**
 
-### Q: 會收費嗎？
+**自動回滾的邏輯**：
+1. `postCheck` 失敗 → 發現問題
+2. 執行 `down()` → 回到執行前狀態
+3. 問題在造成更大影響前被阻止
 
-**A:** 核心功能將維持開源免費。未來可能推出企業版，提供進階功能如 AI Review、合規報告等。
-
-### Q: 可以只用部分功能嗎？
-
-**A:** 可以。每個功能模組都可獨立啟用或停用，您可以根據團隊需求漸進式採用。
+**如果你還是不放心**：
+```bash
+# 停用自動回滾，只顯示警告
+node src/cli.js up --sanity-check --no-auto-rollback
+```
 
 ---
 
-*持續關注我們的更新，或 [Star 這個專案](https://github.com/i7ppBeer/mongodb-migrate) 以獲得發布通知！*
+### Q6: 我的團隊很忙，沒時間導入新工具。需要多久？
+
+**A:** 我們設計 db-migrate 為**漸進式採用**，從 5 分鐘開始：
+
+| 階段 | 時間 | 做什麼 | 得到什麼 |
+|------|------|--------|----------|
+| 1 | 5 分鐘 | 對現有遷移執行 `validate` | 立即看到潛在風險報告 |
+| 2 | 30 分鐘 | 將 `validate` 加入 CI | 自動攔截危險操作 |
+| 3 | 依節奏 | 啟用 Up-Down-Up 測試 | 確保回滾腳本可用 |
+| 4 | 依需求 | 加入 Sanity Check | 執行後自動驗證 |
+
+你不需要一次全部導入。先從 `validate` 開始，感受價值後再逐步深入。
+
+---
+
+## 內部常見問題 (Internal FAQ)
+
+### Q7: 這個專案的核心假設是什麼？如果假設錯了會怎樣？
+
+**A:** 我們的核心假設：
+
+| 假設 | 驗證方式 | 如果錯了 |
+|------|----------|----------|
+| 90% 團隊沒測過 down migration | 訪談 50+ 團隊確認 | 重新評估產品定位 |
+| 強制測試可以提高回滾成功率 | 內部試用數據 | 調整測試策略 |
+| 開發者願意多花時間寫 Sanity Check | 使用率追蹤 | 簡化 Sanity Check 寫法或提供自動生成 |
+| Kubernetes 是主要部署環境 | 市場調查 | 加強其他部署方式支援 |
+
+**最大風險**：開發者覺得「多此一舉」而不願採用。
+
+**緩解策略**：漸進式採用 + 先從 validate 開始展示價值。
+
+---
+
+### Q8: 為什麼不用現有的開源方案？
+
+**A:** 我們評估過：
+
+| 工具 | 為什麼不行 |
+|------|------------|
+| Flyway | 只有版本控制，沒有安全機制；且以 Java 生態為主 |
+| Liquibase | 同上，且設定複雜 |
+| migrate-mongo | 只支援 MongoDB，沒有危險操作檢測 |
+| sql-migrate | 只支援 SQL，沒有 Up-Down-Up 測試 |
+
+**關鍵差異**：這些工具解決「版本控制」，我們解決「安全機制」。這是不同的問題。
+
+---
+
+### Q9: 開發這個專案需要多少資源？
+
+**A:** 
+
+| 階段 | 時間 | 人力 | 產出 |
+|------|------|------|------|
+| MVP | 4 週 | 2 人 | CLI + MongoDB/MariaDB 支援 + 基本危險操作檢測 |
+| V1.0 | +4 週 | 2 人 | Up-Down-Up 測試 + Sanity Check + Helm Chart |
+| V1.5 | +4 週 | 2-3 人 | PostgreSQL 支援 + Web Console |
+
+---
+
+### Q10: 成功指標是什麼？
+
+**A:**
+
+| 指標 | 6 個月目標 | 12 個月目標 |
+|------|------------|-------------|
+| GitHub Stars | 500 | 2,000 |
+| npm 週下載量 | 1,000 | 5,000 |
+| 導入團隊數 | 20 | 100 |
+| 回滾成功率提升 | +50% | +65% |
+| 資料庫相關事故減少 | -50% | -80% |
+
+---
+
+# 附錄 A：問題場景
+
+## 場景一：週五下午的惡夢
+
+**時間**：週五下午 4:30
+**情況**：部署新版本，包含一個資料庫 migration
+
+```javascript
+// 20250121-add-payment-status.js
+export const up = async (db) => {
+  await db.collection('orders').updateMany(
+    {},
+    { $set: { paymentStatus: 'pending' } }
+  );
+};
+
+export const down = async (db) => {
+  await db.collection('orders').updateMany(
+    {},
+    { $unset: { paymentStatus: '' } }
+  );
+};
+```
+
+**出事了**：部署後發現，舊訂單不應該設為 `pending`，應該保持原狀。需要回滾。
+
+**沒有 db-migrate**：
+1. 嘗試執行 down migration → 失敗（因為從沒測過）
+2. 發現 down migration 有 bug
+3. 修復 bug、重新部署 → 又失敗
+4. 手動寫 SQL 修復 → 花了 3 小時
+5. 週五晚上 8:00 才下班
+
+**有 db-migrate**：
+1. 這個 migration 在 PR 階段就會被標記為「高風險」
+2. Code Review 時會被要求加上 Sanity Check
+3. 如果真的部署了，postCheck 會發現問題並自動回滾
+4. 5 分鐘內解決，準時下班
+
+---
+
+## 場景二：Junior 工程師的失誤
+
+**情況**：Junior 工程師要清理測試資料
+
+```sql
+-- 20250121-cleanup-test-data.sql
+-- +migrate Up
+DROP TABLE test_users;
+DROP TABLE test_orders;
+DROP TABLE users;  -- 手誤！應該是 test_users
+
+-- +migrate Down
+-- 沒寫，因為「反正只是清理」
+```
+
+**沒有 db-migrate**：
+- Code Review 沒注意到 `DROP TABLE users`
+- 部署到 Staging... 沒事（因為 Staging 的 users 本來就是測試資料）
+- 部署到 Production... 完蛋了
+
+**有 db-migrate**：
+```
+❌ VALIDATION FAILED
+
+1. Dangerous operation detected:
+   - Line 5: DROP TABLE users (not paired with CREATE)
+   - Reason: 'users' was not created in this migration
+   
+2. Missing down migration:
+   - No rollback script provided
+   
+Use --allow-dangerous to bypass (requires ADMIN approval)
+```
+
+部署被阻止，危機解除。
+
+---
+
+## 場景三：Sanity Check 救了一命
+
+**情況**：要給所有用戶加上 `verified` 欄位
+
+```javascript
+export const up = async (db) => {
+  // 應該用 updateMany，但手誤用了 updateOne
+  await db.collection('users').updateOne(
+    {},
+    { $set: { verified: false } }
+  );
+};
+
+export const postCheck = async ({ db }) => {
+  const total = await db.collection('users').countDocuments();
+  const updated = await db.collection('users').countDocuments({ 
+    verified: { $exists: true } 
+  });
+  
+  if (updated !== total) {
+    return { 
+      success: false, 
+      error: `只有 ${updated}/${total} 筆資料被更新` 
+    };
+  }
+  return { success: true };
+};
+```
+
+**執行結果**：
+```
+✅ Migration executed
+🔍 Running post-check...
+❌ Post-check failed: 只有 1/10000 筆資料被更新
+🔄 Auto-rollback triggered...
+✅ Rollback completed
+```
+
+問題在造成影響前被自動修復。
+
+---
+
+# 附錄 B：快速開始
+
+```bash
+# 1. Clone 專案
+git clone https://github.com/i7ppBeer/ddl-migrate.git
+cd ddl-migrate
+
+# 2. 安裝依賴
+npm install
+
+# 3. 對現有遷移執行驗證（5 分鐘體驗價值）
+node src/cli.js -c your-project/config.js validate
+
+# 4. 啟動測試環境並執行完整測試
+docker compose up -d
+npm test
+```
+
+## 更多資源
+
+- 📖 [完整技術文件](./MIGRATION-MANAGEMENT-GUIDE.md)
+- 🐳 [本地測試指南](./LOCAL-TEST-GUIDE.md)
+- ☸️ [Kubernetes 部署指南](./BUILD-IMAGE-GUIDE.md)
+
+---
+
+*這是一份 Working Backwards 文件。在投入開發資源前，請確認：*
+1. *痛點描述是否準確？*
+2. *解決方案是否對症？*
+3. *FAQ 是否涵蓋主要疑慮？*
+4. *成功指標是否合理可衡量？*

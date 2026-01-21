@@ -4,6 +4,7 @@
  */
 
 import { BaseAdapter } from '../core/base-adapter.js';
+import { SanityChecker, SQLChecks } from '../core/sanity-checker.js';
 import mysql from 'mysql2/promise';
 import fs from 'fs/promises';
 import path from 'path';
@@ -14,6 +15,19 @@ export class MariaDBAdapter extends BaseAdapter {
     this.dbType = 'mariadb';
     this.connection = null;
     this.changelogTable = config.changelogTable || 'schema_migrations';
+    this.sanityChecker = new SanityChecker({
+      enabled: config.sanityCheck?.enabled ?? false,
+      autoRollback: config.sanityCheck?.autoRollback ?? true,
+      timeoutMs: config.sanityCheck?.timeoutMs ?? 30000,
+      verbose: config.sanityCheck?.verbose ?? true
+    });
+  }
+
+  /**
+   * Get sanity check helpers for SQL
+   */
+  getSanityCheckHelpers() {
+    return SQLChecks;
   }
 
   /**
@@ -176,6 +190,213 @@ export class MariaDBAdapter extends BaseAdapter {
     }
 
     return result;
+  }
+
+  /**
+   * Run migration with sanity check
+   * Supports embedded sanity check SQL comments
+   * 
+   * SQL format:
+   *   -- +migrate Up
+   *   -- +sanity PreCheck
+   *   SELECT COUNT(*) AS cnt FROM some_table WHERE condition;
+   *   -- -sanity PreCheck
+   *   -- Main migration SQL here
+   *   -- +sanity PostCheck  
+   *   SELECT 1 FROM information_schema.COLUMNS WHERE...
+   *   -- -sanity PostCheck
+   *   
+   *   -- +migrate Down
+   *   ...
+   * 
+   * @param {Object} options
+   * @param {boolean} options.verbose - Enable verbose logging
+   * @returns {Promise<Object>}
+   */
+  async upWithSanityCheck(options = {}) {
+    const result = {
+      applied: [],
+      errors: [],
+      sanityResults: []
+    };
+
+    try {
+      const status = await this.status();
+      
+      for (const file of status.pending) {
+        try {
+          const filePath = path.join(this.config.migrationsDir, file);
+          const content = await fs.readFile(filePath, 'utf-8');
+          
+          // Extract sections
+          const upSQL = this.extractSection(content, 'Up');
+          const downSQL = this.extractSection(content, 'Down');
+          const preCheckSQL = this.extractSanitySection(content, 'PreCheck');
+          const postCheckSQL = this.extractSanitySection(content, 'PostCheck');
+
+          const context = {
+            connection: this.connection,
+            database: this.config.database,
+            config: this.config
+          };
+
+          // If sanity checks are defined, use the sanity checker
+          if (preCheckSQL || postCheckSQL) {
+            console.log(`\n🔍 Running ${file} with sanity checks...`);
+
+            const checker = new SanityChecker({
+              enabled: true,
+              autoRollback: this.config.sanityCheck?.autoRollback ?? true,
+              timeoutMs: this.config.sanityCheck?.timeoutMs ?? 30000,
+              verbose: options.verbose ?? this.config.sanityCheck?.verbose ?? true
+            });
+
+            const sanityResult = await checker.runWithSanityCheck({
+              up: async () => {
+                if (upSQL) {
+                  await this.connection.execute(upSQL);
+                  const id = file.replace('.sql', '');
+                  await this.connection.execute(
+                    `INSERT INTO ${this.changelogTable} (id) VALUES (?)`,
+                    [id]
+                  );
+                }
+              },
+              down: async () => {
+                if (downSQL) {
+                  await this.connection.execute(downSQL);
+                  const id = file.replace('.sql', '');
+                  await this.connection.execute(
+                    `DELETE FROM ${this.changelogTable} WHERE id = ?`,
+                    [id]
+                  );
+                }
+              },
+              preCheck: preCheckSQL ? async () => {
+                return await this.executeSanityCheck(preCheckSQL);
+              } : null,
+              postCheck: postCheckSQL ? async () => {
+                return await this.executeSanityCheck(postCheckSQL);
+              } : null,
+              context
+            });
+
+            result.sanityResults.push({
+              file,
+              ...sanityResult
+            });
+
+            if (sanityResult.success) {
+              result.applied.push(file);
+            } else {
+              result.errors.push(`${file}: ${sanityResult.error}`);
+              if (!sanityResult.rolledBack) {
+                break;
+              }
+            }
+          } else {
+            // No sanity checks, run normally
+            if (upSQL) {
+              await this.connection.execute(upSQL);
+              const id = file.replace('.sql', '');
+              await this.connection.execute(
+                `INSERT INTO ${this.changelogTable} (id) VALUES (?)`,
+                [id]
+              );
+              result.applied.push(file);
+            }
+          }
+        } catch (error) {
+          result.errors.push(`${file}: ${error.message}`);
+          break;
+        }
+      }
+    } catch (error) {
+      result.errors.push(error.message);
+    }
+
+    return result;
+  }
+
+  /**
+   * Extract sanity check section from SQL content
+   */
+  extractSanitySection(content, sectionName) {
+    const regex = new RegExp(
+      `--\\s*\\+sanity\\s+${sectionName}\\s*\\n([\\s\\S]*?)--\\s*-sanity\\s+${sectionName}`,
+      'i'
+    );
+    const match = content.match(regex);
+    return match ? match[1].trim() : null;
+  }
+
+  /**
+   * Execute sanity check SQL and interpret results
+   * Returns { success: true/false, error: string, details: [] }
+   */
+  async executeSanityCheck(sql) {
+    try {
+      const [rows] = await this.connection.execute(sql);
+      
+      // Interpret results - look for common patterns
+      // If query returns rows with 'success' or 'valid' column
+      if (rows.length > 0) {
+        const firstRow = rows[0];
+        
+        // Check for explicit success/valid column
+        if ('success' in firstRow) {
+          return {
+            success: Boolean(firstRow.success),
+            error: firstRow.error || (firstRow.success ? null : 'Sanity check returned success=false'),
+            details: firstRow.details ? [firstRow.details] : []
+          };
+        }
+        
+        if ('valid' in firstRow) {
+          return {
+            success: Boolean(firstRow.valid),
+            error: firstRow.error || (firstRow.valid ? null : 'Sanity check returned valid=false'),
+            details: []
+          };
+        }
+
+        // Check for count-based checks (count should be > 0 for existence, or specific value)
+        if ('cnt' in firstRow || 'count' in firstRow) {
+          const count = firstRow.cnt ?? firstRow.count;
+          // If there's an expected column, compare
+          if ('expected' in firstRow) {
+            const success = count === firstRow.expected;
+            return {
+              success,
+              error: success ? null : `Count mismatch: expected ${firstRow.expected}, got ${count}`,
+              details: [`Count: ${count}`]
+            };
+          }
+          // Otherwise, just return the count info
+          return {
+            success: true,
+            details: [`Count: ${count}`]
+          };
+        }
+
+        // If query returned rows without special columns, consider it success
+        return {
+          success: true,
+          details: [`Query returned ${rows.length} row(s)`]
+        };
+      }
+
+      // Empty result set - might be intentional (checking non-existence)
+      return {
+        success: true,
+        details: ['Query returned no rows']
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: `Sanity check SQL error: ${error.message}`
+      };
+    }
   }
 
   async down(count = 1) {
