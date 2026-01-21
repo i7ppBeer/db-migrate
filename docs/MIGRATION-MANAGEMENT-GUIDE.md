@@ -1,6 +1,6 @@
 # 📋 SQL/MongoDB 資料庫遷移管理系統企劃案
 
-> 本文件說明如何使用 Migration 工具管理 DDL（Data Definition Language）和 DCL（Data Control Language），包含驗證規則、冪等性設計、危險指令檢查與 Sanity Check。
+> 本文件說明如何使用 Migration 工具管理 DDL（Data Definition Language）和 DCL（Data Control Language），包含驗證規則、冪等性設計、危險指令檢查、Sanity Check 與 DCL Repeatable 模式。
 
 ---
 
@@ -13,6 +13,10 @@
 5. [DDL 新增欄位 Sanity Check 與自動回滾](#五ddl-新增欄位-sanity-check-與自動回滾)
 6. [DDL vs DCL 分離管理策略](#六ddl-vs-dcl-分離管理策略)
 7. [DCL 管理規則（平台團隊）](#七dcl-管理規則平台團隊)
+   - [7.0 DCL Repeatable 模式概述](#70-dcl-repeatable-模式概述)
+   - [7.1 冪等性設計原則](#71-冪等性設計原則)
+   - [7.2 DCL 驗證規則](#72-dcl-驗證規則)
+   - [7.3 DCL 冪等性檢查器](#73-dcl-冪等性檢查器)
 8. [DDL 管理規則（開發團隊）](#八ddl-管理規則開發團隊)
 9. [完整管理規則總覽](#九完整管理規則總覽)
 10. [使用情境指南](#十使用情境指南)
@@ -1134,11 +1138,146 @@ databases/
 
 ## 七、DCL 管理規則（平台團隊）
 
-### 3.1 冪等性設計原則
+### 7.0 DCL Repeatable 模式概述
 
-DCL 必須是**冪等的**（執行多次結果相同），因為權限狀態可能被手動修改。
+DCL 遷移使用 **Repeatable 模式**，與 DDL 的 Versioned 模式不同：
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    DDL vs DCL 遷移模式比較                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   DDL (Versioned Mode)          │   DCL (Repeatable Mode)              │
+│   ─────────────────────────     │   ─────────────────────────────      │
+│   檔名: 20260101000001-xxx.sql  │   檔名: R__01_xxx.sql                │
+│   執行: 每個版本只執行一次       │   執行: Checksum 變更就重新執行       │
+│   追蹤: changelog 表記錄版本     │   追蹤: repeatable_migrations 表     │
+│   回滾: 需要 down() 遷移         │   回滾: 不需要，腳本本身是完整定義    │
+│   適用: 結構變更（CREATE/ALTER） │   適用: 權限管理（CREATE USER/GRANT）│
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Repeatable 模式執行邏輯
+
+```
+┌──────────────────┐
+│ 讀取 R__*.sql/js │
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐     Checksum 相同
+│ 計算文件 Checksum │ ──────────────────▶ 跳過執行
+└────────┬─────────┘
+         │ Checksum 不同或新文件
+         ▼
+┌──────────────────┐
+│   執行 DCL 腳本   │
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│ 更新 Checksum 表  │
+└──────────────────┘
+```
+
+#### CLI 命令
+
+```bash
+# 執行 DCL 遷移（只執行有變更的）
+node src/cli.js -c databases/mariadb/production-server/dcl/config.js dcl
+
+# 查看 DCL 狀態
+node src/cli.js -c databases/mariadb/production-server/dcl/config.js dcl:status
+
+# 驗證 DCL 冪等性（執行兩次，確認結果相同）
+node src/cli.js -c databases/mariadb/production-server/dcl/config.js dcl:verify
+```
+
+### 7.1 冪等性設計原則
+
+DCL 必須是**冪等的**（執行多次結果相同），這是 Repeatable 模式的核心要求。
+
+#### 冪等性驗證流程
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    DCL 冪等性驗證流程                                    │
+└─────────────────────────────────────────────────────────────────────────┘
+
+     ┌──────────────────────────────────────────────────────────────┐
+     │                     執行第一次                                │
+     │  執行 DCL 腳本 → 捕獲資料庫狀態 (users, grants, roles)        │
+     └──────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+     ┌──────────────────────────────────────────────────────────────┐
+     │                     執行第二次                                │
+     │  再次執行相同 DCL 腳本 → 捕獲資料庫狀態                        │
+     └──────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+     ┌──────────────────────────────────────────────────────────────┐
+     │                     比較狀態                                  │
+     │  State1 === State2 ? ✅ 冪等 : ❌ 非冪等                      │
+     └──────────────────────────────────────────────────────────────┘
+```
+
+#### MariaDB/MySQL 冪等寫法（推薦模式）
+
+```sql
+-- R__01_readonly_users.sql
+-- DCL Repeatable Migration: 使用 DROP IF EXISTS + CREATE 模式
+
+-- ✅ 推薦：DROP IF EXISTS + CREATE（完整重建，保證狀態一致）
+DROP USER IF EXISTS 'app_readonly'@'%';
+CREATE USER 'app_readonly'@'%' IDENTIFIED BY 'secure_password_123';
+GRANT SELECT ON myapp.* TO 'app_readonly'@'%';
+FLUSH PRIVILEGES;
+```
 
 #### MongoDB 冪等寫法
+
+```javascript
+// R__01_readonly_users.js
+
+export async function up(db, client) {
+  const adminDb = client.db('admin');
+  
+  // ✅ 正確：冪等寫法 - 使用 try-catch 處理 UserNotFound
+  await createOrUpdateUser(adminDb, {
+    user: 'app_readonly',
+    pwd: process.env.APP_READONLY_PASSWORD || 'secure_password',
+    roles: [{ role: 'read', db: 'myapp' }]
+  });
+}
+
+async function createOrUpdateUser(adminDb, userSpec) {
+  try {
+    // 嘗試更新現有使用者
+    await adminDb.command({
+      updateUser: userSpec.user,
+      pwd: userSpec.pwd,
+      roles: userSpec.roles
+    });
+  } catch (error) {
+    if (error.codeName === 'UserNotFound') {
+      // 使用者不存在，建立新使用者
+      await adminDb.command({
+        createUser: userSpec.user,
+        pwd: userSpec.pwd,
+        roles: userSpec.roles
+      });
+    } else {
+      throw error;
+    }
+  }
+}
+
+// Repeatable 模式不需要 down() 函數
+```
+
+#### MongoDB 冪等寫法 (舊版參考)
 
 ```javascript
 // _platform/dcl/20250101000001-create-app-user.js

@@ -146,6 +146,7 @@ UP (升級) → DOWN (回滾) → UP (再次升級)
 
 但我們提供了「智慧配對」機制來減少誤判：
 
+**MongoDB 範例：**
 ```javascript
 // 這種情況會自動放行
 export const up = async (db) => {
@@ -154,6 +155,18 @@ export const up = async (db) => {
 export const down = async (db) => {
   await db.collection('temp_orders').drop(); // DROP ← 自動放行，因為有配對
 };
+```
+
+**MariaDB/MySQL 範例：**
+```sql
+-- +migrate Up
+CREATE TABLE temp_orders (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  order_date DATETIME NOT NULL
+);
+
+-- +migrate Down
+DROP TABLE temp_orders;  -- ✅ 自動放行，因為有配對的 CREATE
 ```
 
 如果確實需要執行危險操作，使用 `-- migrate-ignore: drop` 註解並說明原因。
@@ -182,6 +195,7 @@ export const up = async (db) => {
 
 **Sanity Check 會驗證結果**：
 
+**MongoDB 範例：**
 ```javascript
 export const postCheck = async ({ db }) => {
   const missing = await db.collection('users').countDocuments({ 
@@ -196,6 +210,30 @@ export const postCheck = async ({ db }) => {
   }
   return { success: true };
 };
+```
+
+**MariaDB/MySQL 範例：**
+```sql
+-- +migrate Up
+ALTER TABLE users ADD COLUMN phone VARCHAR(20) DEFAULT '';
+UPDATE users SET phone = '' WHERE phone IS NULL;
+
+-- +sanity PostCheck
+-- 驗證所有用戶都有 phone 欄位且不為 NULL
+SELECT 
+  CASE 
+    WHEN COUNT(*) = 0 THEN 1
+    ELSE 0
+  END AS success,
+  CASE 
+    WHEN COUNT(*) > 0 THEN CONCAT(COUNT(*), ' 筆資料的 phone 欄位為 NULL')
+    ELSE NULL
+  END AS error
+FROM users WHERE phone IS NULL;
+-- -sanity PostCheck
+
+-- +migrate Down
+ALTER TABLE users DROP COLUMN phone;
 ```
 
 如果 `postCheck` 失敗，系統會**自動執行 down() 回滾**。
@@ -305,6 +343,7 @@ node src/cli.js up --sanity-check --no-auto-rollback
 **時間**：週五下午 4:30
 **情況**：部署新版本，包含一個資料庫 migration
 
+**MongoDB 版本：**
 ```javascript
 // 20250121-add-payment-status.js
 export const up = async (db) => {
@@ -320,6 +359,17 @@ export const down = async (db) => {
     { $unset: { paymentStatus: '' } }
   );
 };
+```
+
+**MariaDB/MySQL 版本：**
+```sql
+-- 20250121-add-payment-status.sql
+-- +migrate Up
+ALTER TABLE orders ADD COLUMN payment_status VARCHAR(20) DEFAULT 'pending';
+UPDATE orders SET payment_status = 'pending' WHERE payment_status IS NULL;
+
+-- +migrate Down
+ALTER TABLE orders DROP COLUMN payment_status;
 ```
 
 **出事了**：部署後發現，舊訂單不應該設為 `pending`，應該保持原狀。需要回滾。
@@ -381,6 +431,7 @@ Use --allow-dangerous to bypass (requires ADMIN approval)
 
 **情況**：要給所有用戶加上 `verified` 欄位
 
+**MongoDB 版本：**
 ```javascript
 export const up = async (db) => {
   // 應該用 updateMany，但手誤用了 updateOne
@@ -404,6 +455,33 @@ export const postCheck = async ({ db }) => {
   }
   return { success: true };
 };
+```
+
+**MariaDB/MySQL 版本：**
+```sql
+-- +migrate Up
+-- 應該用 ALTER TABLE，但手誤只更新了一筆
+ALTER TABLE users ADD COLUMN verified BOOLEAN DEFAULT FALSE;
+UPDATE users SET verified = FALSE WHERE id = 1;  -- 手誤！應該是 WHERE verified IS NULL
+
+-- +sanity PostCheck
+-- 驗證所有用戶都有 verified 值
+SELECT 
+  CASE 
+    WHEN (SELECT COUNT(*) FROM users WHERE verified IS NULL) = 0 THEN 1
+    ELSE 0
+  END AS success,
+  CASE 
+    WHEN (SELECT COUNT(*) FROM users WHERE verified IS NULL) > 0 
+    THEN CONCAT('只有 ', 
+      (SELECT COUNT(*) FROM users WHERE verified IS NOT NULL), '/',
+      (SELECT COUNT(*) FROM users), ' 筆資料被更新')
+    ELSE NULL
+  END AS error;
+-- -sanity PostCheck
+
+-- +migrate Down
+ALTER TABLE users DROP COLUMN verified;
 ```
 
 **執行結果**：

@@ -1,18 +1,22 @@
-# DB-Migrate v2.0
+# DB-Migrate v2.1
 
-> 統一的多資料庫遷移管理工具，支援 MongoDB 與 MariaDB/MySQL，包含多實例同步測試
+> 統一的多資料庫遷移管理工具，支援 MongoDB 與 MariaDB/MySQL，包含多實例同步測試、DDL 版本化遷移與 DCL Repeatable 模式
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-green.svg)](https://nodejs.org/)
-[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](package.json)
 
 ## 🎯 特點
 
 - **多資料庫支援**: MongoDB (via migrate-mongo) 和 MariaDB/MySQL (sql-migrate 模式)
 - **多實例支援**: 同時管理多個資料庫實例 (如 primary/secondary/tertiary)
+- **雙遷移模式**: 
+  - **Versioned (DDL)**: 時間戳版本化，需要 up/down 遷移
+  - **Repeatable (DCL)**: Checksum 驅動，自動偵測變更並重新執行
 - **統一 CLI**: 單一命令行界面管理所有資料庫遷移
 - **驗證規則**: 自動檢測危險操作、空 down()、孤立 drop、DCL 操作等問題
 - **Up-Down-Up 測試**: 確保遷移可以正確回滾和重新應用
+- **DCL 冪等性驗證**: 自動驗證 DCL 腳本執行多次結果相同
 - **Sanity Check**: 內建 Pre-Check / Post-Check / Auto-Rollback 機制
 - **報表生成**: 支援 JSON、HTML 格式
 - **容器化**: Docker 和 Kubernetes (Helm) 部署支援
@@ -373,6 +377,121 @@ node src/cli.js test-all -o ./test-reports
 
 ---
 
+### 🔷 DCL Repeatable 遷移指令
+
+DCL (Data Control Language) 遷移使用 **Repeatable 模式**，適用於管理資料庫使用者和權限。
+
+#### 11. 執行 DCL 遷移 (`dcl`)
+
+```bash
+# 執行所有有變更的 DCL 遷移
+node src/cli.js -c databases/mariadb/production-server/dcl/config.js dcl
+
+# Dry Run - 查看會執行什麼
+node src/cli.js -c databases/mariadb/production-server/dcl/config.js dcl --dry-run
+
+# MongoDB DCL
+node src/cli.js -c databases/mongodb/production-server/dcl/config.js dcl
+```
+
+輸出範例：
+```
+[DCL] Running repeatable migrations (mariadb)...
+
+✅ Applied 2 DCL migration(s):
+   R__01_readonly_users.sql (new file)
+   R__02_readwrite_users.sql (checksum changed)
+```
+
+#### 12. 查看 DCL 狀態 (`dcl:status`)
+
+```bash
+# 查看 DCL 遷移狀態
+node src/cli.js -c databases/mariadb/production-server/dcl/config.js dcl:status
+```
+
+輸出範例：
+```
+[DCL STATUS] Database: mariadb
+──────────────────────────────────────────────────
+
+⏳ Pending (1):
+   R__03_ddl_admin.sql
+      Reason: checksum changed
+
+✅ Up-to-date (2):
+   R__01_readonly_users.sql
+      Applied: 2026-01-20T10:30:00.000Z
+   R__02_readwrite_users.sql
+      Applied: 2026-01-20T10:30:01.000Z
+```
+
+#### 13. 驗證 DCL 冪等性 (`dcl:verify`)
+
+```bash
+# 驗證所有 DCL 腳本都是冪等的（執行兩次結果相同）
+node src/cli.js -c databases/mariadb/production-server/dcl/config.js dcl:verify
+```
+
+輸出範例：
+```
+[DCL VERIFY] Testing idempotency (mariadb)...
+══════════════════════════════════════════════════
+
+📄 R__01_readonly_users.sql
+   🔍 Testing idempotency for: R__01_readonly_users.sql
+   🔍 Execution 1...
+   🔍 Capturing state after execution 1...
+   🔍 Execution 2...
+   🔍 Capturing state after execution 2...
+   🔍 ✅ Idempotency verified - states are identical
+   ✅ IDEMPOTENT
+
+📄 R__02_readwrite_users.sql
+   ✅ IDEMPOTENT
+
+══════════════════════════════════════════════════
+
+✅ All DCL scripts are idempotent!
+```
+
+---
+
+### 🔷 DDL vs DCL 目錄結構
+
+```
+databases/
+├── mariadb/
+│   └── production-server/
+│       ├── dcl/                          # DCL - Repeatable 模式 (Platform Team)
+│       │   ├── config.js
+│       │   └── migrations/
+│       │       ├── R__01_readonly_users.sql
+│       │       ├── R__02_readwrite_users.sql
+│       │       └── R__03_ddl_admin.sql
+│       └── ddl/                          # DDL - Versioned 模式 (Dev Team)
+│           ├── ecommerce/
+│           │   ├── config.js
+│           │   └── migrations/
+│           │       ├── 20260101000001-create-users.sql
+│           │       └── 20260101000002-create-products.sql
+│           ├── analytics/
+│           └── logging/
+└── mongodb/
+    └── production-server/
+        ├── dcl/
+        │   ├── config.js
+        │   └── migrations/
+        │       ├── R__01_readonly_users.js
+        │       └── R__02_readwrite_users.js
+        └── ddl/
+            └── ecommerce/
+                ├── config.js
+                └── migrations/
+```
+
+---
+
 ### 🔷 實用範例
 
 #### 開發環境工作流程
@@ -432,18 +551,32 @@ node src/cli.js -c databases/mongodb/staging/config.js up
 ```
 db-migrate/
 ├── src/
-│   ├── cli.js                   # 統一 CLI 入口
+│   ├── cli.js                      # 統一 CLI 入口
 │   ├── core/
-│   │   ├── base-adapter.js      # 適配器基類
-│   │   ├── reporter.js          # 報表生成器
-│   │   └── sanity-checker.js    # Sanity Check 框架
+│   │   ├── base-adapter.js         # 適配器基類
+│   │   ├── reporter.js             # 報表生成器
+│   │   ├── sanity-checker.js       # Sanity Check 框架
+│   │   ├── repeatable-runner.js    # DCL Repeatable 遷移執行器
+│   │   └── dcl-idempotent-checker.js # DCL 冪等性驗證器
 │   └── adapters/
-│       ├── index.js             # 適配器工廠
-│       ├── mongodb-adapter.js   # MongoDB 適配器
-│       └── mariadb-adapter.js   # MariaDB 適配器
+│       ├── index.js                # 適配器工廠
+│       ├── mongodb-adapter.js      # MongoDB 適配器
+│       └── mariadb-adapter.js      # MariaDB 適配器
 ├── databases/
 │   ├── mongodb/
-│   │   ├── test-success/        # MongoDB 成功案例
+│   │   ├── test-success/           # MongoDB 成功案例
+│   │   ├── test-failure/           # MongoDB 失敗案例（驗證用）
+│   │   ├── multi-instance/         # 多實例配置範例
+│   │   └── production-server/      # 生產伺服器範例
+│   │       ├── dcl/                # DCL Repeatable 遷移
+│   │       └── ddl/                # DDL Versioned 遷移
+│   └── mariadb/
+│       ├── test-success/           # MariaDB 成功案例
+│       ├── test-failure/           # MariaDB 失敗案例
+│       ├── multi-instance/         # 多實例配置範例
+│       └── production-server/      # 生產伺服器範例
+│           ├── dcl/                # DCL Repeatable 遷移
+│           └── ddl/                # DDL Versioned 遷移
 │   │   ├── test-failure/        # MongoDB 失敗案例（驗證測試）
 │   │   └── multi-instance/      # MongoDB 多實例範例
 │   └── mariadb/

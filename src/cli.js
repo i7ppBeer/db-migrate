@@ -4,12 +4,15 @@
  * Unified Database Migration CLI
  * Supports MongoDB and MariaDB/MySQL
  * Supports multiple database instances
+ * Supports both Versioned (DDL) and Repeatable (DCL) migrations
  */
 
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { createAdapter, createAdapters, loadConfig } from './adapters/index.js';
 import { Reporter } from './core/reporter.js';
+import { RepeatableRunner } from './core/repeatable-runner.js';
+import { DCLIdempotentChecker } from './core/dcl-idempotent-checker.js';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -21,8 +24,8 @@ const program = new Command();
 
 program
   .name('db-migrate')
-  .description('Unified database migration tool for MongoDB and MariaDB/MySQL (supports multiple instances)')
-  .version('2.0.0')
+  .description('Unified database migration tool for MongoDB and MariaDB/MySQL (supports multiple instances, DDL versioned and DCL repeatable modes)')
+  .version('2.1.0')
   .option('-c, --config <path>', 'Path to config file')
   .option('-t, --type <type>', 'Database type (mongodb, mariadb)');
 
@@ -695,6 +698,215 @@ program
     const summary = reporter.getSummary();
     if (summary.failed > 0) {
       process.exit(1);
+    }
+  });
+
+// ─────────────────────────────────────────────────────────────────
+// DCL Repeatable Migration Commands
+// ─────────────────────────────────────────────────────────────────
+
+program
+  .command('dcl')
+  .description('Run DCL repeatable migrations (checksum-based)')
+  .option('--dry-run', 'Show what would be run without executing')
+  .action(async (cmdOptions, cmd) => {
+    const options = { ...cmd.parent.opts(), ...cmdOptions };
+    let adapter;
+    
+    try {
+      adapter = await getAdapter(options);
+      await adapter.connect();
+      
+      const config = await loadConfig(options.config);
+      const configDir = path.dirname(path.resolve(options.config));
+      const migrationsDir = config.migrationsDir && !path.isAbsolute(config.migrationsDir)
+        ? path.resolve(configDir, config.migrationsDir)
+        : config.migrationsDir;
+      
+      const runner = new RepeatableRunner({
+        checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+      });
+      
+      const context = {
+        dbType: adapter.dbType,
+        connection: adapter.connection,
+        db: adapter.db,
+        client: adapter.client,
+        migrationsDir
+      };
+      
+      if (options.dryRun) {
+        const status = await runner.status(context);
+        console.log(chalk.blue('\n[DRY RUN] Would apply these DCL migrations:'));
+        for (const p of status.pending) {
+          console.log(`   ${p.fileName} (${p.reason})`);
+        }
+        console.log(chalk.gray(`\n   Up-to-date: ${status.upToDate.length}`));
+        return;
+      }
+      
+      console.log(chalk.blue(`\n[DCL] Running repeatable migrations (${adapter.dbType})...`));
+      
+      const result = await runner.run(context);
+      
+      if (result.applied.length > 0) {
+        console.log(chalk.green(`\n✅ Applied ${result.applied.length} DCL migration(s):`));
+        for (const m of result.applied) {
+          console.log(`   ${m.fileName} (${m.reason})`);
+        }
+      } else {
+        console.log(chalk.gray('\n   All DCL migrations are up-to-date.'));
+      }
+      
+      if (result.errors.length > 0) {
+        console.error(chalk.red('\n❌ Errors:'));
+        for (const e of result.errors) {
+          console.error(`   ${e}`);
+        }
+        process.exit(1);
+      }
+    } catch (error) {
+      console.error(chalk.red(`[ERROR] ${error.message}`));
+      process.exit(1);
+    } finally {
+      if (adapter) await adapter.disconnect();
+    }
+  });
+
+program
+  .command('dcl:status')
+  .description('Show DCL repeatable migration status')
+  .action(async (cmdOptions, cmd) => {
+    const options = cmd.parent.opts();
+    let adapter;
+    
+    try {
+      adapter = await getAdapter(options);
+      await adapter.connect();
+      
+      const config = await loadConfig(options.config);
+      const configDir = path.dirname(path.resolve(options.config));
+      const migrationsDir = config.migrationsDir && !path.isAbsolute(config.migrationsDir)
+        ? path.resolve(configDir, config.migrationsDir)
+        : config.migrationsDir;
+      
+      const runner = new RepeatableRunner({
+        checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+      });
+      
+      const context = {
+        dbType: adapter.dbType,
+        connection: adapter.connection,
+        db: adapter.db,
+        client: adapter.client,
+        migrationsDir
+      };
+      
+      const status = await runner.status(context);
+      
+      console.log(chalk.blue(`\n[DCL STATUS] Database: ${adapter.dbType}`));
+      console.log(chalk.gray('─'.repeat(50)));
+      
+      console.log(chalk.yellow(`\n⏳ Pending (${status.pending.length}):`));
+      for (const p of status.pending) {
+        console.log(`   ${p.fileName}`);
+        console.log(chalk.gray(`      Reason: ${p.reason}`));
+      }
+      
+      console.log(chalk.green(`\n✅ Up-to-date (${status.upToDate.length}):`));
+      for (const u of status.upToDate) {
+        console.log(`   ${u.fileName}`);
+        console.log(chalk.gray(`      Applied: ${u.appliedAt}`));
+      }
+      
+      console.log('');
+    } catch (error) {
+      console.error(chalk.red(`[ERROR] ${error.message}`));
+      process.exit(1);
+    } finally {
+      if (adapter) await adapter.disconnect();
+    }
+  });
+
+program
+  .command('dcl:verify')
+  .description('Verify DCL scripts are idempotent')
+  .action(async (cmdOptions, cmd) => {
+    const options = cmd.parent.opts();
+    let adapter;
+    
+    try {
+      adapter = await getAdapter(options);
+      await adapter.connect();
+      
+      const config = await loadConfig(options.config);
+      const configDir = path.dirname(path.resolve(options.config));
+      const migrationsDir = config.migrationsDir && !path.isAbsolute(config.migrationsDir)
+        ? path.resolve(configDir, config.migrationsDir)
+        : config.migrationsDir;
+      
+      const runner = new RepeatableRunner({
+        checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+      });
+      
+      const checker = new DCLIdempotentChecker({
+        verbose: config.idempotencyCheck?.verbose ?? true
+      });
+      
+      const context = {
+        dbType: adapter.dbType,
+        connection: adapter.connection,
+        db: adapter.db,
+        client: adapter.client,
+        migrationsDir
+      };
+      
+      console.log(chalk.blue(`\n[DCL VERIFY] Testing idempotency (${adapter.dbType})...\n`));
+      console.log(chalk.gray('═'.repeat(50)));
+      
+      const files = await runner.getRepeatableFiles(migrationsDir);
+      let allPassed = true;
+      
+      for (const file of files) {
+        console.log(chalk.blue(`\n📄 ${file.fileName}`));
+        
+        const executeScript = async () => {
+          if (adapter.dbType === 'mariadb') {
+            await adapter.connection.execute(file.content);
+          } else if (adapter.dbType === 'mongodb') {
+            const module = await import(`file://${file.filePath}`);
+            if (typeof module.up === 'function') {
+              await module.up(adapter.db, adapter.client);
+            }
+          }
+        };
+        
+        const result = await checker.verify(context, executeScript, {
+          database: config.database,
+          scriptName: file.fileName
+        });
+        
+        if (result.success) {
+          console.log(chalk.green(`   ✅ IDEMPOTENT`));
+        } else {
+          console.log(chalk.red(`   ❌ NOT IDEMPOTENT: ${result.error}`));
+          allPassed = false;
+        }
+      }
+      
+      console.log(chalk.gray('\n' + '═'.repeat(50)));
+      
+      if (allPassed) {
+        console.log(chalk.green('\n✅ All DCL scripts are idempotent!'));
+      } else {
+        console.log(chalk.red('\n❌ Some DCL scripts failed idempotency check!'));
+        process.exit(1);
+      }
+    } catch (error) {
+      console.error(chalk.red(`[ERROR] ${error.message}`));
+      process.exit(1);
+    } finally {
+      if (adapter) await adapter.disconnect();
     }
   });
 
