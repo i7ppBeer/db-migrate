@@ -33,50 +33,89 @@ export class MongoDBAdapter extends BaseAdapter {
 
   /**
    * Get MongoDB-specific validation rules
+   * 
+   * 分類說明：
+   * - forbidden: 🔴 絕對禁止 (可用 --allow-forbidden 強制放行，需團隊審批)
+   * - dangerous: 🟠 危險操作 (可用 --allow-dangerous 放行)
+   * - warnings:  🟡 警告提示 (不阻擋執行)
    */
   getValidationRules() {
     return {
+      // ========================================
+      // 🔴 絕對禁止 - 預設無法放行 (需 --allow-forbidden)
+      // ========================================
       forbidden: {
         database: [
-          'dropDatabase',
-          'createUser',
-          'dropUser', 
-          'updateUser',
-          'grantRolesToUser',
-          'revokeRolesFromUser',
-          'createRole',
-          'dropRole',
-          'updateRole',
-          'repairDatabase',
-          'cloneDatabase',
-          'copyDatabase'
+          { pattern: /\.dropDatabase\s*\(/i, code: 'DROP_DATABASE', message: '🔴 DATA LOSS: 禁止刪除資料庫' },
+          { pattern: /dropDatabase\s*:\s*(?:true|1)/i, code: 'DROP_DATABASE_CMD', message: '🔴 DATA LOSS: 禁止刪除資料庫' }
         ],
-        collections: [
-          'drop',
-          'dropCollection',
-          'reIndex'
+        dcl: [
+          { pattern: /\.createUser\s*\(/i, code: 'CREATE_USER', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /createUser\s*:/i, code: 'CREATE_USER_CMD', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /\.dropUser\s*\(/i, code: 'DROP_USER', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /dropUser\s*:/i, code: 'DROP_USER_CMD', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /\.updateUser\s*\(/i, code: 'UPDATE_USER', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /updateUser\s*:/i, code: 'UPDATE_USER_CMD', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /\.grantRolesToUser\s*\(/i, code: 'GRANT_ROLES', message: '🔴 DCL: 權限管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /grantRolesToUser\s*:/i, code: 'GRANT_ROLES_CMD', message: '🔴 DCL: 權限管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /\.revokeRolesFromUser\s*\(/i, code: 'REVOKE_ROLES', message: '🔴 DCL: 權限管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /revokeRolesFromUser\s*:/i, code: 'REVOKE_ROLES_CMD', message: '🔴 DCL: 權限管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /\.createRole\s*\(/i, code: 'CREATE_ROLE', message: '🔴 DCL: 角色管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /createRole\s*:/i, code: 'CREATE_ROLE_CMD', message: '🔴 DCL: 角色管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /\.dropRole\s*\(/i, code: 'DROP_ROLE', message: '🔴 DCL: 角色管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /dropRole\s*:/i, code: 'DROP_ROLE_CMD', message: '🔴 DCL: 角色管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /\.updateRole\s*\(/i, code: 'UPDATE_ROLE', message: '🔴 DCL: 角色管理應在 DCL 專案 (Repeatable)' },
+          { pattern: /updateRole\s*:/i, code: 'UPDATE_ROLE_CMD', message: '🔴 DCL: 角色管理應在 DCL 專案 (Repeatable)' }
         ],
         system: [
-          'shutdown',
-          'killOp',
-          'killAllSessions',
-          'serverStatus',
-          'replSetGetStatus',
-          'isMaster'
-        ],
-        admin: [
-          'enableSharding',
-          'shardCollection',
-          'movePrimary',
-          'removeShard'
+          { pattern: /shutdown\s*:\s*(?:true|1)/i, code: 'SHUTDOWN', message: '🔴 SYSTEM: 禁止關閉資料庫' },
+          { pattern: /\.shutdown\s*\(/i, code: 'SHUTDOWN_FUNC', message: '🔴 SYSTEM: 禁止關閉資料庫' },
+          { pattern: /replSetReconfig\s*:/i, code: 'REPL_RECONFIG', message: '🔴 SYSTEM: 禁止重新設定 Replica Set' },
+          { pattern: /replSetStepDown\s*:/i, code: 'REPL_STEPDOWN', message: '🔴 SYSTEM: 禁止強制降級 Primary' },
+          { pattern: /setParameter\s*:/i, code: 'SET_PARAMETER', message: '🔴 SYSTEM: 禁止變更系統參數' }
         ]
       },
+
+      // ========================================
+      // 🟠 危險操作 - 可用 --allow-dangerous 放行
+      // ========================================
+      dangerous: {
+        dataLoss: [
+          { pattern: /\.drop\s*\(\s*\)/i, code: 'DROP_COLLECTION', message: '🟠 DATA LOSS: drop() 會刪除整個 Collection', suggestion: '確認真的要刪除，並確保有備份' },
+          { pattern: /\.deleteMany\s*\(\s*\{\s*\}\s*\)/i, code: 'DELETE_ALL', message: '🟠 DATA LOSS: deleteMany({}) 會刪除所有文件', suggestion: '請加上查詢條件' },
+          { pattern: /\.remove\s*\(\s*\{\s*\}\s*\)/i, code: 'REMOVE_ALL', message: '🟠 DATA LOSS: remove({}) 會刪除所有文件', suggestion: '請使用 deleteMany 並加上條件' }
+        ],
+        bulkOperation: [
+          { pattern: /\.updateMany\s*\(\s*\{\s*\}\s*,/i, code: 'UPDATE_ALL', message: '🟠 DATA RISK: updateMany({}, ...) 會更新所有文件', suggestion: '請加上查詢條件' },
+          { pattern: /\.replaceOne\s*\(/i, code: 'REPLACE_ONE', message: '🟠 DATA RISK: replaceOne 會完全取代文件', suggestion: '考慮使用 updateOne 搭配 $set' }
+        ],
+        schemaChange: [
+          { pattern: /\.dropIndex\s*\(/i, code: 'DROP_INDEX', message: '🟠 PERFORMANCE: dropIndex 可能影響查詢效能', suggestion: '確認該索引已無查詢使用' },
+          { pattern: /\.dropIndexes\s*\(/i, code: 'DROP_INDEXES', message: '🟠 PERFORMANCE: dropIndexes 會刪除所有索引', suggestion: '這是非常危險的操作' },
+          { pattern: /\$rename\s*:/i, code: 'RENAME_FIELD', message: '🟠 BREAKING: $rename 可能破壞應用程式', suggestion: '確認所有應用程式都已更新欄位名稱' },
+          { pattern: /\$unset\s*:/i, code: 'UNSET_FIELD', message: '🟠 DATA LOSS: $unset 會永久刪除欄位', suggestion: '確認該欄位已無使用' },
+          { pattern: /\.renameCollection\s*\(/i, code: 'RENAME_COLLECTION', message: '🟠 BREAKING: renameCollection 可能破壞應用程式', suggestion: '確認所有應用程式都已更新 Collection 名稱' },
+          { pattern: /renameCollection\s*:/i, code: 'RENAME_COLLECTION_CMD', message: '🟠 BREAKING: renameCollection 可能破壞應用程式', suggestion: '確認所有應用程式都已更新 Collection 名稱' }
+        ],
+        validation: [
+          { pattern: /validationAction\s*:\s*['"]error['"]/i, code: 'VALIDATION_ERROR', message: '🟠 BREAKING: validationAction: "error" 可能導致寫入失敗', suggestion: '先使用 "warn" 測試' },
+          { pattern: /validationLevel\s*:\s*['"]strict['"]/i, code: 'VALIDATION_STRICT', message: '🟠 BREAKING: validationLevel: "strict" 會驗證所有文件', suggestion: '確認現有資料都符合 schema' }
+        ]
+      },
+
+      // ========================================
+      // 🟡 警告提示 - 不阻擋執行
+      // ========================================
       warnings: {
         operations: [
-          'deleteMany',
-          'updateMany',
-          'mapReduce',
-          'renameCollection'
+          { pattern: /\.createIndex\s*\(/i, message: '⚠️ createIndex 在大 Collection 上可能需要較長時間' },
+          { pattern: /background\s*:\s*false/i, message: '⚠️ background: false 會阻塞操作' },
+          { pattern: /\.aggregate\s*\(/i, message: '⚠️ aggregate 在大數據集上可能耗費大量資源' },
+          { pattern: /\$lookup\s*:/i, message: '⚠️ $lookup 可能造成效能問題，確認有適當索引' },
+          { pattern: /sparse\s*:\s*true/i, message: '⚠️ sparse index 不會包含 null 值的文件' },
+          { pattern: /expireAfterSeconds\s*:/i, message: '⚠️ TTL index 會自動刪除過期文件' },
+          { pattern: /\.deleteMany\s*\(/i, message: '⚠️ deleteMany 可能影響大量資料' },
+          { pattern: /\.updateMany\s*\(/i, message: '⚠️ updateMany 可能影響大量資料' }
         ]
       }
     };
@@ -261,7 +300,7 @@ export class MongoDBAdapter extends BaseAdapter {
     }
   }
 
-  async validate() {
+  async validate(options = {}) {
     const results = {
       valid: true,
       results: []
@@ -275,7 +314,7 @@ export class MongoDBAdapter extends BaseAdapter {
       for (const file of migrationFiles) {
         const filePath = path.join(migrationsDir, file);
         const content = await fs.readFile(filePath, 'utf-8');
-        const fileResult = this.validateContent(content, file);
+        const fileResult = this.validateContent(content, file, options);
         
         results.results.push({
           file,
@@ -294,9 +333,20 @@ export class MongoDBAdapter extends BaseAdapter {
     return results;
   }
 
-  validateContent(content, fileName) {
+  /**
+   * Validate migration content
+   * @param {string} content - Migration file content
+   * @param {string} fileName - File name
+   * @param {Object} options - Validation options
+   * @param {boolean} options.allowDangerous - Allow dangerous operations
+   * @param {boolean} options.allowForbidden - Allow forbidden operations (requires approval)
+   * @param {string[]} options.allowedCodes - Specific codes to allow
+   */
+  validateContent(content, fileName, options = {}) {
     const errors = [];
     const warnings = [];
+    const dangerousOps = [];
+    const forbiddenOps = [];
     const rules = this.getValidationRules();
 
     // Extract up() and down() function bodies
@@ -351,61 +401,96 @@ export class MongoDBAdapter extends BaseAdapter {
 
     // === 4. Check for forbidden operations ===
     for (const category of Object.keys(rules.forbidden)) {
-      for (const operation of rules.forbidden[category]) {
-        // Special case: Allow 'drop' in down() for collections created in up()
-        if ((operation === 'drop' || operation === 'dropCollection')) {
-          const hasDropInDown = this.containsOperation(downBody, operation);
-          const hasDropInUp = this.containsOperation(upBody, operation);
+      for (const rule of rules.forbidden[category]) {
+        if (rule.pattern.test(content)) {
+          const isAllowed = options.allowForbidden || 
+            (options.allowedCodes && options.allowedCodes.includes(rule.code));
           
-          // If drop is only in down() and all dropped collections are created in up(), it's OK
+          if (isAllowed) {
+            warnings.push({
+              type: 'forbidden-allowed',
+              code: rule.code,
+              message: `⚠️ [FORCE ALLOWED] ${rule.message}`
+            });
+          } else {
+            forbiddenOps.push({
+              type: `forbidden-${category}`,
+              code: rule.code,
+              message: rule.message
+            });
+          }
+        }
+      }
+    }
+
+    // === 5. Check for dangerous operations ===
+    for (const category of Object.keys(rules.dangerous)) {
+      for (const rule of rules.dangerous[category]) {
+        // Special case: Allow 'drop' in down() for collections created in up()
+        if (rule.code === 'DROP_COLLECTION') {
+          const hasDropInDown = this.containsOperation(downBody, 'drop');
+          const hasDropInUp = this.containsOperation(upBody, 'drop');
+          
           if (hasDropInDown && !hasDropInUp) {
             const allDropsAreValid = droppedCollectionsInDown.every(c => createdCollections.includes(c));
             if (allDropsAreValid && droppedCollectionsInDown.length > 0) {
               warnings.push({
                 type: 'allowed-drop-for-create',
-                operation,
-                message: `[ALLOWED] ${operation} in down() for collections created in up()`
+                message: `✅ [ALLOWED] drop in down() for collections created in up()`
               });
               continue;
             }
           }
-          // If drop is in up(), it's forbidden (unless it's for cleanup within the migration)
-          if (hasDropInUp && droppedCollectionsInUp.some(c => !createdCollections.includes(c))) {
-            errors.push({
-              type: `forbidden-${category}-operation`,
-              operation,
-              message: `Forbidden ${category} operation: ${operation} in up() for non-created collections`
-            });
-          }
-          continue;
         }
 
-        // Check DCL operations (createUser, dropUser, etc.)
-        if (this.containsOperation(content, operation)) {
-          errors.push({
-            type: `forbidden-${category}-operation`,
-            operation,
-            message: `Forbidden ${category} operation: ${operation}`
-          });
+        if (rule.pattern.test(content)) {
+          const isAllowed = options.allowDangerous || 
+            (options.allowedCodes && options.allowedCodes.includes(rule.code));
+          
+          if (isAllowed) {
+            warnings.push({
+              type: 'dangerous-allowed',
+              code: rule.code,
+              message: `✅ [ALLOWED] ${rule.message}`,
+              suggestion: rule.suggestion
+            });
+          } else {
+            dangerousOps.push({
+              type: `dangerous-${category}`,
+              code: rule.code,
+              message: rule.message,
+              suggestion: rule.suggestion
+            });
+          }
         }
       }
     }
 
-    // === 5. Check for warning operations ===
-    for (const operation of rules.warnings.operations) {
-      if (this.containsOperation(content, operation)) {
+    // === 6. Check for warning operations ===
+    for (const rule of rules.warnings.operations) {
+      if (rule.pattern.test(content)) {
         warnings.push({
-          type: 'warning-operation',
-          operation,
-          message: `Warning: ${operation} can affect large amounts of data`
+          type: 'warning',
+          message: rule.message
         });
       }
     }
 
+    // Combine errors
+    const allErrors = [...errors, ...forbiddenOps, ...dangerousOps];
+
     return {
-      valid: errors.length === 0,
-      errors,
-      warnings
+      valid: allErrors.length === 0,
+      errors: allErrors,
+      warnings,
+      forbiddenOps,
+      dangerousOps,
+      summary: {
+        forbidden: forbiddenOps.length,
+        dangerous: dangerousOps.length,
+        warnings: warnings.length,
+        structural: errors.length
+      }
     };
   }
 

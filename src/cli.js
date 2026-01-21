@@ -280,7 +280,9 @@ program
 program
   .command('validate')
   .description('Validate migration files')
-  .option('--allow-dangerous', 'Allow dangerous operations (show as warnings)')
+  .option('--allow-dangerous', 'Allow dangerous operations (🟠 level)')
+  .option('--allow-forbidden', 'Allow forbidden operations (🔴 level) - requires team approval')
+  .option('--allow <codes>', 'Allow specific operation codes (comma-separated)', (val) => val.split(','))
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     let adapter;
@@ -288,9 +290,28 @@ program
     try {
       adapter = await getAdapter(options);
       
-      console.log(chalk.blue(`\n[VALIDATE] Checking migrations (${adapter.dbType})...\n`));
+      // Build validation options
+      const validateOptions = {
+        allowDangerous: options.allowDangerous,
+        allowForbidden: options.allowForbidden,
+        allowedCodes: options.allow || []
+      };
       
-      const result = await adapter.validate();
+      console.log(chalk.blue(`\n[VALIDATE] Checking migrations (${adapter.dbType})...`));
+      
+      // Show active allowances
+      if (options.allowDangerous) {
+        console.log(chalk.yellow(`   🟠 --allow-dangerous: Dangerous operations will be allowed`));
+      }
+      if (options.allowForbidden) {
+        console.log(chalk.red(`   🔴 --allow-forbidden: Forbidden operations will be allowed (REQUIRES APPROVAL)`));
+      }
+      if (options.allow && options.allow.length > 0) {
+        console.log(chalk.cyan(`   📋 --allow: ${options.allow.join(', ')}`));
+      }
+      console.log('');
+      
+      const result = await adapter.validate(validateOptions);
       
       for (const fileResult of result.results) {
         if (fileResult.valid) {
@@ -299,12 +320,42 @@ program
           console.log(chalk.red(`[ERROR] ${fileResult.file}`));
         }
         
-        for (const error of fileResult.errors) {
+        // Show forbidden operations
+        if (fileResult.forbiddenOps && fileResult.forbiddenOps.length > 0) {
+          for (const op of fileResult.forbiddenOps) {
+            console.log(chalk.red(`   ❌ [${op.code}] ${op.message}`));
+          }
+        }
+        
+        // Show dangerous operations
+        if (fileResult.dangerousOps && fileResult.dangerousOps.length > 0) {
+          for (const op of fileResult.dangerousOps) {
+            console.log(chalk.magenta(`   ⛔ [${op.code}] ${op.message}`));
+            if (op.suggestion) {
+              console.log(chalk.gray(`      └─ 建議: ${op.suggestion}`));
+            }
+          }
+        }
+        
+        // Show structural errors (orphan drops, etc.)
+        const structuralErrors = fileResult.errors.filter(e => 
+          !e.type?.startsWith('forbidden') && !e.type?.startsWith('dangerous')
+        );
+        for (const error of structuralErrors) {
           console.log(chalk.red(`   ❌ ${error.message}`));
         }
         
+        // Show warnings
         for (const warning of fileResult.warnings) {
           console.log(chalk.yellow(`   ⚠️  ${warning.message}`));
+        }
+        
+        // Show summary for this file
+        if (fileResult.summary) {
+          const s = fileResult.summary;
+          if (s.forbidden > 0 || s.dangerous > 0) {
+            console.log(chalk.gray(`   📊 forbidden:${s.forbidden} dangerous:${s.dangerous} warnings:${s.warnings}`));
+          }
         }
       }
       
@@ -313,9 +364,32 @@ program
       console.log(chalk.green(`Valid: ${result.results.filter(r => r.valid).length}`));
       console.log(chalk.red(`Invalid: ${result.results.filter(r => !r.valid).length}`));
       
+      // Show hints if there are errors
       if (!result.valid) {
+        const allForbidden = new Set();
+        const allDangerous = new Set();
+        
+        for (const r of result.results) {
+          if (r.forbiddenOps) r.forbiddenOps.forEach(op => allForbidden.add(op.code));
+          if (r.dangerousOps) r.dangerousOps.forEach(op => allDangerous.add(op.code));
+        }
+        
+        console.log(chalk.cyan('\n💡 放行提示:'));
+        
+        if (allDangerous.size > 0) {
+          console.log(chalk.yellow(`   🟠 危險操作放行: --allow-dangerous`));
+          console.log(chalk.gray(`      或指定: --allow ${[...allDangerous].join(',')}`));
+        }
+        
+        if (allForbidden.size > 0) {
+          console.log(chalk.red(`   🔴 禁止操作放行: --allow-forbidden (需團隊審批)`));
+          console.log(chalk.gray(`      或指定: --allow ${[...allForbidden].join(',')}`));
+        }
+        
         process.exit(1);
       }
+      
+      console.log(chalk.green('\n✅ All migrations are valid!'));
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
       process.exit(1);

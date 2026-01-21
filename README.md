@@ -253,8 +253,17 @@ Remember to:
 # 驗證所有遷移檔案
 node src/cli.js -c <config-path> validate
 
-# 允許危險操作（顯示為警告而非錯誤）
+# 允許危險操作 (🟠 level)
 node src/cli.js -c <config-path> validate --allow-dangerous
+
+# 允許禁止操作 (🔴 level) - 需團隊審批
+node src/cli.js -c <config-path> validate --allow-forbidden
+
+# 允許特定操作代碼
+node src/cli.js -c <config-path> validate --allow TRUNCATE_TABLE,DROP_COLUMN
+
+# 組合使用
+node src/cli.js -c <config-path> validate --allow-dangerous --allow DROP_DATABASE
 
 # 範例
 node src/cli.js -c databases/mongodb/test-success/config.js validate
@@ -263,17 +272,164 @@ node src/cli.js -c databases/mongodb/test-failure/config.js validate
 
 輸出範例：
 ```
-[VALIDATE] Checking migrations (mongodb)...
+[VALIDATE] Checking migrations (mariadb)...
 
-[OK] 20250101000001-create-users.js
-[OK] 20250101000002-seed-users.js
-[ERROR] 20250101000003-dangerous-drop-database.js
-   ❌ Dangerous operation: dropDatabase is not allowed
+[OK] 20250101000001-create-users.sql
+[ERROR] 20250101000002-dangerous-drop-database.sql
+   ❌ [DROP_DATABASE] 🔴 DATA LOSS: 禁止刪除資料庫
+   📊 forbidden:1 dangerous:0 warnings:0
+[ERROR] 20250101000003-dangerous-truncate.sql
+   ⛔ [TRUNCATE_TABLE] 🟠 DATA LOSS: TRUNCATE TABLE 會清空全表資料
+      └─ 建議: 建議改用 DELETE FROM table WHERE condition
+   📊 forbidden:0 dangerous:1 warnings:0
 
 ──────────────────────────────────────────────────
 Total: 3 file(s)
-Valid: 2
-Invalid: 1
+Valid: 1
+Invalid: 2
+
+💡 放行提示:
+   🟠 危險操作放行: --allow-dangerous
+      或指定: --allow TRUNCATE_TABLE
+   🔴 禁止操作放行: --allow-forbidden (需團隊審批)
+      或指定: --allow DROP_DATABASE
+```
+
+---
+
+### 🛡️ 危險操作放行機制
+
+驗證系統將操作分為三個等級：
+
+| 等級 | 符號 | 說明 | 放行方式 |
+|------|------|------|----------|
+| 🔴 Forbidden | ❌ | 絕對禁止，極度危險 | `--allow-forbidden` 或 `--allow <CODE>` |
+| 🟠 Dangerous | ⛔ | 危險操作，需謹慎 | `--allow-dangerous` 或 `--allow <CODE>` |
+| 🟡 Warning | ⚠️ | 警告提示，不阻擋 | 無需放行，僅提示 |
+
+#### 🔴 Forbidden 操作代碼 (MariaDB)
+
+| 代碼 | 說明 |
+|------|------|
+| `DROP_DATABASE` | DROP DATABASE - 刪除整個資料庫 |
+| `DROP_SCHEMA` | DROP SCHEMA - 刪除 Schema |
+| `CREATE_USER` | CREATE USER - 建立使用者 |
+| `DROP_USER` | DROP USER - 刪除使用者 |
+| `ALTER_USER` | ALTER USER - 修改使用者 |
+| `SET_PASSWORD` | SET PASSWORD - 設定密碼 |
+| `GRANT` | GRANT - 授權 |
+| `REVOKE` | REVOKE - 撤銷權限 |
+| `FLUSH_PRIVILEGES` | FLUSH PRIVILEGES - 重載權限 |
+| `INTO_OUTFILE` | SELECT INTO OUTFILE - 匯出到檔案 |
+| `LOAD_DATA` | LOAD DATA INFILE - 從檔案載入 |
+| `SHUTDOWN` | SHUTDOWN - 關閉資料庫 |
+| `RESET_MASTER` | RESET MASTER - 重置主庫 |
+| `SET_GLOBAL` | SET GLOBAL - 變更全域設定 |
+
+#### 🔴 Forbidden 操作代碼 (MongoDB)
+
+| 代碼 | 說明 |
+|------|------|
+| `DROP_DATABASE` | dropDatabase() - 刪除資料庫 |
+| `CREATE_USER` / `CREATE_USER_CMD` | createUser - 建立使用者 |
+| `DROP_USER` / `DROP_USER_CMD` | dropUser - 刪除使用者 |
+| `UPDATE_USER` / `UPDATE_USER_CMD` | updateUser - 更新使用者 |
+| `GRANT_ROLES` / `GRANT_ROLES_CMD` | grantRolesToUser - 授權角色 |
+| `REVOKE_ROLES` / `REVOKE_ROLES_CMD` | revokeRolesFromUser - 撤銷角色 |
+| `CREATE_ROLE` / `CREATE_ROLE_CMD` | createRole - 建立角色 |
+| `DROP_ROLE` / `DROP_ROLE_CMD` | dropRole - 刪除角色 |
+| `SHUTDOWN` | shutdown - 關閉資料庫 |
+| `REPL_RECONFIG` | replSetReconfig - 重設 Replica Set |
+| `SET_PARAMETER` | setParameter - 設定系統參數 |
+
+#### 🟠 Dangerous 操作代碼 (MariaDB)
+
+| 代碼 | 說明 |
+|------|------|
+| `TRUNCATE_TABLE` | TRUNCATE TABLE - 清空表 |
+| `LOCK_TABLE` | LOCK TABLE - 鎖表 |
+| `ALTER_TABLE_BLOCKING` | ALTER TABLE (無 ALGORITHM) - 可能鎖表 |
+| `CREATE_INDEX_BLOCKING` | CREATE INDEX (無 ALGORITHM) - 可能鎖表 |
+| `SELECT_FOR_UPDATE` | SELECT FOR UPDATE - 排他鎖 |
+| `DELETE_ALL` | DELETE 無 WHERE - 刪除全表 |
+| `UPDATE_ALL` | UPDATE 無 WHERE - 更新全表 |
+| `INSERT_SELECT` | INSERT...SELECT - 可能鎖表 |
+| `DROP_COLUMN` | DROP COLUMN - 刪除欄位 |
+| `RENAME_TABLE` | RENAME TABLE - 重命名表 |
+| `DROP_INDEX` | DROP INDEX - 刪除索引 |
+| `DROP_KEY` | DROP KEY - 刪除主鍵 |
+| `DROP_FOREIGN_KEY` | DROP FOREIGN KEY - 刪除外鍵 |
+
+#### 🟠 Dangerous 操作代碼 (MongoDB)
+
+| 代碼 | 說明 |
+|------|------|
+| `DROP_COLLECTION` | drop() - 刪除 Collection |
+| `DELETE_ALL` | deleteMany({}) - 刪除所有文件 |
+| `UPDATE_ALL` | updateMany({}, ...) - 更新所有文件 |
+| `REPLACE_ONE` | replaceOne - 取代文件 |
+| `DROP_INDEX` | dropIndex - 刪除索引 |
+| `DROP_INDEXES` | dropIndexes - 刪除所有索引 |
+| `RENAME_FIELD` | $rename - 重命名欄位 |
+| `UNSET_FIELD` | $unset - 刪除欄位 |
+| `RENAME_COLLECTION` | renameCollection - 重命名 Collection |
+| `VALIDATION_ERROR` | validationAction: "error" |
+| `VALIDATION_STRICT` | validationLevel: "strict" |
+
+#### 放行範例
+
+```bash
+# 情境 1: 需要執行 TRUNCATE TABLE (清理測試資料)
+node src/cli.js -c config.js validate --allow TRUNCATE_TABLE
+
+# 情境 2: 批准多個危險操作
+node src/cli.js -c config.js validate --allow TRUNCATE_TABLE,DROP_COLUMN,DROP_INDEX
+
+# 情境 3: 批准所有危險操作 (需在 PR 中說明理由)
+node src/cli.js -c config.js validate --allow-dangerous
+
+# 情境 4: 特殊情況需要 DROP DATABASE (需團隊 Lead 審批)
+node src/cli.js -c config.js validate --allow-forbidden
+
+# 情境 5: 只允許特定禁止操作
+node src/cli.js -c config.js validate --allow DROP_DATABASE
+
+# 情境 6: 組合使用 - 允許所有危險操作 + 特定禁止操作
+node src/cli.js -c config.js validate --allow-dangerous --allow DROP_DATABASE
+```
+
+#### CI/CD 整合
+
+在 CI/CD pipeline 中使用放行機制：
+
+```yaml
+# azure-pipelines.yml
+- script: |
+    # 標準驗證 - 不放行任何危險操作
+    node src/cli.js -c $CONFIG_PATH validate
+  displayName: 'Validate Migrations (Strict)'
+
+# 或者在特殊分支允許危險操作
+- script: |
+    if [ "$BUILD_REASON" = "PullRequest" ]; then
+      # PR 階段：嚴格驗證
+      node src/cli.js -c $CONFIG_PATH validate
+    else
+      # Release 分支：允許已審批的危險操作
+      node src/cli.js -c $CONFIG_PATH validate --allow $APPROVED_CODES
+    fi
+  displayName: 'Validate Migrations (Conditional)'
+```
+
+#### 團隊審批流程建議
+
+```
+1. 開發者提交含危險操作的 Migration
+2. CI 驗證失敗，顯示需要放行的代碼
+3. 開發者在 PR 說明中解釋為何需要該操作
+4. Team Lead 審核並批准
+5. 在 CI 變數中加入 APPROVED_CODES
+6. 重新執行 CI
 ```
 
 #### 6. Up-Down-Up 測試 (`test`)
