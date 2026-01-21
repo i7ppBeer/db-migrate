@@ -382,6 +382,79 @@ export class MongoDBAdapter extends BaseAdapter {
     }
   }
 
+  /**
+   * Create a new DCL (Repeatable) migration file with R__ prefix
+   * @param {string} name - Migration name
+   * @param {string} sequenceNumber - Optional sequence number (e.g., '001', '002')
+   * @returns {Promise<string>} - Created file name
+   */
+  async createDCL(name, sequenceNumber = '') {
+    // Generate filename: R__001_name.js or R__name.js
+    const sanitizedName = name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+    const prefix = sequenceNumber ? `R__${sequenceNumber}_` : 'R__';
+    const fileName = `${prefix}${sanitizedName}.js`;
+    const filePath = path.join(this.config.migrationsDir, fileName);
+
+    // Check if file already exists
+    try {
+      await fs.access(filePath);
+      throw new Error(`DCL migration file already exists: ${fileName}`);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+
+    const dbName = this.config.mongodb?.database || 'mydb';
+    const template = `/**
+ * DCL Repeatable Migration: ${name}
+ * File: ${fileName}
+ * Created: ${new Date().toISOString()}
+ * 
+ * ⚠️  IMPORTANT: This script must be IDEMPOTENT!
+ * It will run whenever the checksum changes.
+ * Always check existence before creating users/roles!
+ */
+
+export async function up(db, client) {
+  const adminDb = client.db('admin');
+  
+  // Example: Create user if not exists
+  // try {
+  //   const users = await adminDb.command({ usersInfo: 'app_readonly' });
+  //   if (users.users.length === 0) {
+  //     await adminDb.command({
+  //       createUser: 'app_readonly',
+  //       pwd: 'password',
+  //       roles: [{ role: 'read', db: '${dbName}' }]
+  //     });
+  //     console.log('[DCL] Created app_readonly user');
+  //   } else {
+  //     // Update existing user's roles (idempotent)
+  //     await adminDb.command({
+  //       updateUser: 'app_readonly',
+  //       roles: [{ role: 'read', db: '${dbName}' }]
+  //     });
+  //     console.log('[DCL] Updated app_readonly user roles');
+  //   }
+  // } catch (error) {
+  //   console.error('[DCL] Error managing user:', error.message);
+  //   throw error;
+  // }
+  
+  // Your DCL statements here:
+  
+}
+
+// Note: DCL migrations typically don't need down()
+// Permission changes should be managed forward-only
+export async function down(db, client) {
+  console.log('[DCL] Repeatable migrations do not support rollback');
+}
+`;
+
+    await fs.writeFile(filePath, template);
+    return fileName;
+  }
+
   async validate(options = {}) {
     const results = {
       valid: true,

@@ -635,6 +635,57 @@ export class MariaDBAdapter extends BaseAdapter {
     return fileName;
   }
 
+  /**
+   * Create a new DCL (Repeatable) migration file with R__ prefix
+   * @param {string} name - Migration name
+   * @param {string} sequenceNumber - Optional sequence number (e.g., '001', '002')
+   * @returns {Promise<string>} - Created file name
+   */
+  async createDCL(name, sequenceNumber = '') {
+    // Generate filename: R__001_name.sql or R__name.sql
+    const sanitizedName = name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+    const prefix = sequenceNumber ? `R__${sequenceNumber}_` : 'R__';
+    const fileName = `${prefix}${sanitizedName}.sql`;
+    const filePath = path.join(this.config.migrationsDir, fileName);
+
+    // Check if file already exists
+    try {
+      await fs.access(filePath);
+      throw new Error(`DCL migration file already exists: ${fileName}`);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+
+    const template = `-- DCL Repeatable Migration: ${name}
+-- File: ${fileName}
+-- Created: ${new Date().toISOString()}
+--
+-- ⚠️  IMPORTANT: This script must be IDEMPOTENT!
+-- It will run whenever the checksum changes.
+-- Always use IF NOT EXISTS / IF EXISTS patterns!
+-- ============================================
+
+-- Example: Create user (idempotent)
+-- CREATE USER IF NOT EXISTS 'app_readonly'@'%' IDENTIFIED BY 'password';
+
+-- Example: Grant permissions (idempotent by nature)
+-- GRANT SELECT ON mydb.* TO 'app_readonly'@'%';
+
+-- Example: Revoke then Grant for exact permissions
+-- REVOKE ALL PRIVILEGES ON mydb.* FROM 'app_user'@'%';
+-- GRANT SELECT, INSERT, UPDATE ON mydb.* TO 'app_user'@'%';
+
+-- Apply changes
+-- FLUSH PRIVILEGES;
+
+-- Your DCL statements here:
+
+`;
+
+    await fs.writeFile(filePath, template);
+    return fileName;
+  }
+
   async validate(options = {}) {
     const results = {
       valid: true,

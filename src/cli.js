@@ -276,7 +276,7 @@ program
 
 program
   .command('create <name>')
-  .description('Create a new migration file')
+  .description('Create a new DDL (versioned) migration file')
   .action(async (name, cmdOptions, cmd) => {
     const options = cmd.parent.opts();
     let adapter;
@@ -290,6 +290,30 @@ program
       console.log('1. Implement the UP section');
       console.log('2. Implement the DOWN section');
       console.log('3. Run validation: db-migrate validate -c <config>');
+    } catch (error) {
+      console.error(chalk.red(`[ERROR] ${error.message}`));
+      process.exit(1);
+    }
+  });
+
+program
+  .command('create-dcl <name>')
+  .description('Create a new DCL (repeatable) migration file with R__ prefix')
+  .option('-n, --number <num>', 'Sequence number (e.g., 001, 002)', '')
+  .action(async (name, cmdOptions, cmd) => {
+    const options = { ...cmd.parent.opts(), ...cmdOptions };
+    let adapter;
+    
+    try {
+      adapter = await getAdapter(options);
+      
+      const fileName = await adapter.createDCL(name, options.number);
+      console.log(chalk.green(`\n✅ Created: ${fileName}`));
+      console.log(chalk.gray('\nRemember:'));
+      console.log(chalk.yellow('⚠️  DCL scripts must be IDEMPOTENT (safe to run multiple times)'));
+      console.log('1. Use IF NOT EXISTS / IF EXISTS patterns');
+      console.log('2. DCL runs whenever checksum changes (no versioning)');
+      console.log('3. Run verification: db-migrate dcl:verify -c <config>');
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
       process.exit(1);
