@@ -6,8 +6,12 @@
 export default {
   type: 'mongodb',
   mongodb: {
-    uri: process.env.MONGODB_URI || 'mongodb://localhost:27017',
-    database: process.env.MONGODB_DB || 'admin'  // DCL operates on admin db
+    url: process.env.MONGODB_URI || 'mongodb://localhost:27017',
+    databaseName: process.env.MONGODB_DB || 'admin',  // DCL operates on admin db
+    options: {
+      useNewUrlParser: true,
+      useUnifiedTopology: true
+    }
   },
   migrationsDir: './migrations',
   checksumCollection: '_dcl_migrations',

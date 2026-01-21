@@ -989,7 +989,8 @@ program
         
         const executeScript = async () => {
           if (adapter.dbType === 'mariadb') {
-            await adapter.connection.execute(file.content);
+            // Use query instead of execute for multiple statements
+            await adapter.connection.query(file.content);
           } else if (adapter.dbType === 'mongodb') {
             const module = await import(`file://${file.filePath}`);
             if (typeof module.up === 'function') {

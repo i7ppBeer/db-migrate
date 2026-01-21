@@ -196,8 +196,8 @@ export class RepeatableRunner {
       }
 
       try {
-        // Execute the SQL
-        await connection.execute(file.content);
+        // Execute the SQL (use query instead of execute for multiple statements)
+        await connection.query(file.content);
         
         // Update checksum
         await this.updateChecksumMariaDB(connection, file.fileName, file.checksum);

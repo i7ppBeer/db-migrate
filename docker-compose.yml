@@ -116,6 +116,41 @@ services:
     networks:
       - migrate-network
 
+  # ──────────────────────────────────────────────────────────
+  # Migration CLI Tool - 使用者操作介面
+  # 用法:
+  #   docker compose run --rm migrate <command> -c <config>
+  # 範例:
+  #   docker compose run --rm migrate dcl -c /app/databases/mariadb/my-project/dcl/config.js
+  #   docker compose run --rm migrate up -c /app/databases/mariadb/my-project/ddl/config.js
+  #   docker compose run --rm migrate validate -c /app/databases/mariadb/my-project/ddl/config.js
+  # ──────────────────────────────────────────────────────────
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: migrate-cli
+    working_dir: /app
+    volumes:
+      - ./databases:/app/databases
+      - ./reports:/app/reports
+    environment:
+      # MariaDB
+      - MARIADB_HOST=mariadb
+      - MARIADB_PORT=3306
+      - MARIADB_USER=root
+      - MARIADB_PASSWORD=rootpass
+      # MongoDB
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_HOST=mongodb
+      - MONGODB_PORT=27017
+    networks:
+      - migrate-network
+    entrypoint: ["node", "src/cli.js"]
+    profiles:
+      - tools
+
 volumes:
   mongodb_data:
   mariadb_data:
