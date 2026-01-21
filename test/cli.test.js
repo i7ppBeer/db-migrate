@@ -12,6 +12,11 @@ describe('CLI Sanity Check Options', () => {
   beforeEach(() => {
     // Create fresh Command instance for each test
     program = new Command();
+    program.exitOverride(); // Prevent process.exit()
+    program.configureOutput({
+      writeOut: () => {},  // Suppress stdout
+      writeErr: () => {},  // Suppress stderr
+    });
     
     // Add the up command with sanity check options (mimicking cli.js)
     program
@@ -27,29 +32,29 @@ describe('CLI Sanity Check Options', () => {
 
   describe('--sanity-check flag', () => {
     it('should default to disabled', () => {
-      program.parse(['node', 'test', 'up'], { from: 'user' });
+      program.parse(['up'], { from: 'user' });
       expect(program.upOptions.sanityCheck).toBe(false);
     });
 
     it('should enable sanity check when flag is provided', () => {
-      program.parse(['node', 'test', 'up', '--sanity-check'], { from: 'user' });
+      program.parse(['up', '--sanity-check'], { from: 'user' });
       expect(program.upOptions.sanityCheck).toBe(true);
     });
   });
 
   describe('--no-auto-rollback flag', () => {
     it('should default autoRollback to true', () => {
-      program.parse(['node', 'test', 'up'], { from: 'user' });
+      program.parse(['up'], { from: 'user' });
       expect(program.upOptions.autoRollback).toBe(true);
     });
 
     it('should disable autoRollback when --no-auto-rollback is provided', () => {
-      program.parse(['node', 'test', 'up', '--no-auto-rollback'], { from: 'user' });
+      program.parse(['up', '--no-auto-rollback'], { from: 'user' });
       expect(program.upOptions.autoRollback).toBe(false);
     });
 
     it('should work with --sanity-check flag', () => {
-      program.parse(['node', 'test', 'up', '--sanity-check', '--no-auto-rollback'], { from: 'user' });
+      program.parse(['up', '--sanity-check', '--no-auto-rollback'], { from: 'user' });
       expect(program.upOptions.sanityCheck).toBe(true);
       expect(program.upOptions.autoRollback).toBe(false);
     });
@@ -57,7 +62,7 @@ describe('CLI Sanity Check Options', () => {
 
   describe('Combined options', () => {
     it('should accept all options together', () => {
-      program.parse(['node', 'test', 'up', '--sanity-check', '--no-auto-rollback'], { from: 'user' });
+      program.parse(['up', '--sanity-check', '--no-auto-rollback'], { from: 'user' });
       
       expect(program.upOptions.sanityCheck).toBe(true);
       expect(program.upOptions.autoRollback).toBe(false);

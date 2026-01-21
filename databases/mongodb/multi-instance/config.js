@@ -1,52 +1,30 @@
 /**
- * Multi-Instance MongoDB Configuration Example
+ * MongoDB Multi-Instance Test Config
  * 
- * Use this config to test migrations on multiple MongoDB instances
- * (e.g., primary, secondary, tertiary databases)
+ * Test running same migrations across multiple database instances
  */
 export default {
   type: 'mongodb',
   
-  // Shared migrations directory (all instances use the same migrations)
+  // Shared migrations for all instances
   migrationsDir: './migrations',
+  changelogCollection: '_migrations',
   
   // Multiple database instances
   instances: [
     {
-      name: 'mongo-primary',
+      name: 'primary-db',
       mongodb: {
-        url: process.env.MONGO_PRIMARY_URL || 'mongodb://localhost:27017',
-        databaseName: process.env.MONGO_PRIMARY_DB || 'app_primary',
-        options: {
-          useNewUrlParser: true,
-          useUnifiedTopology: true
-        }
-      },
-      changelogCollectionName: 'changelog'
+        uri: process.env.MONGODB_URI || 'mongodb://localhost:27017',
+        database: 'test_multi_primary'
+      }
     },
     {
-      name: 'mongo-secondary',
+      name: 'secondary-db',
       mongodb: {
-        url: process.env.MONGO_SECONDARY_URL || 'mongodb://localhost:27017',
-        databaseName: process.env.MONGO_SECONDARY_DB || 'app_secondary',
-        options: {
-          useNewUrlParser: true,
-          useUnifiedTopology: true
-        }
-      },
-      changelogCollectionName: 'changelog'
-    },
-    {
-      name: 'mongo-tertiary',
-      mongodb: {
-        url: process.env.MONGO_TERTIARY_URL || 'mongodb://localhost:27017',
-        databaseName: process.env.MONGO_TERTIARY_DB || 'app_tertiary',
-        options: {
-          useNewUrlParser: true,
-          useUnifiedTopology: true
-        }
-      },
-      changelogCollectionName: 'changelog'
+        uri: process.env.MONGODB_URI || 'mongodb://localhost:27017',
+        database: 'test_multi_secondary'
+      }
     }
   ]
 };

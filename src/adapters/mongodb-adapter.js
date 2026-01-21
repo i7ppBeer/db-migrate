@@ -16,6 +16,7 @@ export class MongoDBAdapter extends BaseAdapter {
     this.dbType = 'mongodb';
     this.client = null;
     this.db = null;
+    this.changelogCollection = config.changelogCollection || 'changelog';
     this.sanityChecker = new SanityChecker({
       enabled: config.sanityCheck?.enabled ?? false,
       autoRollback: config.sanityCheck?.autoRollback ?? true,
@@ -46,33 +47,33 @@ export class MongoDBAdapter extends BaseAdapter {
       // ========================================
       forbidden: {
         database: [
-          { pattern: /\.dropDatabase\s*\(/i, code: 'DROP_DATABASE', message: '🔴 DATA LOSS: 禁止刪除資料庫' },
-          { pattern: /dropDatabase\s*:\s*(?:true|1)/i, code: 'DROP_DATABASE_CMD', message: '🔴 DATA LOSS: 禁止刪除資料庫' }
+          { pattern: /\.dropDatabase\s*\(/i, code: 'DROP_DATABASE', message: '🔴 DATA LOSS: Drop database is forbidden / 禁止刪除資料庫' },
+          { pattern: /dropDatabase\s*:\s*(?:true|1)/i, code: 'DROP_DATABASE_CMD', message: '🔴 DATA LOSS: Drop database is forbidden / 禁止刪除資料庫' }
         ],
         dcl: [
-          { pattern: /\.createUser\s*\(/i, code: 'CREATE_USER', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /createUser\s*:/i, code: 'CREATE_USER_CMD', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /\.dropUser\s*\(/i, code: 'DROP_USER', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /dropUser\s*:/i, code: 'DROP_USER_CMD', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /\.updateUser\s*\(/i, code: 'UPDATE_USER', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /updateUser\s*:/i, code: 'UPDATE_USER_CMD', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /\.grantRolesToUser\s*\(/i, code: 'GRANT_ROLES', message: '🔴 DCL: 權限管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /grantRolesToUser\s*:/i, code: 'GRANT_ROLES_CMD', message: '🔴 DCL: 權限管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /\.revokeRolesFromUser\s*\(/i, code: 'REVOKE_ROLES', message: '🔴 DCL: 權限管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /revokeRolesFromUser\s*:/i, code: 'REVOKE_ROLES_CMD', message: '🔴 DCL: 權限管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /\.createRole\s*\(/i, code: 'CREATE_ROLE', message: '🔴 DCL: 角色管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /createRole\s*:/i, code: 'CREATE_ROLE_CMD', message: '🔴 DCL: 角色管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /\.dropRole\s*\(/i, code: 'DROP_ROLE', message: '🔴 DCL: 角色管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /dropRole\s*:/i, code: 'DROP_ROLE_CMD', message: '🔴 DCL: 角色管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /\.updateRole\s*\(/i, code: 'UPDATE_ROLE', message: '🔴 DCL: 角色管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /updateRole\s*:/i, code: 'UPDATE_ROLE_CMD', message: '🔴 DCL: 角色管理應在 DCL 專案 (Repeatable)' }
+          { pattern: /\.createUser\s*\(/i, code: 'CREATE_USER', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
+          { pattern: /createUser\s*:/i, code: 'CREATE_USER_CMD', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
+          { pattern: /\.dropUser\s*\(/i, code: 'DROP_USER', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
+          { pattern: /dropUser\s*:/i, code: 'DROP_USER_CMD', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
+          { pattern: /\.updateUser\s*\(/i, code: 'UPDATE_USER', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
+          { pattern: /updateUser\s*:/i, code: 'UPDATE_USER_CMD', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
+          { pattern: /\.grantRolesToUser\s*\(/i, code: 'GRANT_ROLES', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' },
+          { pattern: /grantRolesToUser\s*:/i, code: 'GRANT_ROLES_CMD', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' },
+          { pattern: /\.revokeRolesFromUser\s*\(/i, code: 'REVOKE_ROLES', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' },
+          { pattern: /revokeRolesFromUser\s*:/i, code: 'REVOKE_ROLES_CMD', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' },
+          { pattern: /\.createRole\s*\(/i, code: 'CREATE_ROLE', message: '🔴 DCL: Role management should be in DCL project (Repeatable) / 角色管理應在 DCL 專案' },
+          { pattern: /createRole\s*:/i, code: 'CREATE_ROLE_CMD', message: '🔴 DCL: Role management should be in DCL project (Repeatable) / 角色管理應在 DCL 專案' },
+          { pattern: /\.dropRole\s*\(/i, code: 'DROP_ROLE', message: '🔴 DCL: Role management should be in DCL project (Repeatable) / 角色管理應在 DCL 專案' },
+          { pattern: /dropRole\s*:/i, code: 'DROP_ROLE_CMD', message: '🔴 DCL: Role management should be in DCL project (Repeatable) / 角色管理應在 DCL 專案' },
+          { pattern: /\.updateRole\s*\(/i, code: 'UPDATE_ROLE', message: '🔴 DCL: Role management should be in DCL project (Repeatable) / 角色管理應在 DCL 專案' },
+          { pattern: /updateRole\s*:/i, code: 'UPDATE_ROLE_CMD', message: '🔴 DCL: Role management should be in DCL project (Repeatable) / 角色管理應在 DCL 專案' }
         ],
         system: [
-          { pattern: /shutdown\s*:\s*(?:true|1)/i, code: 'SHUTDOWN', message: '🔴 SYSTEM: 禁止關閉資料庫' },
-          { pattern: /\.shutdown\s*\(/i, code: 'SHUTDOWN_FUNC', message: '🔴 SYSTEM: 禁止關閉資料庫' },
-          { pattern: /replSetReconfig\s*:/i, code: 'REPL_RECONFIG', message: '🔴 SYSTEM: 禁止重新設定 Replica Set' },
-          { pattern: /replSetStepDown\s*:/i, code: 'REPL_STEPDOWN', message: '🔴 SYSTEM: 禁止強制降級 Primary' },
-          { pattern: /setParameter\s*:/i, code: 'SET_PARAMETER', message: '🔴 SYSTEM: 禁止變更系統參數' }
+          { pattern: /shutdown\s*:\s*(?:true|1)/i, code: 'SHUTDOWN', message: '🔴 SYSTEM: Shutdown database is forbidden / 禁止關閉資料庫' },
+          { pattern: /\.shutdown\s*\(/i, code: 'SHUTDOWN_FUNC', message: '🔴 SYSTEM: Shutdown database is forbidden / 禁止關閉資料庫' },
+          { pattern: /replSetReconfig\s*:/i, code: 'REPL_RECONFIG', message: '🔴 SYSTEM: Replica Set reconfig is forbidden / 禁止重新設定 Replica Set' },
+          { pattern: /replSetStepDown\s*:/i, code: 'REPL_STEPDOWN', message: '🔴 SYSTEM: Force stepdown Primary is forbidden / 禁止強制降級 Primary' },
+          { pattern: /setParameter\s*:/i, code: 'SET_PARAMETER', message: '🔴 SYSTEM: Change system parameters is forbidden / 禁止變更系統參數' }
         ]
       },
 
@@ -81,25 +82,25 @@ export class MongoDBAdapter extends BaseAdapter {
       // ========================================
       dangerous: {
         dataLoss: [
-          { pattern: /\.drop\s*\(\s*\)/i, code: 'DROP_COLLECTION', message: '🟠 DATA LOSS: drop() 會刪除整個 Collection', suggestion: '確認真的要刪除，並確保有備份' },
-          { pattern: /\.deleteMany\s*\(\s*\{\s*\}\s*\)/i, code: 'DELETE_ALL', message: '🟠 DATA LOSS: deleteMany({}) 會刪除所有文件', suggestion: '請加上查詢條件' },
-          { pattern: /\.remove\s*\(\s*\{\s*\}\s*\)/i, code: 'REMOVE_ALL', message: '🟠 DATA LOSS: remove({}) 會刪除所有文件', suggestion: '請使用 deleteMany 並加上條件' }
+          { pattern: /\.drop\s*\(\s*\)/i, code: 'DROP_COLLECTION', message: '🟠 DATA LOSS: drop() will delete entire collection / 會刪除整個 Collection', suggestion: 'Confirm deletion and ensure backup exists / 確認真的要刪除，並確保有備份' },
+          { pattern: /\.deleteMany\s*\(\s*\{\s*\}\s*\)/i, code: 'DELETE_ALL', message: '🟠 DATA LOSS: deleteMany({}) will delete all documents / 會刪除所有文件', suggestion: 'Add query condition / 請加上查詢條件' },
+          { pattern: /\.remove\s*\(\s*\{\s*\}\s*\)/i, code: 'REMOVE_ALL', message: '🟠 DATA LOSS: remove({}) will delete all documents / 會刪除所有文件', suggestion: 'Use deleteMany with query condition / 請使用 deleteMany 並加上條件' }
         ],
         bulkOperation: [
-          { pattern: /\.updateMany\s*\(\s*\{\s*\}\s*,/i, code: 'UPDATE_ALL', message: '🟠 DATA RISK: updateMany({}, ...) 會更新所有文件', suggestion: '請加上查詢條件' },
-          { pattern: /\.replaceOne\s*\(/i, code: 'REPLACE_ONE', message: '🟠 DATA RISK: replaceOne 會完全取代文件', suggestion: '考慮使用 updateOne 搭配 $set' }
+          { pattern: /\.updateMany\s*\(\s*\{\s*\}\s*,/i, code: 'UPDATE_ALL', message: '🟠 DATA RISK: updateMany({}, ...) will update all documents / 會更新所有文件', suggestion: 'Add query condition / 請加上查詢條件' },
+          { pattern: /\.replaceOne\s*\(/i, code: 'REPLACE_ONE', message: '🟠 DATA RISK: replaceOne will completely replace document / 會完全取代文件', suggestion: 'Consider using updateOne with $set / 考慮使用 updateOne 搭配 $set' }
         ],
         schemaChange: [
-          { pattern: /\.dropIndex\s*\(/i, code: 'DROP_INDEX', message: '🟠 PERFORMANCE: dropIndex 可能影響查詢效能', suggestion: '確認該索引已無查詢使用' },
-          { pattern: /\.dropIndexes\s*\(/i, code: 'DROP_INDEXES', message: '🟠 PERFORMANCE: dropIndexes 會刪除所有索引', suggestion: '這是非常危險的操作' },
-          { pattern: /\$rename\s*:/i, code: 'RENAME_FIELD', message: '🟠 BREAKING: $rename 可能破壞應用程式', suggestion: '確認所有應用程式都已更新欄位名稱' },
-          { pattern: /\$unset\s*:/i, code: 'UNSET_FIELD', message: '🟠 DATA LOSS: $unset 會永久刪除欄位', suggestion: '確認該欄位已無使用' },
-          { pattern: /\.renameCollection\s*\(/i, code: 'RENAME_COLLECTION', message: '🟠 BREAKING: renameCollection 可能破壞應用程式', suggestion: '確認所有應用程式都已更新 Collection 名稱' },
-          { pattern: /renameCollection\s*:/i, code: 'RENAME_COLLECTION_CMD', message: '🟠 BREAKING: renameCollection 可能破壞應用程式', suggestion: '確認所有應用程式都已更新 Collection 名稱' }
+          { pattern: /\.dropIndex\s*\(/i, code: 'DROP_INDEX', message: '🟠 PERFORMANCE: dropIndex may affect query performance / 可能影響查詢效能', suggestion: 'Confirm index is no longer used / 確認該索引已無查詢使用' },
+          { pattern: /\.dropIndexes\s*\(/i, code: 'DROP_INDEXES', message: '🟠 PERFORMANCE: dropIndexes will delete all indexes / 會刪除所有索引', suggestion: 'This is a very dangerous operation / 這是非常危險的操作' },
+          { pattern: /\$rename\s*:/i, code: 'RENAME_FIELD', message: '🟠 BREAKING: $rename may break applications / 可能破壞應用程式', suggestion: 'Confirm all apps have updated field names / 確認所有應用程式都已更新欄位名稱' },
+          { pattern: /\$unset\s*:/i, code: 'UNSET_FIELD', message: '🟠 DATA LOSS: $unset will permanently delete field / 會永久刪除欄位', suggestion: 'Confirm field is no longer used / 確認該欄位已無使用' },
+          { pattern: /\.renameCollection\s*\(/i, code: 'RENAME_COLLECTION', message: '🟠 BREAKING: renameCollection may break applications / 可能破壞應用程式', suggestion: 'Confirm all apps have updated collection name / 確認所有應用程式都已更新 Collection 名稱' },
+          { pattern: /renameCollection\s*:/i, code: 'RENAME_COLLECTION_CMD', message: '🟠 BREAKING: renameCollection may break applications / 可能破壞應用程式', suggestion: 'Confirm all apps have updated collection name / 確認所有應用程式都已更新 Collection 名稱' }
         ],
         validation: [
-          { pattern: /validationAction\s*:\s*['"]error['"]/i, code: 'VALIDATION_ERROR', message: '🟠 BREAKING: validationAction: "error" 可能導致寫入失敗', suggestion: '先使用 "warn" 測試' },
-          { pattern: /validationLevel\s*:\s*['"]strict['"]/i, code: 'VALIDATION_STRICT', message: '🟠 BREAKING: validationLevel: "strict" 會驗證所有文件', suggestion: '確認現有資料都符合 schema' }
+          { pattern: /validationAction\s*:\s*['"]error['"]/i, code: 'VALIDATION_ERROR', message: '🟠 BREAKING: validationAction "error" may cause write failures / 可能導致寫入失敗', suggestion: 'Test with "warn" first / 先使用 "warn" 測試' },
+          { pattern: /validationLevel\s*:\s*['"]strict['"]/i, code: 'VALIDATION_STRICT', message: '🟠 BREAKING: validationLevel "strict" validates all documents / 會驗證所有文件', suggestion: 'Confirm existing data matches schema / 確認現有資料都符合 schema' }
         ]
       },
 
@@ -108,14 +109,14 @@ export class MongoDBAdapter extends BaseAdapter {
       // ========================================
       warnings: {
         operations: [
-          { pattern: /\.createIndex\s*\(/i, message: '⚠️ createIndex 在大 Collection 上可能需要較長時間' },
-          { pattern: /background\s*:\s*false/i, message: '⚠️ background: false 會阻塞操作' },
-          { pattern: /\.aggregate\s*\(/i, message: '⚠️ aggregate 在大數據集上可能耗費大量資源' },
-          { pattern: /\$lookup\s*:/i, message: '⚠️ $lookup 可能造成效能問題，確認有適當索引' },
-          { pattern: /sparse\s*:\s*true/i, message: '⚠️ sparse index 不會包含 null 值的文件' },
-          { pattern: /expireAfterSeconds\s*:/i, message: '⚠️ TTL index 會自動刪除過期文件' },
-          { pattern: /\.deleteMany\s*\(/i, message: '⚠️ deleteMany 可能影響大量資料' },
-          { pattern: /\.updateMany\s*\(/i, message: '⚠️ updateMany 可能影響大量資料' }
+          { pattern: /\.createIndex\s*\(/i, message: '⚠️ createIndex may take long on large collections / 在大 Collection 上可能需要較長時間' },
+          { pattern: /background\s*:\s*false/i, message: '⚠️ background: false will block operations / 會阻塞操作' },
+          { pattern: /\.aggregate\s*\(/i, message: '⚠️ aggregate may consume lots of resources on large datasets / 在大數據集上可能耗費大量資源' },
+          { pattern: /\$lookup\s*:/i, message: '⚠️ $lookup may cause performance issues, ensure proper indexes / 可能造成效能問題，確認有適當索引' },
+          { pattern: /sparse\s*:\s*true/i, message: '⚠️ sparse index excludes documents with null values / 不會包含 null 值的文件' },
+          { pattern: /expireAfterSeconds\s*:/i, message: '⚠️ TTL index will auto-delete expired documents / 會自動刪除過期文件' },
+          { pattern: /\.deleteMany\s*\(/i, message: '⚠️ deleteMany may affect large amounts of data / 可能影響大量資料' },
+          { pattern: /\.updateMany\s*\(/i, message: '⚠️ updateMany may affect large amounts of data / 可能影響大量資料' }
         ]
       }
     };
@@ -165,15 +166,62 @@ export class MongoDBAdapter extends BaseAdapter {
     }
   }
 
-  async up() {
+  async up(options = {}) {
     const result = {
       applied: [],
       errors: []
     };
 
     try {
-      const migrated = await migrateMongo.up(this.db, this.client);
-      result.applied = migrated;
+      // Get status to filter migrations
+      const statusResult = await migrateMongo.status(this.db);
+      let pending = statusResult.filter(m => m.appliedAt === 'PENDING').map(m => m.fileName);
+      
+      // Filter by target (up to and including)
+      if (options.target) {
+        const targetIndex = pending.findIndex(f => 
+          f === options.target || f.includes(options.target)
+        );
+        if (targetIndex === -1) {
+          result.errors.push(`Target migration not found: ${options.target}`);
+          return result;
+        }
+        pending = pending.slice(0, targetIndex + 1);
+      }
+      
+      // Filter by only (specific migration)
+      if (options.only) {
+        const onlyFile = pending.find(f => 
+          f === options.only || f.includes(options.only)
+        );
+        if (!onlyFile) {
+          result.errors.push(`Migration not found in pending: ${options.only}`);
+          return result;
+        }
+        pending = [onlyFile];
+      }
+      
+      // Run migrations one by one to respect filters
+      for (const fileName of pending) {
+        try {
+          const filePath = path.join(this.config.migrationsDir, fileName);
+          const migrationModule = await import(`file://${filePath}?t=${Date.now()}`);
+          
+          // Run the up function
+          await migrationModule.up(this.db, this.client);
+          
+          // Record in changelog
+          await this.db.collection(this.changelogCollection).insertOne({
+            fileName,
+            appliedAt: new Date()
+          });
+          
+          result.applied.push(fileName);
+        } catch (error) {
+          result.errors.push(`${fileName}: ${error.message}`);
+          break;
+        }
+      }
     } catch (error) {
       result.errors.push(error.message);
     }
@@ -185,11 +233,19 @@ export class MongoDBAdapter extends BaseAdapter {
    * Run migration with sanity check
    * Supports preCheck and postCheck functions exported from migration files
    * 
-   * @param {Object} options
-   * @param {boolean} options.verbose - Enable verbose logging
+   * @param {Object} migrationOrOptions - Migration object or options
+   * @param {Object} [options] - Options when first param is migration
    * @returns {Promise<Object>}
    */
-  async upWithSanityCheck(options = {}) {
+  async upWithSanityCheck(migrationOrOptions = {}, options = {}) {
+    // Check if first parameter is a migration object with up/down
+    if (migrationOrOptions.up && typeof migrationOrOptions.up === 'function') {
+      // Direct migration object passed (test mode)
+      return await this._runSingleMigrationWithSanityCheck(migrationOrOptions, options);
+    }
+    
+    // Otherwise, it's options for batch migration
+    const batchOptions = migrationOrOptions;
     const result = {
       applied: [],
       errors: [],
@@ -270,6 +326,32 @@ export class MongoDBAdapter extends BaseAdapter {
     }
 
     return result;
+  }
+
+  /**
+   * Run a single migration with sanity check (for test mode)
+   * @private
+   */
+  async _runSingleMigrationWithSanityCheck(migration, options = {}) {
+    const context = {
+      db: this.db,
+      client: this.client,
+      config: this.config
+    };
+
+    const localAutoRollback = options.autoRollback !== undefined 
+      ? options.autoRollback 
+      : (this.config.sanityCheck?.autoRollback ?? true);
+
+    const checker = new SanityChecker({
+      enabled: true,
+      autoRollback: localAutoRollback,
+      timeout: this.config.sanityCheck?.timeout ?? 30000,
+      timeoutMs: this.config.sanityCheck?.timeoutMs ?? 30000,
+      verbose: options.verbose ?? this.config.sanityCheck?.verbose ?? false
+    });
+
+    return await checker.runWithSanityCheck(migration, context, { autoRollback: localAutoRollback });
   }
 
   async down(count = 1) {

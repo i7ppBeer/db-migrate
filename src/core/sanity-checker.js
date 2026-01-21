@@ -30,10 +30,18 @@ export class SanityChecker {
     this.options = {
       enabled: true,
       autoRollback: true,
+      timeout: 30000,      // Also support 'timeout' for test compatibility
       timeoutMs: 30000,
       verbose: false,
       ...options
     };
+    // Sync timeout and timeoutMs
+    if (options.timeout) {
+      this.options.timeoutMs = options.timeout;
+    }
+    if (options.timeoutMs) {
+      this.options.timeout = options.timeoutMs;
+    }
     
     this.results = {
       preCheck: null,
@@ -47,15 +55,40 @@ export class SanityChecker {
    * Run a migration with full sanity check workflow:
    * 1. Pre-Check → 2. Execute Migration → 3. Post-Check (Sanity) → 4. Auto-Rollback if needed
    * 
-   * @param {Object} params
-   * @param {Function} params.up - Migration up function
-   * @param {Function} params.down - Migration down function  
-   * @param {Function} [params.preCheck] - Pre-check function (returns { success, error })
-   * @param {Function} [params.postCheck] - Post-check/sanity function (returns { success, error })
-   * @param {Object} [params.context] - Context passed to all functions (db, client, etc.)
+   * Supports two API styles:
+   * 1. Object style: runWithSanityCheck({ up, down, preCheck, postCheck, context })
+   * 2. Migration style: runWithSanityCheck(migration, context, options)
+   * 
+   * @param {Object} paramsOrMigration - Either params object or migration object
+   * @param {Object} [contextArg] - Context for migration style
+   * @param {Object} [optionsArg] - Options for migration style
    * @returns {Promise<Object>} - Execution result
    */
-  async runWithSanityCheck({ up, down, preCheck, postCheck, context = {} }) {
+  async runWithSanityCheck(paramsOrMigration, contextArg, optionsArg) {
+    // Detect API style
+    let up, down, preCheck, postCheck, context;
+    let localAutoRollback = this.options.autoRollback;
+    let localTimeout = this.options.timeoutMs;
+    
+    if (typeof paramsOrMigration.up === 'function' && contextArg !== undefined) {
+      // Migration style: runWithSanityCheck(migration, context, options)
+      up = paramsOrMigration.up;
+      down = paramsOrMigration.down;
+      preCheck = paramsOrMigration.preCheck;
+      postCheck = paramsOrMigration.postCheck;
+      context = contextArg || {};
+      if (optionsArg) {
+        if (optionsArg.autoRollback !== undefined) localAutoRollback = optionsArg.autoRollback;
+        if (optionsArg.timeout !== undefined) localTimeout = optionsArg.timeout;
+      }
+    } else {
+      // Object style: runWithSanityCheck({ up, down, preCheck, postCheck, context })
+      up = paramsOrMigration.up;
+      down = paramsOrMigration.down;
+      preCheck = paramsOrMigration.preCheck;
+      postCheck = paramsOrMigration.postCheck;
+      context = paramsOrMigration.context || {};
+    }
     if (!this.options.enabled) {
       // If sanity check is disabled, just run the migration
       this.log('⚠️  Sanity check disabled, running migration directly...');
@@ -81,9 +114,9 @@ export class SanityChecker {
         
         const preCheckResult = await this.runWithTimeout(
           () => preCheck(context),
-          this.options.timeoutMs,
+          localTimeout,
           'Pre-check timed out'
-        );
+        ).catch(err => ({ success: false, error: err.message }));
         
         this.results.preCheck = preCheckResult;
         
@@ -91,6 +124,10 @@ export class SanityChecker {
           this.log(`❌ Pre-Check Failed: ${preCheckResult.error}`);
           return {
             success: false,
+            preCheckResult,
+            postCheckResult: null,
+            migrationExecuted: false,
+            rolledBack: false,
             phase: 'pre-check',
             error: preCheckResult.error,
             results: this.results,
@@ -122,16 +159,17 @@ export class SanityChecker {
       // ═══════════════════════════════════════════════════════════
       // Phase 3: Post-Check (Sanity Check)
       // ═══════════════════════════════════════════════════════════
+      let postCheckResult = null;
       if (postCheck) {
         this.log('\n' + '═'.repeat(60));
         this.log('[PHASE 3] Sanity Check (Post-Check)');
         this.log('═'.repeat(60));
         
-        const postCheckResult = await this.runWithTimeout(
+        postCheckResult = await this.runWithTimeout(
           () => postCheck(context),
-          this.options.timeoutMs,
+          localTimeout,
           'Sanity check timed out'
-        );
+        ).catch(err => ({ success: false, error: err.message }));
         
         this.results.postCheck = postCheckResult;
         
@@ -141,7 +179,7 @@ export class SanityChecker {
           // ═══════════════════════════════════════════════════════
           // Phase 4: Auto-Rollback (if enabled)
           // ═══════════════════════════════════════════════════════
-          if (this.options.autoRollback && down) {
+          if (localAutoRollback && down) {
             this.log('\n' + '!'.repeat(60));
             this.log('[AUTO-ROLLBACK] Initiating automatic rollback...');
             this.log('!'.repeat(60));
@@ -153,9 +191,12 @@ export class SanityChecker {
               
               return {
                 success: false,
+                preCheckResult: this.results.preCheck,
+                postCheckResult,
+                migrationExecuted: true,
+                rolledBack: true,
                 phase: 'post-check',
                 error: postCheckResult.error,
-                rolledBack: true,
                 results: this.results,
                 duration: Date.now() - startTime
               };
@@ -166,9 +207,13 @@ export class SanityChecker {
               
               return {
                 success: false,
+                preCheckResult: this.results.preCheck,
+                postCheckResult,
+                migrationExecuted: true,
+                rolledBack: false,
+                rollbackError: rollbackError,
                 phase: 'rollback',
                 error: `Sanity check failed and rollback also failed: ${rollbackError.message}`,
-                rolledBack: false,
                 critical: true,
                 results: this.results,
                 duration: Date.now() - startTime
@@ -178,9 +223,12 @@ export class SanityChecker {
           
           return {
             success: false,
+            preCheckResult: this.results.preCheck,
+            postCheckResult,
+            migrationExecuted: true,
+            rolledBack: false,
             phase: 'post-check',
             error: postCheckResult.error,
-            rolledBack: false,
             results: this.results,
             duration: Date.now() - startTime
           };
@@ -204,36 +252,20 @@ export class SanityChecker {
       
       return {
         success: true,
+        preCheckResult: this.results.preCheck,
+        postCheckResult: postCheckResult,
+        migrationExecuted: true,
+        rolledBack: false,
         results: this.results,
         duration
       };
 
     } catch (error) {
-      // Migration itself failed
+      // Migration itself failed - throw for test compatibility
       this.results.migration = { success: false, error: error.message };
       this.log(`\n❌ Migration Failed: ${error.message}`);
       
-      // Auto-rollback if migration was partially executed
-      if (migrationExecuted && this.options.autoRollback && down) {
-        this.log('\n[AUTO-ROLLBACK] Migration failed, attempting rollback...');
-        try {
-          await down(context);
-          this.results.rollback = { success: true };
-          this.log('✅ Rollback Completed');
-        } catch (rollbackError) {
-          this.results.rollback = { success: false, error: rollbackError.message };
-          this.log(`❌ Rollback Failed: ${rollbackError.message}`);
-        }
-      }
-      
-      return {
-        success: false,
-        phase: 'migration',
-        error: error.message,
-        rolledBack: this.results.rollback?.success || false,
-        results: this.results,
-        duration: Date.now() - startTime
-      };
+      throw error;
     }
   }
 
@@ -288,7 +320,24 @@ export const MongoDBChecks = {
   },
 
   /**
+   * Count documents in a collection with optional filter
+   */
+  async documentCount(db, collectionName, filter = {}) {
+    return await db.collection(collectionName).countDocuments(filter);
+  },
+
+  /**
    * Check if all documents have a specific field
+   */
+  async hasField(db, collectionName, fieldName) {
+    const missingCount = await db.collection(collectionName).countDocuments({
+      [fieldName]: { $exists: false }
+    });
+    return missingCount === 0;
+  },
+
+  /**
+   * Check if all documents have a specific field (legacy name)
    */
   async allDocumentsHaveField(db, collectionName, fieldName) {
     const missingCount = await db.collection(collectionName).countDocuments({
@@ -374,6 +423,18 @@ export const SQLChecks = {
       [database, tableName, indexName]
     );
     return rows.length > 0;
+  },
+
+  /**
+   * Count rows in a table with optional WHERE clause
+   */
+  async rowCount(connection, tableName, whereClause = null, params = []) {
+    let sql = `SELECT COUNT(*) as count FROM ${tableName}`;
+    if (whereClause) {
+      sql += ` WHERE ${whereClause}`;
+    }
+    const [rows] = await connection.execute(sql, params);
+    return rows[0].count;
   },
 
   /**

@@ -45,31 +45,31 @@ export class MariaDBAdapter extends BaseAdapter {
       // ========================================
       forbidden: {
         database: [
-          { pattern: /DROP\s+DATABASE/i, code: 'DROP_DATABASE', message: '🔴 DATA LOSS: 禁止刪除資料庫' },
-          { pattern: /DROP\s+SCHEMA/i, code: 'DROP_SCHEMA', message: '🔴 DATA LOSS: 禁止刪除 SCHEMA' }
+          { pattern: /DROP\s+DATABASE/i, code: 'DROP_DATABASE', message: '🔴 DATA LOSS: Drop database is forbidden / 禁止刪除資料庫' },
+          { pattern: /DROP\s+SCHEMA/i, code: 'DROP_SCHEMA', message: '🔴 DATA LOSS: Drop schema is forbidden / 禁止刪除 SCHEMA' }
         ],
         dcl: [
-          { pattern: /\bCREATE\s+USER\s+['"`@]/i, code: 'CREATE_USER', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /\bDROP\s+USER\s+(?:IF\s+EXISTS\s+)?['"`@]/i, code: 'DROP_USER', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /\bALTER\s+USER\s+['"`@]/i, code: 'ALTER_USER', message: '🔴 DCL: 使用者管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /\bSET\s+PASSWORD\s+FOR/i, code: 'SET_PASSWORD', message: '🔴 DCL: 密碼管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /\bGRANT\s+(?:ALL|USAGE|SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|INDEX|EXECUTE)\s*(?:PRIVILEGES\s+)?(?:ON|,)/i, code: 'GRANT', message: '🔴 DCL: 權限管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /\bREVOKE\s+(?:ALL|SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|INDEX|EXECUTE)\s*(?:PRIVILEGES\s+)?(?:ON|,)/i, code: 'REVOKE', message: '🔴 DCL: 權限管理應在 DCL 專案 (Repeatable)' },
-          { pattern: /\bFLUSH\s+PRIVILEGES/i, code: 'FLUSH_PRIVILEGES', message: '🔴 DCL: 權限管理應在 DCL 專案 (Repeatable)' }
+          { pattern: /\bCREATE\s+USER\s+['"`@]/i, code: 'CREATE_USER', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
+          { pattern: /\bDROP\s+USER\s+(?:IF\s+EXISTS\s+)?['"`@]/i, code: 'DROP_USER', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
+          { pattern: /\bALTER\s+USER\s+['"`@]/i, code: 'ALTER_USER', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
+          { pattern: /\bSET\s+PASSWORD\s+FOR/i, code: 'SET_PASSWORD', message: '🔴 DCL: Password management should be in DCL project (Repeatable) / 密碼管理應在 DCL 專案' },
+          { pattern: /\bGRANT\s+(?:ALL|USAGE|SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|INDEX|EXECUTE)\s*(?:PRIVILEGES\s+)?(?:ON|,)/i, code: 'GRANT', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' },
+          { pattern: /\bREVOKE\s+(?:ALL|SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|INDEX|EXECUTE)\s*(?:PRIVILEGES\s+)?(?:ON|,)/i, code: 'REVOKE', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' },
+          { pattern: /\bFLUSH\s+PRIVILEGES/i, code: 'FLUSH_PRIVILEGES', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' }
         ],
         dataExfiltration: [
-          { pattern: /\bSELECT\s+.*\s+INTO\s+OUTFILE/i, code: 'INTO_OUTFILE', message: '🔴 DATA RISK: 禁止匯出資料到檔案' },
-          { pattern: /\bLOAD\s+DATA\s+(?:LOCAL\s+)?INFILE/i, code: 'LOAD_DATA', message: '🔴 DATA RISK: 禁止從檔案載入資料' },
-          { pattern: /\bINTO\s+DUMPFILE/i, code: 'INTO_DUMPFILE', message: '🔴 DATA RISK: 禁止匯出資料' }
+          { pattern: /\bSELECT\s+.*\s+INTO\s+OUTFILE/i, code: 'INTO_OUTFILE', message: '🔴 DATA RISK: Export data to file is forbidden / 禁止匯出資料到檔案' },
+          { pattern: /\bLOAD\s+DATA\s+(?:LOCAL\s+)?INFILE/i, code: 'LOAD_DATA', message: '🔴 DATA RISK: Load data from file is forbidden / 禁止從檔案載入資料' },
+          { pattern: /\bINTO\s+DUMPFILE/i, code: 'INTO_DUMPFILE', message: '🔴 DATA RISK: Export data is forbidden / 禁止匯出資料' }
         ],
         system: [
-          { pattern: /\bSHUTDOWN/i, code: 'SHUTDOWN', message: '🔴 SYSTEM: 禁止關閉資料庫' },
-          { pattern: /\bRESET\s+MASTER/i, code: 'RESET_MASTER', message: '🔴 SYSTEM: 禁止重置主庫' },
-          { pattern: /\bRESET\s+SLAVE/i, code: 'RESET_SLAVE', message: '🔴 SYSTEM: 禁止重置從庫' },
-          { pattern: /\bSTOP\s+SLAVE/i, code: 'STOP_SLAVE', message: '🔴 SYSTEM: 禁止停止複製' },
-          { pattern: /\bCHANGE\s+MASTER/i, code: 'CHANGE_MASTER', message: '🔴 SYSTEM: 禁止變更主庫設定' },
-          { pattern: /\bSET\s+GLOBAL/i, code: 'SET_GLOBAL', message: '🔴 SYSTEM: 禁止變更全域設定' },
-          { pattern: /\bKILL\s+(?:CONNECTION|QUERY)/i, code: 'KILL', message: '🔴 SYSTEM: 禁止終止連線/查詢' }
+          { pattern: /\bSHUTDOWN/i, code: 'SHUTDOWN', message: '🔴 SYSTEM: Shutdown database is forbidden / 禁止關閉資料庫' },
+          { pattern: /\bRESET\s+MASTER/i, code: 'RESET_MASTER', message: '🔴 SYSTEM: Reset master is forbidden / 禁止重置主庫' },
+          { pattern: /\bRESET\s+SLAVE/i, code: 'RESET_SLAVE', message: '🔴 SYSTEM: Reset slave is forbidden / 禁止重置從庫' },
+          { pattern: /\bSTOP\s+SLAVE/i, code: 'STOP_SLAVE', message: '🔴 SYSTEM: Stop replication is forbidden / 禁止停止複製' },
+          { pattern: /\bCHANGE\s+MASTER/i, code: 'CHANGE_MASTER', message: '🔴 SYSTEM: Change master config is forbidden / 禁止變更主庫設定' },
+          { pattern: /\bSET\s+GLOBAL/i, code: 'SET_GLOBAL', message: '🔴 SYSTEM: Change global settings is forbidden / 禁止變更全域設定' },
+          { pattern: /\bKILL\s+(?:CONNECTION|QUERY)/i, code: 'KILL', message: '🔴 SYSTEM: Kill connection/query is forbidden / 禁止終止連線/查詢' }
         ]
       },
 
@@ -78,29 +78,29 @@ export class MariaDBAdapter extends BaseAdapter {
       // ========================================
       dangerous: {
         dataLoss: [
-          { pattern: /TRUNCATE\s+TABLE/i, code: 'TRUNCATE_TABLE', message: '🟠 DATA LOSS: TRUNCATE TABLE 會清空全表資料', suggestion: '建議改用 DELETE FROM table WHERE condition' }
+          { pattern: /TRUNCATE\s+TABLE/i, code: 'TRUNCATE_TABLE', message: '🟠 DATA LOSS: TRUNCATE TABLE will clear all data / 會清空全表資料', suggestion: 'Use DELETE FROM table WHERE condition instead / 建議改用 DELETE FROM table WHERE condition' }
         ],
         blocking: [
-          { pattern: /LOCK\s+TABLE/i, code: 'LOCK_TABLE', message: '🟠 BLOCKING: LOCK TABLE 會阻塞所有查詢', suggestion: '考慮使用交易隔離等級或行鎖' },
-          { pattern: /ALTER\s+TABLE\s+\w+\s+(?:ADD|DROP|MODIFY|CHANGE)\s+(?!.*ALGORITHM\s*=\s*INPLACE)/i, code: 'ALTER_TABLE_BLOCKING', message: '🟠 BLOCKING: ALTER TABLE 可能造成長時間鎖表', suggestion: '建議使用 ALGORITHM=INPLACE, LOCK=NONE 或 pt-online-schema-change' },
-          { pattern: /CREATE\s+(?:UNIQUE\s+)?INDEX\s+\w+\s+ON\s+(?!.*ALGORITHM\s*=\s*INPLACE)/i, code: 'CREATE_INDEX_BLOCKING', message: '🟠 BLOCKING: CREATE INDEX 可能造成長時間鎖表', suggestion: '建議使用 ALGORITHM=INPLACE, LOCK=NONE' },
-          { pattern: /SELECT\s+[\s\S]*?\s+FOR\s+UPDATE/i, code: 'SELECT_FOR_UPDATE', message: '🟠 BLOCKING: SELECT FOR UPDATE 會造成排他行鎖', suggestion: '確認是否真的需要鎖定，考慮使用樂觀鎖' },
-          { pattern: /SELECT\s+[\s\S]*?\s+LOCK\s+IN\s+SHARE\s+MODE/i, code: 'LOCK_IN_SHARE_MODE', message: '🟠 BLOCKING: LOCK IN SHARE MODE 會造成共享行鎖', suggestion: '確認是否真的需要共享鎖' }
+          { pattern: /LOCK\s+TABLE/i, code: 'LOCK_TABLE', message: '🟠 BLOCKING: LOCK TABLE will block all queries / 會阻塞所有查詢', suggestion: 'Consider using transaction isolation level or row locks / 考慮使用交易隔離等級或行鎖' },
+          { pattern: /ALTER\s+TABLE\s+\w+\s+(?:ADD|DROP|MODIFY|CHANGE)\s+(?!.*ALGORITHM\s*=\s*INPLACE)/i, code: 'ALTER_TABLE_BLOCKING', message: '🟠 BLOCKING: ALTER TABLE may cause long table lock / 可能造成長時間鎖表', suggestion: 'Use ALGORITHM=INPLACE, LOCK=NONE or pt-online-schema-change / 建議使用 ALGORITHM=INPLACE, LOCK=NONE' },
+          { pattern: /CREATE\s+(?:UNIQUE\s+)?INDEX\s+\w+\s+ON\s+(?!.*ALGORITHM\s*=\s*INPLACE)/i, code: 'CREATE_INDEX_BLOCKING', message: '🟠 BLOCKING: CREATE INDEX may cause long table lock / 可能造成長時間鎖表', suggestion: 'Use ALGORITHM=INPLACE, LOCK=NONE / 建議使用 ALGORITHM=INPLACE, LOCK=NONE' },
+          { pattern: /SELECT\s+[\s\S]*?\s+FOR\s+UPDATE/i, code: 'SELECT_FOR_UPDATE', message: '🟠 BLOCKING: SELECT FOR UPDATE causes exclusive row lock / 會造成排他行鎖', suggestion: 'Confirm if lock is needed, consider optimistic locking / 確認是否真的需要鎖定，考慮使用樂觀鎖' },
+          { pattern: /SELECT\s+[\s\S]*?\s+LOCK\s+IN\s+SHARE\s+MODE/i, code: 'LOCK_IN_SHARE_MODE', message: '🟠 BLOCKING: LOCK IN SHARE MODE causes shared row lock / 會造成共享行鎖', suggestion: 'Confirm if shared lock is needed / 確認是否真的需要共享鎖' }
         ],
         bulkOperation: [
-          { pattern: /DELETE\s+FROM\s+\w+\s*(?:;|$)/i, code: 'DELETE_ALL', message: '🟠 DATA RISK: DELETE 缺少 WHERE 條件，會刪除全表資料', suggestion: '請加上 WHERE 條件' },
-          { pattern: /UPDATE\s+\w+\s+SET\s+[^;]*(?:;|$)(?![\s\S]*WHERE)/i, code: 'UPDATE_ALL', message: '🟠 DATA RISK: UPDATE 缺少 WHERE 條件，會更新全表資料', suggestion: '請加上 WHERE 條件' },
-          { pattern: /INSERT\s+[\s\S]*?\s+SELECT\s+/i, code: 'INSERT_SELECT', message: '🟠 BLOCKING: INSERT...SELECT 會對來源表加共享鎖', suggestion: '考慮分批處理' }
+          { pattern: /DELETE\s+FROM\s+\w+\s*(?:;|$)/i, code: 'DELETE_ALL', message: '🟠 DATA RISK: DELETE without WHERE will delete all rows / 缺少 WHERE 條件會刪除全表資料', suggestion: 'Add WHERE condition / 請加上 WHERE 條件' },
+          { pattern: /UPDATE\s+\w+\s+SET\s+[^;]*(?:;|$)(?![\s\S]*WHERE)/i, code: 'UPDATE_ALL', message: '🟠 DATA RISK: UPDATE without WHERE will update all rows / 缺少 WHERE 條件會更新全表資料', suggestion: 'Add WHERE condition / 請加上 WHERE 條件' },
+          { pattern: /INSERT\s+[\s\S]*?\s+SELECT\s+/i, code: 'INSERT_SELECT', message: '🟠 BLOCKING: INSERT...SELECT will lock source table / 會對來源表加共享鎖', suggestion: 'Consider batch processing / 考慮分批處理' }
         ],
         schemaChange: [
-          { pattern: /ALTER\s+TABLE\s+\w+\s+DROP\s+COLUMN/i, code: 'DROP_COLUMN', message: '🟠 DATA LOSS: DROP COLUMN 會永久刪除欄位資料', suggestion: '先確認該欄位已無使用' },
-          { pattern: /RENAME\s+TABLE/i, code: 'RENAME_TABLE', message: '🟠 BREAKING: RENAME TABLE 可能破壞應用程式', suggestion: '確認所有應用程式都已更新表名引用' },
-          { pattern: /ALTER\s+TABLE\s+\w+\s+RENAME\s+TO/i, code: 'ALTER_RENAME', message: '🟠 BREAKING: RENAME TABLE 可能破壞應用程式', suggestion: '確認所有應用程式都已更新表名引用' },
-          { pattern: /MODIFY\s+COLUMN\s+\w+\s+\w+/i, code: 'MODIFY_COLUMN', message: '🟠 DATA RISK: MODIFY COLUMN 可能造成資料轉換失敗', suggestion: '先在測試環境驗證' },
-          { pattern: /CHANGE\s+COLUMN/i, code: 'CHANGE_COLUMN', message: '🟠 DATA RISK: CHANGE COLUMN 可能造成資料轉換失敗', suggestion: '先在測試環境驗證' },
-          { pattern: /DROP\s+INDEX/i, code: 'DROP_INDEX', message: '🟠 PERFORMANCE: DROP INDEX 可能影響查詢效能', suggestion: '確認該索引已無查詢使用' },
-          { pattern: /DROP\s+(?:PRIMARY\s+)?KEY/i, code: 'DROP_KEY', message: '🟠 BREAKING: DROP KEY 可能影響資料完整性', suggestion: '確認外鍵關聯已處理' },
-          { pattern: /DROP\s+FOREIGN\s+KEY/i, code: 'DROP_FOREIGN_KEY', message: '🟠 BREAKING: DROP FOREIGN KEY 會移除資料完整性約束', suggestion: '確認應用程式層有對應驗證' }
+          { pattern: /ALTER\s+TABLE\s+\w+\s+DROP\s+COLUMN/i, code: 'DROP_COLUMN', message: '🟠 DATA LOSS: DROP COLUMN will permanently delete column data / 會永久刪除欄位資料', suggestion: 'Confirm column is no longer used / 先確認該欄位已無使用' },
+          { pattern: /RENAME\s+TABLE/i, code: 'RENAME_TABLE', message: '🟠 BREAKING: RENAME TABLE may break applications / 可能破壞應用程式', suggestion: 'Confirm all apps have updated table references / 確認所有應用程式都已更新表名引用' },
+          { pattern: /ALTER\s+TABLE\s+\w+\s+RENAME\s+TO/i, code: 'ALTER_RENAME', message: '🟠 BREAKING: RENAME TABLE may break applications / 可能破壞應用程式', suggestion: 'Confirm all apps have updated table references / 確認所有應用程式都已更新表名引用' },
+          { pattern: /MODIFY\s+COLUMN\s+\w+\s+\w+/i, code: 'MODIFY_COLUMN', message: '🟠 DATA RISK: MODIFY COLUMN may cause data conversion failure / 可能造成資料轉換失敗', suggestion: 'Test in staging environment first / 先在測試環境驗證' },
+          { pattern: /CHANGE\s+COLUMN/i, code: 'CHANGE_COLUMN', message: '🟠 DATA RISK: CHANGE COLUMN may cause data conversion failure / 可能造成資料轉換失敗', suggestion: 'Test in staging environment first / 先在測試環境驗證' },
+          { pattern: /DROP\s+INDEX/i, code: 'DROP_INDEX', message: '🟠 PERFORMANCE: DROP INDEX may affect query performance / 可能影響查詢效能', suggestion: 'Confirm index is no longer used / 確認該索引已無查詢使用' },
+          { pattern: /DROP\s+(?:PRIMARY\s+)?KEY/i, code: 'DROP_KEY', message: '🟠 BREAKING: DROP KEY may affect data integrity / 可能影響資料完整性', suggestion: 'Confirm foreign key relations are handled / 確認外鍵關聯已處理' },
+          { pattern: /DROP\s+FOREIGN\s+KEY/i, code: 'DROP_FOREIGN_KEY', message: '🟠 BREAKING: DROP FOREIGN KEY removes data integrity constraint / 會移除資料完整性約束', suggestion: 'Confirm app layer has validation / 確認應用程式層有對應驗證' }
         ]
       },
 
@@ -109,15 +109,15 @@ export class MariaDBAdapter extends BaseAdapter {
       // ========================================
       warnings: {
         operations: [
-          { pattern: /ALTER\s+TABLE\s+\w+\s+ADD\s+COLUMN/i, message: '⚠️ ALTER TABLE ADD COLUMN 在大表上可能需要較長時間' },
-          { pattern: /ADD\s+(?:CONSTRAINT\s+)?\w*\s*NOT\s+NULL(?!\s+DEFAULT)/i, message: '⚠️ 新增 NOT NULL 欄位建議搭配 DEFAULT 值' },
-          { pattern: /AUTO_INCREMENT\s*=/i, message: '⚠️ 手動設定 AUTO_INCREMENT 可能造成 ID 衝突' },
-          { pattern: /ENGINE\s*=\s*MyISAM/i, message: '⚠️ MyISAM 引擎不支援交易，建議使用 InnoDB' },
-          { pattern: /CHARSET\s*=\s*(?:latin1|utf8[^m])/i, message: '⚠️ 建議使用 utf8mb4 字元集' },
-          { pattern: /\b(?:FLOAT|DOUBLE)\b/i, message: '⚠️ FLOAT/DOUBLE 有精度問題，金額建議用 DECIMAL' },
-          { pattern: /DATETIME(?!\s*\(\d+\))/i, message: '⚠️ DATETIME 沒有指定精度，微秒會被截斷' },
-          { pattern: /ON\s+DELETE\s+CASCADE/i, message: '⚠️ ON DELETE CASCADE 可能造成連鎖刪除' },
-          { pattern: /ON\s+UPDATE\s+CASCADE/i, message: '⚠️ ON UPDATE CASCADE 可能造成連鎖更新' }
+          { pattern: /ALTER\s+TABLE\s+\w+\s+ADD\s+COLUMN/i, message: '⚠️ ALTER TABLE ADD COLUMN may take long on large tables / 在大表上可能需要較長時間' },
+          { pattern: /ADD\s+(?:CONSTRAINT\s+)?\w*\s*NOT\s+NULL(?!\s+DEFAULT)/i, message: '⚠️ Adding NOT NULL column should have DEFAULT value / 新增 NOT NULL 欄位建議搭配 DEFAULT 值' },
+          { pattern: /AUTO_INCREMENT\s*=/i, message: '⚠️ Manual AUTO_INCREMENT may cause ID conflicts / 手動設定 AUTO_INCREMENT 可能造成 ID 衝突' },
+          { pattern: /ENGINE\s*=\s*MyISAM/i, message: '⚠️ MyISAM does not support transactions, use InnoDB / MyISAM 引擎不支援交易，建議使用 InnoDB' },
+          { pattern: /CHARSET\s*=\s*(?:latin1|utf8[^m])/i, message: '⚠️ Recommend using utf8mb4 charset / 建議使用 utf8mb4 字元集' },
+          { pattern: /\b(?:FLOAT|DOUBLE)\b/i, message: '⚠️ FLOAT/DOUBLE has precision issues, use DECIMAL for money / 有精度問題，金額建議用 DECIMAL' },
+          { pattern: /DATETIME(?!\s*\(\d+\))/i, message: '⚠️ DATETIME without precision truncates microseconds / 沒有指定精度，微秒會被截斷' },
+          { pattern: /ON\s+DELETE\s+CASCADE/i, message: '⚠️ ON DELETE CASCADE may cause cascading deletes / 可能造成連鎖刪除' },
+          { pattern: /ON\s+UPDATE\s+CASCADE/i, message: '⚠️ ON UPDATE CASCADE may cause cascading updates / 可能造成連鎖更新' }
         ]
       },
 
@@ -133,12 +133,14 @@ export class MariaDBAdapter extends BaseAdapter {
 
   async connect() {
     try {
+      // Support both flat config and nested config.mariadb
+      const dbConfig = this.config.mariadb || this.config;
       this.connection = await mysql.createConnection({
-        host: this.config.host || 'localhost',
-        port: this.config.port || 3306,
-        user: this.config.user || 'root',
-        password: this.config.password || '',
-        database: this.config.database,
+        host: dbConfig.host || 'localhost',
+        port: dbConfig.port || 3306,
+        user: dbConfig.user || 'root',
+        password: dbConfig.password || '',
+        database: dbConfig.database,
         multipleStatements: true
       });
 
@@ -206,7 +208,7 @@ export class MariaDBAdapter extends BaseAdapter {
     }
   }
 
-  async up() {
+  async up(options = {}) {
     const result = {
       applied: [],
       errors: []
@@ -214,8 +216,33 @@ export class MariaDBAdapter extends BaseAdapter {
 
     try {
       const status = await this.status();
+      let pendingMigrations = status.pending;
       
-      for (const file of status.pending) {
+      // Filter by target (up to and including)
+      if (options.target) {
+        const targetIndex = pendingMigrations.findIndex(f => 
+          f === options.target || f.includes(options.target)
+        );
+        if (targetIndex === -1) {
+          result.errors.push(`Target migration not found: ${options.target}`);
+          return result;
+        }
+        pendingMigrations = pendingMigrations.slice(0, targetIndex + 1);
+      }
+      
+      // Filter by only (specific migration)
+      if (options.only) {
+        const onlyFile = pendingMigrations.find(f => 
+          f === options.only || f.includes(options.only)
+        );
+        if (!onlyFile) {
+          result.errors.push(`Migration not found in pending: ${options.only}`);
+          return result;
+        }
+        pendingMigrations = [onlyFile];
+      }
+      
+      for (const file of pendingMigrations) {
         try {
           const filePath = path.join(this.config.migrationsDir, file);
           const content = await fs.readFile(filePath, 'utf-8');
@@ -224,7 +251,8 @@ export class MariaDBAdapter extends BaseAdapter {
           const upSQL = this.extractSection(content, 'Up');
           
           if (upSQL) {
-            await this.connection.execute(upSQL);
+            // Use query() for multi-statement support
+            await this.connection.query(upSQL);
             
             // Record in changelog
             const id = file.replace('.sql', '');
@@ -328,10 +356,10 @@ export class MariaDBAdapter extends BaseAdapter {
                 }
               },
               preCheck: preCheckSQL ? async () => {
-                return await this.executeSanityCheck(preCheckSQL);
+                return await this.executeSanityCheck(this.connection, preCheckSQL);
               } : null,
               postCheck: postCheckSQL ? async () => {
-                return await this.executeSanityCheck(postCheckSQL);
+                return await this.executeSanityCheck(this.connection, postCheckSQL);
               } : null,
               context
             });
@@ -375,21 +403,113 @@ export class MariaDBAdapter extends BaseAdapter {
 
   /**
    * Extract sanity check section from SQL content
+   * Supports two formats:
+   * 1. New format: -- +sanity PreCheck ... -- -sanity PreCheck
+   * 2. Test format: -- +sanity PreCheck ... -- END_CHECK
    */
   extractSanitySection(content, sectionName) {
-    const regex = new RegExp(
+    // Try new format first: -- +sanity ... -- -sanity
+    const newFormatRegex = new RegExp(
       `--\\s*\\+sanity\\s+${sectionName}\\s*\\n([\\s\\S]*?)--\\s*-sanity\\s+${sectionName}`,
       'i'
     );
-    const match = content.match(regex);
-    return match ? match[1].trim() : null;
+    let match = content.match(newFormatRegex);
+    if (match) {
+      return match[1].trim();
+    }
+    
+    // Try test format: -- +sanity ... -- END_CHECK
+    const testFormatRegex = new RegExp(
+      `--\\s*\\+sanity\\s+${sectionName}\\s*\\n([\\s\\S]*?)--\\s*END_CHECK`,
+      'i'
+    );
+    match = content.match(testFormatRegex);
+    if (match) {
+      return match[1].trim();
+    }
+    
+    return null;
   }
 
   /**
-   * Execute sanity check SQL and interpret results
+   * Execute sanity check section and interpret results
+   * Supports EXPECT_ROWS / EXPECT_NO_ROWS directives
    * Returns { success: true/false, error: string, details: [] }
    */
-  async executeSanityCheck(sql) {
+  async executeSanityCheck(connection, sanitySection) {
+    // Use provided connection or instance connection
+    const conn = connection || this.connection;
+    const details = [];
+    
+    // Parse lines for EXPECT_ROWS / EXPECT_NO_ROWS directives
+    const lines = sanitySection.split('\n');
+    
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      
+      // Skip empty lines and pure comments
+      if (!trimmedLine || trimmedLine === '--') continue;
+      
+      // Parse EXPECT_ROWS directive
+      const expectRowsMatch = trimmedLine.match(/^--\s*EXPECT_ROWS:\s*(.+)$/i);
+      if (expectRowsMatch) {
+        const sql = expectRowsMatch[1].trim();
+        try {
+          const [rows] = await conn.execute(sql);
+          if (rows.length === 0) {
+            return {
+              success: false,
+              error: `EXPECT_ROWS failed: Query returned no rows - ${sql}`,
+              details
+            };
+          }
+          details.push(`✓ EXPECT_ROWS passed: ${rows.length} row(s)`);
+        } catch (error) {
+          return {
+            success: false,
+            error: `EXPECT_ROWS SQL error: ${error.message}`,
+            details
+          };
+        }
+        continue;
+      }
+      
+      // Parse EXPECT_NO_ROWS directive
+      const expectNoRowsMatch = trimmedLine.match(/^--\s*EXPECT_NO_ROWS:\s*(.+)$/i);
+      if (expectNoRowsMatch) {
+        const sql = expectNoRowsMatch[1].trim();
+        try {
+          const [rows] = await conn.execute(sql);
+          if (rows.length > 0) {
+            return {
+              success: false,
+              error: `EXPECT_NO_ROWS failed: Query returned ${rows.length} row(s) - ${sql}`,
+              details
+            };
+          }
+          details.push(`✓ EXPECT_NO_ROWS passed: 0 rows`);
+        } catch (error) {
+          return {
+            success: false,
+            error: `EXPECT_NO_ROWS SQL error: ${error.message}`,
+            details
+          };
+        }
+        continue;
+      }
+    }
+    
+    return {
+      success: true,
+      details
+    };
+  }
+
+  /**
+   * Execute sanity check SQL and interpret results (legacy single SQL version)
+   * Returns { success: true/false, error: string, details: [] }
+   */
+  async executeSanityCheckSQL(sql) {
     try {
       const [rows] = await this.connection.execute(sql);
       
@@ -473,7 +593,8 @@ export class MariaDBAdapter extends BaseAdapter {
           const downSQL = this.extractSection(content, 'Down');
           
           if (downSQL) {
-            await this.connection.execute(downSQL);
+            // Use query() for multi-statement support
+            await this.connection.query(downSQL);
             
             // Remove from changelog
             const id = migration.fileName.replace('.sql', '');

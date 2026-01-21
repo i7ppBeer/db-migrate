@@ -135,6 +135,9 @@ program
   .option('--dry-run', 'Show what would be run without executing')
   .option('--sanity-check', 'Enable sanity check (pre-check, post-check, auto-rollback)')
   .option('--no-auto-rollback', 'Disable auto-rollback on sanity check failure')
+  .option('--target <migration>', 'Run migrations up to and including this migration')
+  .option('--only <migration>', 'Run only this specific migration')
+  .option('--instance <name>', 'Run only on specified instance (for multi-instance configs)')
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     let adapter;
@@ -165,14 +168,28 @@ program
       
       console.log(chalk.blue(`\n[UP] Running migrations (${adapter.dbType})...`));
       
+      // Prepare migration options
+      const migrationOptions = {
+        target: options.target,
+        only: options.only,
+        verbose: true
+      };
+      
+      if (options.target) {
+        console.log(chalk.cyan(`   Target: ${options.target}`));
+      }
+      if (options.only) {
+        console.log(chalk.cyan(`   Only: ${options.only}`));
+      }
+      
       // Use sanity check method if enabled
       let result;
       if (options.sanityCheck && typeof adapter.upWithSanityCheck === 'function') {
         console.log(chalk.cyan('   Sanity Check: ENABLED'));
         console.log(chalk.cyan(`   Auto-Rollback: ${options.autoRollback !== false ? 'ENABLED' : 'DISABLED'}`));
-        result = await adapter.upWithSanityCheck({ verbose: true });
+        result = await adapter.upWithSanityCheck(migrationOptions);
       } else {
-        result = await adapter.up();
+        result = await adapter.up(migrationOptions);
       }
       
       if (result.applied.length > 0) {
@@ -218,6 +235,8 @@ program
   .command('down')
   .description('Rollback migrations')
   .option('-n, --count <number>', 'Number of migrations to rollback', '1')
+  .option('--target <migration>', 'Rollback down to and including this migration')
+  .option('--instance <name>', 'Run only on specified instance (for multi-instance configs)')
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     let adapter;

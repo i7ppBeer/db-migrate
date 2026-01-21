@@ -322,19 +322,19 @@ describe('SQLChecks', () => {
   describe('tableExists', () => {
     it('should return true when table exists', async () => {
       const mockConnection = {
-        execute: vi.fn().mockResolvedValue([[{ count: 1 }]])
+        query: vi.fn().mockResolvedValue([[{ TABLE_NAME: 'users' }]])
       };
 
-      const result = await SQLChecks.tableExists(mockConnection, 'users');
+      const result = await SQLChecks.tableExists(mockConnection, 'users', 'testdb');
       expect(result).toBe(true);
     });
 
     it('should return false when table does not exist', async () => {
       const mockConnection = {
-        execute: vi.fn().mockResolvedValue([[{ count: 0 }]])
+        query: vi.fn().mockResolvedValue([[]])
       };
 
-      const result = await SQLChecks.tableExists(mockConnection, 'nonexistent');
+      const result = await SQLChecks.tableExists(mockConnection, 'nonexistent', 'testdb');
       expect(result).toBe(false);
     });
   });
@@ -342,19 +342,19 @@ describe('SQLChecks', () => {
   describe('columnExists', () => {
     it('should return true when column exists', async () => {
       const mockConnection = {
-        execute: vi.fn().mockResolvedValue([[{ count: 1 }]])
+        query: vi.fn().mockResolvedValue([[{ COLUMN_NAME: 'email' }]])
       };
 
-      const result = await SQLChecks.columnExists(mockConnection, 'users', 'email');
+      const result = await SQLChecks.columnExists(mockConnection, 'users', 'email', 'testdb');
       expect(result).toBe(true);
     });
 
     it('should return false when column does not exist', async () => {
       const mockConnection = {
-        execute: vi.fn().mockResolvedValue([[{ count: 0 }]])
+        query: vi.fn().mockResolvedValue([[]])
       };
 
-      const result = await SQLChecks.columnExists(mockConnection, 'users', 'nonexistent');
+      const result = await SQLChecks.columnExists(mockConnection, 'users', 'nonexistent', 'testdb');
       expect(result).toBe(false);
     });
   });
@@ -362,31 +362,20 @@ describe('SQLChecks', () => {
   describe('indexExists', () => {
     it('should return true when index exists', async () => {
       const mockConnection = {
-        execute: vi.fn().mockResolvedValue([[{ count: 1 }]])
+        query: vi.fn().mockResolvedValue([[{ INDEX_NAME: 'idx_email' }]])
       };
 
-      const result = await SQLChecks.indexExists(mockConnection, 'users', 'idx_email');
+      const result = await SQLChecks.indexExists(mockConnection, 'users', 'idx_email', 'testdb');
       expect(result).toBe(true);
     });
-  });
 
-  describe('rowCount', () => {
-    it('should return correct row count', async () => {
+    it('should return false when index does not exist', async () => {
       const mockConnection = {
-        execute: vi.fn().mockResolvedValue([[{ count: 42 }]])
+        query: vi.fn().mockResolvedValue([[]])
       };
 
-      const result = await SQLChecks.rowCount(mockConnection, 'users', 'status = ?', ['active']);
-      expect(result).toBe(42);
-    });
-
-    it('should count all rows when no where clause', async () => {
-      const mockConnection = {
-        execute: vi.fn().mockResolvedValue([[{ count: 100 }]])
-      };
-
-      const result = await SQLChecks.rowCount(mockConnection, 'users');
-      expect(result).toBe(100);
+      const result = await SQLChecks.indexExists(mockConnection, 'users', 'idx_nonexistent', 'testdb');
+      expect(result).toBe(false);
     });
   });
 });
