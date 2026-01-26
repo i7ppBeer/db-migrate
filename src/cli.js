@@ -274,6 +274,108 @@ program
     }
   });
 
+// ─────────────────────────────────────────────────────────────────
+// Baseline Command - For existing databases
+// ─────────────────────────────────────────────────────────────────
+program
+  .command('baseline')
+  .description('Mark existing migrations as applied (for existing databases)')
+  .option('--all', 'Mark all migration files as applied')
+  .option('--up-to <migration>', 'Mark migrations up to and including this one as applied')
+  .option('--file <filename>', 'Mark a single specific migration file as applied')
+  .option('--dry-run', 'Show what would be marked without actually doing it')
+  .action(async (cmdOptions, cmd) => {
+    const options = { ...cmd.parent.opts(), ...cmdOptions };
+    let adapter;
+    
+    try {
+      adapter = await getAdapter(options);
+      await adapter.connect();
+      
+      console.log(chalk.blue(`\n[BASELINE] Marking existing migrations as applied (${adapter.dbType})...`));
+      
+      // Get all migration files
+      const files = await adapter.getMigrationFiles();
+      const versionedFiles = files.filter(f => !f.startsWith('R__')); // Exclude repeatable
+      
+      // Get already applied migrations
+      const status = await adapter.status();
+      const appliedSet = new Set(status.applied.map(m => m.id || m.name || m));
+      
+      // Determine which files to mark
+      let filesToMark = [];
+      
+      if (options.all) {
+        filesToMark = versionedFiles;
+      } else if (options.upTo) {
+        const targetFile = versionedFiles.find(f => f.includes(options.upTo));
+        if (!targetFile) {
+          console.error(chalk.red(`[ERROR] Migration '${options.upTo}' not found`));
+          process.exit(1);
+        }
+        const targetIdx = versionedFiles.indexOf(targetFile);
+        filesToMark = versionedFiles.slice(0, targetIdx + 1);
+      } else if (options.file) {
+        const targetFile = versionedFiles.find(f => f.includes(options.file));
+        if (!targetFile) {
+          console.error(chalk.red(`[ERROR] Migration '${options.file}' not found`));
+          process.exit(1);
+        }
+        filesToMark = [targetFile];
+      } else {
+        console.log(chalk.yellow('\n⚠️  Please specify one of: --all, --up-to <migration>, or --file <filename>'));
+        console.log(chalk.gray('\nAvailable migrations:'));
+        versionedFiles.forEach((f, i) => {
+          const applied = appliedSet.has(f.replace('.sql', '').replace('.js', ''));
+          const status = applied ? chalk.green('✓') : chalk.gray('○');
+          console.log(`   ${status} ${i + 1}. ${f}`);
+        });
+        return;
+      }
+      
+      // Filter out already applied
+      const toApply = filesToMark.filter(f => {
+        const id = f.replace('.sql', '').replace('.js', '');
+        return !appliedSet.has(id);
+      });
+      
+      if (toApply.length === 0) {
+        console.log(chalk.gray('\n   No new migrations to mark as applied.'));
+        console.log(chalk.green('   All specified migrations are already recorded.'));
+        return;
+      }
+      
+      console.log(chalk.yellow(`\n📋 Will mark ${toApply.length} migration(s) as applied:`));
+      toApply.forEach(f => console.log(`   ${f}`));
+      
+      if (options.dryRun) {
+        console.log(chalk.cyan('\n   [DRY RUN] No changes made.'));
+        return;
+      }
+      
+      // Mark as applied without executing
+      const result = await adapter.baseline(toApply);
+      
+      if (result.marked && result.marked.length > 0) {
+        console.log(chalk.green(`\n✅ Marked ${result.marked.length} migration(s) as applied:`));
+        result.marked.forEach(f => console.log(`   ${f}`));
+      }
+      
+      if (result.errors && result.errors.length > 0) {
+        console.error(chalk.red('\n❌ Errors:'));
+        result.errors.forEach(e => console.error(`   ${e}`));
+        process.exit(1);
+      }
+      
+      console.log(chalk.gray('\n💡 Tip: Run "status" to verify the baseline.'));
+    } catch (error) {
+      console.error(chalk.red(`[ERROR] ${error.message}`));
+      process.exit(1);
+    } finally {
+      if (adapter) await adapter.disconnect();
+    }
+  });
+
 program
   .command('create <name>')
   .description('Create a new DDL (versioned) migration file')

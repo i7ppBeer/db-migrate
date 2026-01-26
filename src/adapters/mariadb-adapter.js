@@ -208,6 +208,53 @@ export class MariaDBAdapter extends BaseAdapter {
     }
   }
 
+  /**
+   * Get list of migration files
+   */
+  async getMigrationFiles() {
+    const migrationsDir = this.config.migrationsDir;
+    const files = await fs.readdir(migrationsDir);
+    return files.filter(f => f.endsWith('.sql')).sort();
+  }
+
+  /**
+   * Mark migrations as applied without executing them
+   * Used for existing databases (baseline)
+   * 
+   * @param {string[]} files - Array of migration filenames to mark as applied
+   * @returns {Promise<{marked: string[], errors: string[]}>}
+   */
+  async baseline(files) {
+    const result = {
+      marked: [],
+      errors: []
+    };
+
+    try {
+      await this.ensureChangelogTable();
+      
+      for (const file of files) {
+        try {
+          const id = file.replace('.sql', '');
+          await this.connection.execute(
+            `INSERT INTO ${this.changelogTable} (id) VALUES (?)`,
+            [id]
+          );
+          result.marked.push(file);
+        } catch (error) {
+          // Ignore duplicate key errors (already applied)
+          if (error.code !== 'ER_DUP_ENTRY') {
+            result.errors.push(`${file}: ${error.message}`);
+          }
+        }
+      }
+    } catch (error) {
+      result.errors.push(error.message);
+    }
+
+    return result;
+  }
+
   async up(options = {}) {
     const result = {
       applied: [],

@@ -166,6 +166,53 @@ export class MongoDBAdapter extends BaseAdapter {
     }
   }
 
+  /**
+   * Get list of migration files
+   */
+  async getMigrationFiles() {
+    const migrationsDir = this.config.migrationsDir;
+    const files = await fs.readdir(migrationsDir);
+    return files.filter(f => f.endsWith('.js')).sort();
+  }
+
+  /**
+   * Mark migrations as applied without executing them
+   * Used for existing databases (baseline)
+   * 
+   * @param {string[]} files - Array of migration filenames to mark as applied
+   * @returns {Promise<{marked: string[], errors: string[]}>}
+   */
+  async baseline(files) {
+    const result = {
+      marked: [],
+      errors: []
+    };
+
+    try {
+      for (const fileName of files) {
+        try {
+          // Check if already exists
+          const existing = await this.db.collection(this.changelogCollection).findOne({ fileName });
+          if (existing) {
+            continue; // Already marked
+          }
+          
+          await this.db.collection(this.changelogCollection).insertOne({
+            fileName,
+            appliedAt: new Date()
+          });
+          result.marked.push(fileName);
+        } catch (error) {
+          result.errors.push(`${fileName}: ${error.message}`);
+        }
+      }
+    } catch (error) {
+      result.errors.push(error.message);
+    }
+
+    return result;
+  }
+
   async up(options = {}) {
     const result = {
       applied: [],
