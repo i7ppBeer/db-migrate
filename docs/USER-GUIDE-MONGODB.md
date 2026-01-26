@@ -213,9 +213,455 @@ docker compose run --rm migrate validate --allow DROP_COLLECTION,DELETE_ALL -c <
 
 ---
 
-## 5. Docker 環境設定與 CLI 使用
+## 5. Sanity Check 機制
 
-### 5.1 取得 Docker Image
+Sanity Check 提供 **Pre-Check（前置檢查）** 和 **Post-Check（後置檢查）** 機制，確保 migration 執行前後的狀態正確，並支援**自動回滾**。
+
+### 5.1 Sanity Check 程式碼結構
+
+```javascript
+export async function up(db, client) {
+  // ═══════════════════════════════════════════════════════
+  // Pre-Check: 前置檢查
+  // ═══════════════════════════════════════════════════════
+  
+  // 檢查 Collection 是否存在
+  const collections = await db.listCollections({ name: 'users' }).toArray();
+  if (collections.length === 0) {
+    throw new Error('PreCheck failed: users collection does not exist');
+  }
+  
+  // 檢查欄位是否已存在（避免重複執行）
+  const existingDoc = await db.collection('users').findOne({ newField: { $exists: true } });
+  if (existingDoc) {
+    console.log('Field already exists, skipping migration');
+    return;
+  }
+  
+  // ═══════════════════════════════════════════════════════
+  // Execute Migration: 執行主要遷移
+  // ═══════════════════════════════════════════════════════
+  
+  await db.collection('users').updateMany(
+    { newField: { $exists: false } },
+    { $set: { newField: 'defaultValue' } }
+  );
+  
+  // ═══════════════════════════════════════════════════════
+  // Post-Check: 後置檢查
+  // ═══════════════════════════════════════════════════════
+  
+  // 確認所有文件都有新欄位
+  const missingCount = await db.collection('users').countDocuments({ 
+    newField: { $exists: false } 
+  });
+  
+  if (missingCount > 0) {
+    throw new Error(`PostCheck failed: ${missingCount} documents still missing newField`);
+  }
+}
+
+export async function down(db, client) {
+  await db.collection('users').updateMany(
+    {},
+    { $unset: { newField: '' } }
+  );
+}
+```
+
+### 5.2 執行流程
+
+```
+┌─────────────────┐
+│   Pre-Check     │ ── 失敗 ──→ 拋出 Error，停止執行
+└────────┬────────┘
+         │ 成功
+         ▼
+┌─────────────────┐
+│ Execute Migration│
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│   Post-Check    │ ── 失敗 ──→ 拋出 Error（可在外層捕獲並回滾）
+└────────┬────────┘
+         │ 成功
+         ▼
+      完成 ✅
+```
+
+### 5.3 Sanity Check 情境範例
+
+#### 範例 1：新增欄位前確認 Collection 存在
+
+```javascript
+export async function up(db, client) {
+  // ═══════════════════════════════════════════════════════
+  // Pre-Check
+  // ═══════════════════════════════════════════════════════
+  const collections = await db.listCollections({ name: 'products' }).toArray();
+  if (collections.length === 0) {
+    throw new Error('PreCheck failed: products collection does not exist');
+  }
+  
+  // 確認 tags 欄位不存在
+  const existingWithTags = await db.collection('products').findOne({ 
+    tags: { $exists: true } 
+  });
+  if (existingWithTags) {
+    console.log('tags field already exists, skipping');
+    return;
+  }
+  
+  // ═══════════════════════════════════════════════════════
+  // Execute Migration
+  // ═══════════════════════════════════════════════════════
+  const result = await db.collection('products').updateMany(
+    { tags: { $exists: false } },
+    { $set: { tags: [], updatedAt: new Date() } }
+  );
+  console.log(`Updated ${result.modifiedCount} products`);
+  
+  // 建立索引
+  await db.collection('products').createIndex(
+    { tags: 1 },
+    { name: 'idx_products_tags' }
+  );
+  
+  // ═══════════════════════════════════════════════════════
+  // Post-Check
+  // ═══════════════════════════════════════════════════════
+  const missingTags = await db.collection('products').countDocuments({ 
+    tags: { $exists: false } 
+  });
+  if (missingTags > 0) {
+    throw new Error(`PostCheck failed: ${missingTags} products still missing tags`);
+  }
+  
+  // 確認索引存在
+  const indexes = await db.collection('products').indexes();
+  const hasIndex = indexes.some(idx => idx.name === 'idx_products_tags');
+  if (!hasIndex) {
+    throw new Error('PostCheck failed: idx_products_tags index not created');
+  }
+}
+
+export async function down(db, client) {
+  await db.collection('products').dropIndex('idx_products_tags').catch(() => {});
+  await db.collection('products').updateMany({}, { $unset: { tags: '' } });
+}
+```
+
+#### 範例 2：建立索引前確認無重複值
+
+```javascript
+export async function up(db, client) {
+  const collection = db.collection('users');
+  
+  // ═══════════════════════════════════════════════════════
+  // Pre-Check: 確認沒有重複的 email
+  // ═══════════════════════════════════════════════════════
+  const duplicates = await collection.aggregate([
+    { $group: { _id: '$email', count: { $sum: 1 } } },
+    { $match: { count: { $gt: 1 } } },
+    { $limit: 10 }
+  ]).toArray();
+  
+  if (duplicates.length > 0) {
+    const dupEmails = duplicates.map(d => d._id).join(', ');
+    throw new Error(`PreCheck failed: Duplicate emails found: ${dupEmails}`);
+  }
+  
+  // 確認沒有 null email
+  const nullEmails = await collection.countDocuments({ 
+    $or: [{ email: null }, { email: '' }] 
+  });
+  if (nullEmails > 0) {
+    throw new Error(`PreCheck failed: ${nullEmails} users have null/empty email`);
+  }
+  
+  // ═══════════════════════════════════════════════════════
+  // Execute Migration: 建立唯一索引
+  // ═══════════════════════════════════════════════════════
+  await collection.createIndex(
+    { email: 1 },
+    { unique: true, name: 'idx_users_email_unique' }
+  );
+  
+  // ═══════════════════════════════════════════════════════
+  // Post-Check: 確認索引已建立
+  // ═══════════════════════════════════════════════════════
+  const indexes = await collection.indexes();
+  const uniqueIndex = indexes.find(idx => idx.name === 'idx_users_email_unique');
+  
+  if (!uniqueIndex) {
+    throw new Error('PostCheck failed: Unique index not created');
+  }
+  
+  if (!uniqueIndex.unique) {
+    throw new Error('PostCheck failed: Index is not unique');
+  }
+  
+  console.log('Successfully created unique email index');
+}
+
+export async function down(db, client) {
+  await db.collection('users').dropIndex('idx_users_email_unique');
+}
+```
+
+#### 範例 3：資料遷移確認完整性
+
+```javascript
+export async function up(db, client) {
+  // ═══════════════════════════════════════════════════════
+  // Pre-Check: 確認來源和目標都準備好
+  // ═══════════════════════════════════════════════════════
+  
+  // 確認來源 Collection 有資料
+  const sourceCount = await db.collection('old_orders').countDocuments();
+  if (sourceCount === 0) {
+    console.log('No data to migrate, skipping');
+    return;
+  }
+  
+  // 確認目標 Collection 存在
+  const collections = await db.listCollections({ name: 'new_orders' }).toArray();
+  if (collections.length === 0) {
+    throw new Error('PreCheck failed: new_orders collection does not exist');
+  }
+  
+  // 記錄遷移前的數量
+  const beforeTargetCount = await db.collection('new_orders').countDocuments();
+  
+  // ═══════════════════════════════════════════════════════
+  // Execute Migration: 使用 aggregation pipeline 遷移資料
+  // ═══════════════════════════════════════════════════════
+  const pipeline = [
+    { $match: { migrated: { $ne: true } } },
+    {
+      $project: {
+        orderId: '$_id',
+        customerId: '$customer_id',
+        items: '$order_items',
+        totalAmount: '$total',
+        status: '$order_status',
+        createdAt: '$created_at',
+        migratedAt: new Date()
+      }
+    },
+    {
+      $merge: {
+        into: 'new_orders',
+        on: 'orderId',
+        whenMatched: 'keepExisting',
+        whenNotMatched: 'insert'
+      }
+    }
+  ];
+  
+  await db.collection('old_orders').aggregate(pipeline).toArray();
+  
+  // 標記已遷移
+  await db.collection('old_orders').updateMany(
+    { migrated: { $ne: true } },
+    { $set: { migrated: true, migratedAt: new Date() } }
+  );
+  
+  // ═══════════════════════════════════════════════════════
+  // Post-Check: 確認遷移完整性
+  // ═══════════════════════════════════════════════════════
+  
+  // 確認所有來源資料都已標記遷移
+  const unmigrated = await db.collection('old_orders').countDocuments({ 
+    migrated: { $ne: true } 
+  });
+  if (unmigrated > 0) {
+    throw new Error(`PostCheck failed: ${unmigrated} orders not migrated`);
+  }
+  
+  // 確認目標資料增加了
+  const afterTargetCount = await db.collection('new_orders').countDocuments();
+  console.log(`Migrated ${afterTargetCount - beforeTargetCount} orders`);
+  
+  if (afterTargetCount < beforeTargetCount) {
+    throw new Error('PostCheck failed: Target collection count decreased!');
+  }
+}
+
+export async function down(db, client) {
+  // 刪除遷移的資料
+  await db.collection('new_orders').deleteMany({ migratedAt: { $exists: true } });
+  
+  // 重設遷移標記
+  await db.collection('old_orders').updateMany(
+    { migrated: true },
+    { $unset: { migrated: '', migratedAt: '' } }
+  );
+}
+```
+
+#### 範例 4：Schema Validation 變更前確認資料相容
+
+```javascript
+export async function up(db, client) {
+  const collectionName = 'products';
+  const collection = db.collection(collectionName);
+  
+  // ═══════════════════════════════════════════════════════
+  // Pre-Check: 確認現有資料符合新的 Schema
+  // ═══════════════════════════════════════════════════════
+  
+  // 檢查是否有缺少必填欄位的文件
+  const missingName = await collection.countDocuments({ 
+    $or: [{ name: { $exists: false } }, { name: null }, { name: '' }] 
+  });
+  if (missingName > 0) {
+    throw new Error(`PreCheck failed: ${missingName} products missing required 'name' field`);
+  }
+  
+  // 檢查價格是否都是正數
+  const invalidPrice = await collection.countDocuments({ 
+    $or: [
+      { price: { $exists: false } },
+      { price: { $lt: 0 } },
+      { price: { $type: 'string' } }
+    ] 
+  });
+  if (invalidPrice > 0) {
+    throw new Error(`PreCheck failed: ${invalidPrice} products have invalid price`);
+  }
+  
+  // ═══════════════════════════════════════════════════════
+  // Execute Migration: 套用嚴格的 Schema Validation
+  // ═══════════════════════════════════════════════════════
+  await db.command({
+    collMod: collectionName,
+    validator: {
+      $jsonSchema: {
+        bsonType: 'object',
+        required: ['name', 'price'],
+        properties: {
+          name: {
+            bsonType: 'string',
+            minLength: 1,
+            description: 'Product name is required'
+          },
+          price: {
+            bsonType: 'decimal',
+            minimum: 0,
+            description: 'Price must be a positive decimal'
+          },
+          stock: {
+            bsonType: 'int',
+            minimum: 0
+          }
+        }
+      }
+    },
+    validationLevel: 'strict',
+    validationAction: 'error'
+  });
+  
+  // ═══════════════════════════════════════════════════════
+  // Post-Check: 確認 Schema Validation 已套用
+  // ═══════════════════════════════════════════════════════
+  const collectionInfo = await db.listCollections({ name: collectionName }).toArray();
+  const options = collectionInfo[0]?.options;
+  
+  if (!options?.validator) {
+    throw new Error('PostCheck failed: Schema validation not applied');
+  }
+  
+  if (options?.validationLevel !== 'strict') {
+    throw new Error('PostCheck failed: validationLevel is not strict');
+  }
+  
+  console.log('Schema validation applied successfully');
+}
+
+export async function down(db, client) {
+  // 移除 Schema Validation
+  await db.command({
+    collMod: 'products',
+    validator: {},
+    validationLevel: 'off'
+  });
+}
+```
+
+#### 範例 5：建立 TTL 索引前確認欄位存在
+
+```javascript
+export async function up(db, client) {
+  const collection = db.collection('sessions');
+  
+  // ═══════════════════════════════════════════════════════
+  // Pre-Check
+  // ═══════════════════════════════════════════════════════
+  
+  // 確認 Collection 存在
+  const collections = await db.listCollections({ name: 'sessions' }).toArray();
+  if (collections.length === 0) {
+    throw new Error('PreCheck failed: sessions collection does not exist');
+  }
+  
+  // 確認 expiresAt 欄位存在且是日期類型
+  const sampleDoc = await collection.findOne({ expiresAt: { $exists: true } });
+  if (!sampleDoc) {
+    throw new Error('PreCheck failed: No documents with expiresAt field found');
+  }
+  
+  if (!(sampleDoc.expiresAt instanceof Date)) {
+    throw new Error('PreCheck failed: expiresAt is not a Date type');
+  }
+  
+  // 確認沒有已存在的 TTL 索引
+  const indexes = await collection.indexes();
+  const existingTTL = indexes.find(idx => idx.expireAfterSeconds !== undefined);
+  if (existingTTL) {
+    console.log('TTL index already exists, skipping');
+    return;
+  }
+  
+  // ═══════════════════════════════════════════════════════
+  // Execute Migration
+  // ═══════════════════════════════════════════════════════
+  await collection.createIndex(
+    { expiresAt: 1 },
+    { 
+      name: 'idx_sessions_ttl',
+      expireAfterSeconds: 0  // 在 expiresAt 指定的時間過期
+    }
+  );
+  
+  // ═══════════════════════════════════════════════════════
+  // Post-Check
+  // ═══════════════════════════════════════════════════════
+  const newIndexes = await collection.indexes();
+  const ttlIndex = newIndexes.find(idx => idx.name === 'idx_sessions_ttl');
+  
+  if (!ttlIndex) {
+    throw new Error('PostCheck failed: TTL index not created');
+  }
+  
+  if (ttlIndex.expireAfterSeconds !== 0) {
+    throw new Error('PostCheck failed: TTL index has wrong expireAfterSeconds value');
+  }
+  
+  console.log('TTL index created successfully');
+}
+
+export async function down(db, client) {
+  await db.collection('sessions').dropIndex('idx_sessions_ttl');
+}
+```
+
+---
+
+## 6. Docker 環境設定與 CLI 使用
+
+### 6.1 取得 Docker Image
 
 ```bash
 # 方法一：從 Registry 拉取（如果已發布）
@@ -227,7 +673,7 @@ cd ddl-migrate
 docker compose build migrate
 ```
 
-### 5.2 本地環境準備
+### 6.2 本地環境準備
 
 **目錄結構：**
 ```
@@ -263,7 +709,7 @@ export default {
 };
 ```
 
-### 5.3 CLI 命令大全
+### 6.3 CLI 命令大全
 
 ```bash
 # ═══════════════════════════════════════════════════════════
@@ -313,7 +759,7 @@ docker compose run --rm migrate create-dcl "create-app-user" -n 001 -c /app/data
 
 ---
 
-## 6. 情境範例教學
+## 7. 情境範例教學
 
 ### 情境 1：建立新 Collection 並設定索引 (DDL)
 

@@ -171,9 +171,240 @@ docker compose run --rm migrate validate --allow TRUNCATE_TABLE,DROP_INDEX -c <c
 
 ---
 
-## 5. Docker 環境設定與 CLI 使用
+## 5. Sanity Check 機制
 
-### 5.1 取得 Docker Image
+Sanity Check 提供 **Pre-Check（前置檢查）** 和 **Post-Check（後置檢查）** 機制，確保 migration 執行前後的狀態正確，並支援**自動回滾**。
+
+### 5.1 Sanity Check 語法格式
+
+```sql
+-- +migrate Up
+
+-- +sanity PreCheck
+-- 前置檢查：確認執行條件
+-- EXPECT_ROWS: <SQL>      -- 預期有回傳結果
+-- EXPECT_NO_ROWS: <SQL>   -- 預期沒有回傳結果
+-- -sanity PreCheck
+
+-- 主要 Migration SQL
+ALTER TABLE users ADD COLUMN phone VARCHAR(20);
+
+-- +sanity PostCheck
+-- 後置檢查：確認執行結果
+-- EXPECT_ROWS: <SQL>      -- 預期有回傳結果
+-- EXPECT_NO_ROWS: <SQL>   -- 預期沒有回傳結果
+-- -sanity PostCheck
+
+-- +migrate Down
+ALTER TABLE users DROP COLUMN phone;
+```
+
+### 5.2 檢查指令說明
+
+| 指令 | 語法 | 說明 |
+|------|------|------|
+| `EXPECT_ROWS` | `-- EXPECT_ROWS: SELECT ...` | 預期查詢**有**回傳結果，否則失敗 |
+| `EXPECT_NO_ROWS` | `-- EXPECT_NO_ROWS: SELECT ...` | 預期查詢**沒有**回傳結果，否則失敗 |
+
+### 5.3 執行流程
+
+```
+┌─────────────────┐
+│   Pre-Check     │ ── 失敗 ──→ 停止，不執行 Migration
+└────────┬────────┘
+         │ 成功
+         ▼
+┌─────────────────┐
+│ Execute Migration│
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│   Post-Check    │ ── 失敗 ──→ 自動回滾 (如果啟用)
+└────────┬────────┘
+         │ 成功
+         ▼
+      完成 ✅
+```
+
+### 5.4 CLI 使用方式
+
+```bash
+# 啟用 Sanity Check 執行遷移
+docker compose run --rm migrate up --sanity-check -c /app/databases/mariadb/your-project/ddl/config.js
+
+# 停用自動回滾（Post-Check 失敗時不回滾）
+docker compose run --rm migrate up --sanity-check --no-auto-rollback -c /app/databases/mariadb/your-project/ddl/config.js
+```
+
+### 5.5 Sanity Check 情境範例
+
+#### 範例 1：新增欄位前確認不存在
+
+```sql
+-- +migrate Up
+
+-- +sanity PreCheck
+-- 確認 phone 欄位不存在
+-- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'phone'
+-- -sanity PreCheck
+
+ALTER TABLE users ADD COLUMN phone VARCHAR(20) AFTER email;
+
+-- +sanity PostCheck
+-- 確認 phone 欄位已建立
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'phone'
+-- -sanity PostCheck
+
+-- +migrate Down
+ALTER TABLE users DROP COLUMN phone;
+```
+
+#### 範例 2：建立索引前確認資料表存在
+
+```sql
+-- +migrate Up
+
+-- +sanity PreCheck
+-- 確認 products 資料表存在
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products'
+-- 確認索引不存在
+-- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND INDEX_NAME = 'idx_products_category'
+-- -sanity PreCheck
+
+CREATE INDEX idx_products_category ON products(category_id, created_at DESC);
+
+-- +sanity PostCheck
+-- 確認索引已建立
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND INDEX_NAME = 'idx_products_category'
+-- -sanity PostCheck
+
+-- +migrate Down
+DROP INDEX idx_products_category ON products;
+```
+
+#### 範例 3：修改欄位型態前確認資料相容
+
+```sql
+-- +migrate Up
+
+-- +sanity PreCheck
+-- 確認所有 price 都是正數（可以轉換為 DECIMAL）
+-- EXPECT_NO_ROWS: SELECT 1 FROM products WHERE price < 0 OR price IS NULL LIMIT 1
+-- 確認沒有超長的 price 值
+-- EXPECT_NO_ROWS: SELECT 1 FROM products WHERE price > 99999999.99 LIMIT 1
+-- -sanity PreCheck
+
+ALTER TABLE products MODIFY COLUMN price DECIMAL(10, 2) NOT NULL;
+
+-- +sanity PostCheck
+-- 確認欄位型態已變更
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'price' AND DATA_TYPE = 'decimal'
+-- -sanity PostCheck
+
+-- +migrate Down
+ALTER TABLE products MODIFY COLUMN price FLOAT;
+```
+
+#### 範例 4：刪除欄位前確認已無使用
+
+```sql
+-- +migrate Up
+
+-- +sanity PreCheck
+-- 確認 deprecated_field 欄位存在
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'deprecated_field'
+-- 確認該欄位全部為 NULL（表示已無使用）
+-- EXPECT_NO_ROWS: SELECT 1 FROM users WHERE deprecated_field IS NOT NULL LIMIT 1
+-- -sanity PreCheck
+
+ALTER TABLE users DROP COLUMN deprecated_field;
+
+-- +sanity PostCheck
+-- 確認欄位已刪除
+-- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'deprecated_field'
+-- -sanity PostCheck
+
+-- +migrate Down
+ALTER TABLE users ADD COLUMN deprecated_field VARCHAR(255);
+```
+
+#### 範例 5：建立新資料表並確認結構
+
+```sql
+-- +migrate Up
+
+-- +sanity PreCheck
+-- 確認資料表不存在
+-- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'audit_logs'
+-- -sanity PreCheck
+
+CREATE TABLE audit_logs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    table_name VARCHAR(100) NOT NULL,
+    action ENUM('INSERT', 'UPDATE', 'DELETE') NOT NULL,
+    record_id INT NOT NULL,
+    user_id INT,
+    old_values JSON,
+    new_values JSON,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    INDEX idx_table_action (table_name, action),
+    INDEX idx_created_at (created_at),
+    INDEX idx_user_id (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- +sanity PostCheck
+-- 確認資料表已建立
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'audit_logs'
+-- 確認所有索引都建立了
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'audit_logs' AND INDEX_NAME = 'idx_table_action'
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'audit_logs' AND INDEX_NAME = 'idx_created_at'
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'audit_logs' AND INDEX_NAME = 'idx_user_id'
+-- -sanity PostCheck
+
+-- +migrate Down
+DROP TABLE IF EXISTS audit_logs;
+```
+
+#### 範例 6：資料遷移確認完整性
+
+```sql
+-- +migrate Up
+
+-- +sanity PreCheck
+-- 確認來源資料存在
+-- EXPECT_ROWS: SELECT 1 FROM old_users LIMIT 1
+-- 確認目標表已建立
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'new_users'
+-- -sanity PreCheck
+
+-- 遷移資料
+INSERT INTO new_users (id, name, email, created_at)
+SELECT id, CONCAT(first_name, ' ', last_name), email, created_at
+FROM old_users
+WHERE migrated = 0;
+
+-- 標記已遷移
+UPDATE old_users SET migrated = 1 WHERE migrated = 0;
+
+-- +sanity PostCheck
+-- 確認所有資料都已遷移
+-- EXPECT_NO_ROWS: SELECT 1 FROM old_users WHERE migrated = 0 LIMIT 1
+-- 確認目標表有資料
+-- EXPECT_ROWS: SELECT 1 FROM new_users LIMIT 1
+-- -sanity PostCheck
+
+-- +migrate Down
+DELETE FROM new_users WHERE id IN (SELECT id FROM old_users WHERE migrated = 1);
+UPDATE old_users SET migrated = 0 WHERE migrated = 1;
+```
+
+---
+
+## 6. Docker 環境設定與 CLI 使用
+
+### 6.1 取得 Docker Image
 
 ```bash
 # 方法一：從 Registry 拉取（如果已發布）
@@ -185,7 +416,7 @@ cd ddl-migrate
 docker compose build migrate
 ```
 
-### 5.2 本地環境準備
+### 6.2 本地環境準備
 
 **目錄結構：**
 ```
@@ -223,7 +454,7 @@ export default {
 };
 ```
 
-### 5.3 CLI 命令大全
+### 6.3 CLI 命令大全
 
 ```bash
 # ═══════════════════════════════════════════════════════════
@@ -235,6 +466,9 @@ docker compose run --rm migrate status -c /app/databases/mariadb/your-project/dd
 
 # 執行遷移
 docker compose run --rm migrate up -c /app/databases/mariadb/your-project/ddl/config.js
+
+# 執行遷移（啟用 Sanity Check）
+docker compose run --rm migrate up --sanity-check -c /app/databases/mariadb/your-project/ddl/config.js
 
 # Dry Run（預覽）
 docker compose run --rm migrate up --dry-run -c /app/databases/mariadb/your-project/ddl/config.js
@@ -273,7 +507,7 @@ docker compose run --rm migrate create-dcl "create-app-user" -n 001 -c /app/data
 
 ---
 
-## 6. 情境範例教學
+## 7. 情境範例教學
 
 ### 情境 1：建立新資料表 (DDL)
 
