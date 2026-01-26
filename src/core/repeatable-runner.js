@@ -7,6 +7,15 @@
  * - No down migration required
  * - Re-executes when checksum changes
  * - Must be idempotent
+ * 
+ * Supported Annotations:
+ * - @allow-dangerous: true/false - Allow dangerous operations
+ * - @allow-forbidden: true/false - Allow forbidden operations (requires approval)
+ * - @allow: CODE1,CODE2 - Allow specific operation codes
+ * 
+ * Stored Procedure Support:
+ * - Supports DELIMITER statements for MariaDB stored procedures/functions
+ * - Example: DELIMITER // ... CREATE PROCEDURE ... // DELIMITER ;
  */
 
 import fs from 'fs/promises';
@@ -31,7 +40,7 @@ export class RepeatableRunner {
   /**
    * Get all repeatable migration files
    * @param {string} migrationsDir - Migrations directory
-   * @returns {Promise<Array<{fileName: string, filePath: string, content: string, checksum: string}>>}
+   * @returns {Promise<Array<{fileName: string, filePath: string, content: string, checksum: string, annotations: Object}>>}
    */
   async getRepeatableFiles(migrationsDir) {
     const files = await fs.readdir(migrationsDir);
@@ -44,10 +53,139 @@ export class RepeatableRunner {
       const filePath = path.join(migrationsDir, fileName);
       const content = await fs.readFile(filePath, 'utf-8');
       const checksum = this.calculateChecksum(content);
-      result.push({ fileName, filePath, content, checksum });
+      const annotations = this.parseFileAnnotations(content, fileName);
+      result.push({ fileName, filePath, content, checksum, annotations });
     }
 
     return result;
+  }
+
+  /**
+   * Parse file annotations from content
+   * Supports both SQL (-- @annotation) and JS (// @annotation) style comments
+   * 
+   * @param {string} content - File content
+   * @param {string} fileName - File name (to detect type)
+   * @returns {Object} - Parsed annotations
+   */
+  parseFileAnnotations(content, fileName) {
+    const annotations = {
+      allowDangerous: false,
+      allowForbidden: false,
+      allowedCodes: [],
+      description: '',
+      type: 'unknown'
+    };
+
+    const isSQL = fileName.endsWith('.sql');
+    const commentPrefix = isSQL ? '--' : '//';
+    const lines = content.split('\n');
+
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      
+      // Stop parsing annotations when we hit non-comment content
+      if (!trimmedLine.startsWith(commentPrefix) && trimmedLine !== '' && !trimmedLine.startsWith('/*')) {
+        break;
+      }
+
+      // Parse @allow-dangerous
+      const allowDangerousMatch = trimmedLine.match(new RegExp(`${commentPrefix}\\s*@allow-dangerous\\s*:\\s*(.+)`, 'i'));
+      if (allowDangerousMatch) {
+        const value = allowDangerousMatch[1].trim().toLowerCase();
+        annotations.allowDangerous = ['true', 'yes', '1'].includes(value);
+      }
+
+      // Parse @allow-forbidden
+      const allowForbiddenMatch = trimmedLine.match(new RegExp(`${commentPrefix}\\s*@allow-forbidden\\s*:\\s*(.+)`, 'i'));
+      if (allowForbiddenMatch) {
+        const value = allowForbiddenMatch[1].trim().toLowerCase();
+        annotations.allowForbidden = ['true', 'yes', '1'].includes(value);
+      }
+
+      // Parse @allow (specific codes)
+      const allowMatch = trimmedLine.match(new RegExp(`${commentPrefix}\\s*@allow\\s*:\\s*(.+)`, 'i'));
+      if (allowMatch) {
+        const codes = allowMatch[1].split(',').map(c => c.trim().toUpperCase());
+        annotations.allowedCodes = [...annotations.allowedCodes, ...codes];
+      }
+
+      // Parse @description
+      const descMatch = trimmedLine.match(new RegExp(`${commentPrefix}\\s*@description\\s*:\\s*(.+)`, 'i'));
+      if (descMatch) {
+        annotations.description = descMatch[1].trim();
+      }
+
+      // Parse @type
+      const typeMatch = trimmedLine.match(new RegExp(`${commentPrefix}\\s*@type\\s*:\\s*(.+)`, 'i'));
+      if (typeMatch) {
+        annotations.type = typeMatch[1].trim().toLowerCase();
+      }
+    }
+
+    return annotations;
+  }
+
+  /**
+   * Process SQL content with DELIMITER support for stored procedures
+   * Returns executable SQL chunks that can be run separately
+   * 
+   * @param {string} content - SQL content with potential DELIMITER statements
+   * @returns {Array<{sql: string, delimiter: string}>} - Array of SQL chunks with their delimiters
+   */
+  processDelimiterSQL(content) {
+    const chunks = [];
+    let currentDelimiter = ';';
+    let currentChunk = '';
+    
+    // Check if content uses DELIMITER
+    const hasDelimiter = /DELIMITER\s+\S+/i.test(content);
+    
+    if (!hasDelimiter) {
+      // No DELIMITER found, return as single chunk
+      return [{ sql: content.trim(), delimiter: ';' }];
+    }
+
+    const lines = content.split('\n');
+    
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      
+      // Check for DELIMITER change
+      const delimiterMatch = trimmedLine.match(/^DELIMITER\s+(\S+)\s*$/i);
+      if (delimiterMatch) {
+        // Save current chunk if not empty
+        if (currentChunk.trim()) {
+          chunks.push({ sql: currentChunk.trim(), delimiter: currentDelimiter });
+          currentChunk = '';
+        }
+        currentDelimiter = delimiterMatch[1];
+        continue;
+      }
+      
+      // Check if line ends with current delimiter
+      if (trimmedLine.endsWith(currentDelimiter) && currentDelimiter !== ';') {
+        // Remove the delimiter from end and add to chunk
+        const sqlPart = line.slice(0, line.lastIndexOf(currentDelimiter));
+        currentChunk += sqlPart + '\n';
+        chunks.push({ sql: currentChunk.trim(), delimiter: currentDelimiter });
+        currentChunk = '';
+      } else {
+        currentChunk += line + '\n';
+      }
+    }
+    
+    // Add remaining chunk
+    if (currentChunk.trim()) {
+      chunks.push({ sql: currentChunk.trim(), delimiter: currentDelimiter });
+    }
+    
+    // Filter out empty chunks and DELIMITER-only statements
+    return chunks.filter(c => 
+      c.sql && 
+      !c.sql.match(/^DELIMITER\s+\S+\s*$/i) &&
+      c.sql.trim() !== ''
+    );
   }
 
   /**
@@ -177,12 +315,12 @@ export class RepeatableRunner {
 
   /**
    * Run repeatable migrations (MariaDB)
-   * @param {Object} context - { connection, migrationsDir }
-   * @returns {Promise<{applied: Array, errors: Array}>}
+   * @param {Object} context - { connection, migrationsDir, validator? }
+   * @returns {Promise<{applied: Array, errors: Array, skipped: Array}>}
    */
   async runMariaDB(context) {
-    const { connection, migrationsDir } = context;
-    const result = { applied: [], errors: [] };
+    const { connection, migrationsDir, validator } = context;
+    const result = { applied: [], errors: [], skipped: [] };
 
     const files = await this.getRepeatableFiles(migrationsDir);
     const storedChecksums = await this.getStoredChecksumsMariaDB(connection);
@@ -195,16 +333,52 @@ export class RepeatableRunner {
         continue;
       }
 
+      // Validate with file annotations if validator provided
+      if (validator && typeof validator.validateContent === 'function') {
+        const validateOptions = {
+          allowDangerous: file.annotations.allowDangerous,
+          allowForbidden: file.annotations.allowForbidden,
+          allowedCodes: file.annotations.allowedCodes
+        };
+        
+        const validationResult = validator.validateContent(file.content, file.fileName, validateOptions);
+        
+        if (!validationResult.valid) {
+          // Check if blocked due to dangerous/forbidden operations
+          const blockedOps = [...(validationResult.forbiddenOps || []), ...(validationResult.dangerousOps || [])];
+          if (blockedOps.length > 0) {
+            const codes = blockedOps.map(op => op.code).join(', ');
+            result.skipped.push({
+              fileName: file.fileName,
+              reason: `Blocked by validation: ${codes}`,
+              hint: `Add annotation to allow: -- @allow-dangerous: true OR -- @allow: ${codes}`
+            });
+            continue;
+          }
+          // Other validation errors
+          result.errors.push(`${file.fileName}: Validation failed - ${validationResult.errors.map(e => e.message).join('; ')}`);
+          break;
+        }
+      }
+
       try {
-        // Execute the SQL (use query instead of execute for multiple statements)
-        await connection.query(file.content);
+        // Process DELIMITER for stored procedures support
+        const sqlChunks = this.processDelimiterSQL(file.content);
+        
+        for (const chunk of sqlChunks) {
+          if (chunk.sql.trim()) {
+            // Execute each chunk
+            await connection.query(chunk.sql);
+          }
+        }
         
         // Update checksum
         await this.updateChecksumMariaDB(connection, file.fileName, file.checksum);
         
         result.applied.push({
           fileName: file.fileName,
-          reason: stored ? 'checksum changed' : 'new file'
+          reason: stored ? 'checksum changed' : 'new file',
+          annotations: file.annotations
         });
       } catch (error) {
         result.errors.push(`${file.fileName}: ${error.message}`);
@@ -217,12 +391,12 @@ export class RepeatableRunner {
 
   /**
    * Run repeatable migrations (MongoDB)
-   * @param {Object} context - { db, client, migrationsDir }
-   * @returns {Promise<{applied: Array, errors: Array}>}
+   * @param {Object} context - { db, client, migrationsDir, validator? }
+   * @returns {Promise<{applied: Array, errors: Array, skipped: Array}>}
    */
   async runMongoDB(context) {
-    const { db, client, migrationsDir } = context;
-    const result = { applied: [], errors: [] };
+    const { db, client, migrationsDir, validator } = context;
+    const result = { applied: [], errors: [], skipped: [] };
 
     const files = await this.getRepeatableFiles(migrationsDir);
     const storedChecksums = await this.getStoredChecksumsMongoDB(db);
@@ -235,9 +409,37 @@ export class RepeatableRunner {
         continue;
       }
 
+      // Validate with file annotations if validator provided
+      if (validator && typeof validator.validateContent === 'function') {
+        const validateOptions = {
+          allowDangerous: file.annotations.allowDangerous,
+          allowForbidden: file.annotations.allowForbidden,
+          allowedCodes: file.annotations.allowedCodes
+        };
+        
+        const validationResult = validator.validateContent(file.content, file.fileName, validateOptions);
+        
+        if (!validationResult.valid) {
+          // Check if blocked due to dangerous/forbidden operations
+          const blockedOps = [...(validationResult.forbiddenOps || []), ...(validationResult.dangerousOps || [])];
+          if (blockedOps.length > 0) {
+            const codes = blockedOps.map(op => op.code).join(', ');
+            result.skipped.push({
+              fileName: file.fileName,
+              reason: `Blocked by validation: ${codes}`,
+              hint: `Add annotation to allow: // @allow-dangerous: true OR // @allow: ${codes}`
+            });
+            continue;
+          }
+          // Other validation errors
+          result.errors.push(`${file.fileName}: Validation failed - ${validationResult.errors.map(e => e.message).join('; ')}`);
+          break;
+        }
+      }
+
       try {
         // Import and execute the JS module
-        const module = await import(`file://${file.filePath}`);
+        const module = await import(`file://${file.filePath}?t=${Date.now()}`);
         
         if (typeof module.up !== 'function') {
           throw new Error('Migration must export an "up" function');
@@ -250,7 +452,8 @@ export class RepeatableRunner {
         
         result.applied.push({
           fileName: file.fileName,
-          reason: stored ? 'checksum changed' : 'new file'
+          reason: stored ? 'checksum changed' : 'new file',
+          annotations: file.annotations
         });
       } catch (error) {
         result.errors.push(`${file.fileName}: ${error.message}`);

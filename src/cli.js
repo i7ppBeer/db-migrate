@@ -826,6 +826,9 @@ program
   .command('dcl')
   .description('Run DCL repeatable migrations (checksum-based)')
   .option('--dry-run', 'Show what would be run without executing')
+  .option('--validate', 'Enable validation before running (blocks dangerous operations)')
+  .option('--allow-dangerous', 'Allow dangerous operations when validating')
+  .option('--allow-forbidden', 'Allow forbidden operations when validating (requires approval)')
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     let adapter;
@@ -849,7 +852,9 @@ program
         connection: adapter.connection,
         db: adapter.db,
         client: adapter.client,
-        migrationsDir
+        migrationsDir,
+        // Pass validator if validation is enabled
+        validator: options.validate ? adapter : null
       };
       
       if (options.dryRun) {
@@ -863,16 +868,37 @@ program
       }
       
       console.log(chalk.blue(`\n[DCL] Running repeatable migrations (${adapter.dbType})...`));
+      if (options.validate) {
+        console.log(chalk.cyan('   Validation: ENABLED'));
+        if (options.allowDangerous) {
+          console.log(chalk.yellow('   --allow-dangerous: Dangerous operations allowed'));
+        }
+        if (options.allowForbidden) {
+          console.log(chalk.red('   --allow-forbidden: Forbidden operations allowed (REQUIRES APPROVAL)'));
+        }
+      }
       
       const result = await runner.run(context);
       
       if (result.applied.length > 0) {
         console.log(chalk.green(`\n✅ Applied ${result.applied.length} DCL migration(s):`));
         for (const m of result.applied) {
-          console.log(`   ${m.fileName} (${m.reason})`);
+          const annotationInfo = m.annotations?.allowDangerous ? chalk.yellow(' [allow-dangerous]') : '';
+          console.log(`   ${m.fileName} (${m.reason})${annotationInfo}`);
         }
-      } else {
+      } else if (!result.skipped || result.skipped.length === 0) {
         console.log(chalk.gray('\n   All DCL migrations are up-to-date.'));
+      }
+      
+      // Show skipped migrations
+      if (result.skipped && result.skipped.length > 0) {
+        console.log(chalk.yellow(`\n⏭️  Skipped ${result.skipped.length} migration(s) due to validation:`));
+        for (const s of result.skipped) {
+          console.log(chalk.yellow(`   ${s.fileName}: ${s.reason}`));
+          if (s.hint) {
+            console.log(chalk.gray(`      💡 ${s.hint}`));
+          }
+        }
       }
       
       if (result.errors.length > 0) {
