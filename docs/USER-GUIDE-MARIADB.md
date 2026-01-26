@@ -8,10 +8,12 @@
 
 1. [檔案類型說明](#1-檔案類型說明)
 2. [Versioned vs Repeatable 語法對照](#2-versioned-vs-repeatable-語法對照)
-3. [危險指令列表](#3-危險指令列表)
-4. [如何允許危險指令](#4-如何允許危險指令)
-5. [Docker 環境設定與 CLI 使用](#5-docker-環境設定與-cli-使用)
-6. [情境範例教學](#6-情境範例教學)
+3. [Migration 檔案結構詳解](#3-migration-檔案結構詳解)
+4. [危險指令列表](#4-危險指令列表)
+5. [如何允許危險指令](#5-如何允許危險指令)
+6. [Sanity Check 機制](#6-sanity-check-機制)
+7. [Docker 環境設定與 CLI 使用](#7-docker-環境設定與-cli-使用)
+8. [情境範例教學](#8-情境範例教學)
 
 ---
 
@@ -82,7 +84,246 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 危險指令列表
+## 3. Migration 檔案結構詳解
+
+### 3.1 完整檔案結構圖
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     MariaDB Migration 檔案結構                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ ANNOTATION 區塊 (可選)                                               │   │
+│  │ -- @description: 說明這個 migration 的用途                           │   │
+│  │ -- @allow-dangerous: true                                           │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ -- +migrate Up          ← 🔵 UP 區塊開始標記 (必要)                  │   │
+│  │ │                                                                    │   │
+│  │ │  ┌─────────────────────────────────────────────────────────┐      │   │
+│  │ │  │ -- +sanity PreCheck   ← 🟡 前置檢查開始 (可選)           │      │   │
+│  │ │  │ -- EXPECT_NO_ROWS: SELECT 1 FROM ... WHERE ...          │      │   │
+│  │ │  │ -- EXPECT_ROWS: SELECT 1 FROM ... WHERE ...             │      │   │
+│  │ │  │ -- -sanity PreCheck   ← 🟡 前置檢查結束                  │      │   │
+│  │ │  └─────────────────────────────────────────────────────────┘      │   │
+│  │ │                                                                    │   │
+│  │ │  ┌─────────────────────────────────────────────────────────┐      │   │
+│  │ │  │ 🟢 主要 SQL 語句                                         │      │   │
+│  │ │  │ ALTER TABLE users ADD COLUMN phone VARCHAR(20);         │      │   │
+│  │ │  │ CREATE INDEX idx_phone ON users(phone);                 │      │   │
+│  │ │  └─────────────────────────────────────────────────────────┘      │   │
+│  │ │                                                                    │   │
+│  │ │  ┌─────────────────────────────────────────────────────────┐      │   │
+│  │ │  │ -- +sanity PostCheck  ← 🟡 後置檢查開始 (可選)           │      │   │
+│  │ │  │ -- EXPECT_ROWS: SELECT 1 FROM information_schema...     │      │   │
+│  │ │  │ -- -sanity PostCheck  ← 🟡 後置檢查結束                  │      │   │
+│  │ │  └─────────────────────────────────────────────────────────┘      │   │
+│  │ │                                                                    │   │
+│  └─┴────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ -- +migrate Down        ← 🔴 DOWN 區塊開始標記 (建議有)              │   │
+│  │ │                                                                    │   │
+│  │ │  DROP INDEX idx_phone ON users;                                   │   │
+│  │ │  ALTER TABLE users DROP COLUMN phone;                             │   │
+│  │ │                                                                    │   │
+│  └─┴────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 3.2 各區塊說明
+
+| 區塊 | 標記 | 必要性 | 用途 |
+|------|------|--------|------|
+| **Up** | `-- +migrate Up` | ✅ 必要 | 定義「正向遷移」要執行的 SQL |
+| **Down** | `-- +migrate Down` | ⚠️ 建議 | 定義「回滾」要執行的 SQL |
+| **PreCheck** | `-- +sanity PreCheck` | ❌ 可選 | 執行前的狀態檢查 |
+| **PostCheck** | `-- +sanity PostCheck` | ❌ 可選 | 執行後的結果驗證 |
+
+### 3.3 執行流程
+
+```
+                        migrate up 命令
+                              │
+                              ▼
+                    ┌─────────────────┐
+                    │   解析 Up 區塊   │
+                    └────────┬────────┘
+                             │
+              ┌──────────────┴──────────────┐
+              ▼                              │
+     ┌─────────────────┐                     │
+     │ 有 PreCheck?    │                     │
+     └────────┬────────┘                     │
+              │                              │
+         是   │   否                         │
+              ▼                              │
+     ┌─────────────────┐                     │
+     │ 執行 PreCheck   │                     │
+     │ (EXPECT_ROWS/   │                     │
+     │  EXPECT_NO_ROWS)│                     │
+     └────────┬────────┘                     │
+              │                              │
+         通過 │   失敗                        │
+              │     └──────▶ ❌ 停止，不執行 Up │
+              ▼                              │
+     ┌─────────────────┐◀────────────────────┘
+     │ 執行主要 SQL    │
+     │ (ALTER, CREATE) │
+     └────────┬────────┘
+              │
+              ▼
+     ┌─────────────────┐
+     │ 有 PostCheck?   │
+     └────────┬────────┘
+              │
+         是   │   否
+              ▼     └──────────────────────┐
+     ┌─────────────────┐                   │
+     │ 執行 PostCheck  │                   │
+     └────────┬────────┘                   │
+              │                            │
+         通過 │   失敗                      │
+              │     └──▶ 🔄 自動執行 Down 回滾│
+              ▼                            │
+     ┌─────────────────┐◀──────────────────┘
+     │    ✅ 完成      │
+     └─────────────────┘
+```
+
+### 3.4 基本範例 (只有 Up/Down)
+
+```sql
+-- +migrate Up
+CREATE TABLE users (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL,
+    email VARCHAR(100) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    UNIQUE KEY uk_username (username),
+    UNIQUE KEY uk_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- +migrate Down
+DROP TABLE IF EXISTS users;
+```
+
+### 3.5 完整範例 (含 PreCheck/PostCheck)
+
+```sql
+-- @description: 新增 phone 欄位
+-- @allow-dangerous: true
+
+-- +migrate Up
+
+-- +sanity PreCheck
+-- 確認 users 表存在
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'
+-- 確認 phone 欄位不存在（避免重複執行）
+-- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'phone'
+-- -sanity PreCheck
+
+-- 主要 SQL：新增欄位
+ALTER TABLE users ADD COLUMN phone VARCHAR(20) DEFAULT NULL AFTER email;
+
+-- 建立索引
+CREATE INDEX idx_users_phone ON users(phone);
+
+-- +sanity PostCheck
+-- 確認 phone 欄位已建立
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'phone'
+-- 確認索引已建立
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND INDEX_NAME = 'idx_users_phone'
+-- -sanity PostCheck
+
+-- +migrate Down
+DROP INDEX idx_users_phone ON users;
+ALTER TABLE users DROP COLUMN phone;
+```
+
+### 3.6 Stored Procedure 範例 (使用 DELIMITER)
+
+```sql
+-- @description: 建立訂單統計 Stored Procedure
+-- @type: procedure
+
+-- +migrate Up
+
+DELIMITER //
+
+CREATE PROCEDURE sp_get_user_order_stats(IN p_user_id BIGINT)
+BEGIN
+    SELECT 
+        u.username,
+        COUNT(o.id) AS order_count,
+        COALESCE(SUM(o.total_amount), 0) AS total_spent
+    FROM users u
+    LEFT JOIN orders o ON u.id = o.user_id
+    WHERE u.id = p_user_id
+    GROUP BY u.id, u.username;
+END //
+
+CREATE FUNCTION fn_calculate_discount(
+    p_amount DECIMAL(10,2),
+    p_discount_rate DECIMAL(5,2)
+) RETURNS DECIMAL(10,2)
+DETERMINISTIC
+BEGIN
+    RETURN p_amount * (1 - p_discount_rate / 100);
+END //
+
+DELIMITER ;
+
+-- +migrate Down
+DROP FUNCTION IF EXISTS fn_calculate_discount;
+DROP PROCEDURE IF EXISTS sp_get_user_order_stats;
+```
+
+### 3.7 DCL (Repeatable) 範例
+
+```sql
+-- @description: 建立應用程式使用者
+-- @type: dcl
+-- @allow-dangerous: true
+
+-- 注意：DCL 檔案不需要 +migrate Up/Down 標記
+-- 因為 DCL 是 Repeatable，每次 checksum 改變都會重新執行
+
+-- 建立應用程式帳號
+CREATE USER IF NOT EXISTS 'app_user'@'%' IDENTIFIED BY 'secure_password';
+
+-- 授予權限
+GRANT SELECT, INSERT, UPDATE, DELETE ON mydb.* TO 'app_user'@'%';
+GRANT EXECUTE ON mydb.* TO 'app_user'@'%';
+
+-- 建立唯讀帳號
+CREATE USER IF NOT EXISTS 'readonly_user'@'%' IDENTIFIED BY 'readonly_password';
+GRANT SELECT ON mydb.* TO 'readonly_user'@'%';
+
+-- 刷新權限
+FLUSH PRIVILEGES;
+```
+
+### 3.8 關鍵規則總結
+
+| 規則 | 說明 |
+|------|------|
+| `-- +migrate Up` | **必須**在 DDL 檔案中，標記正向遷移區塊開始 |
+| `-- +migrate Down` | **建議**有，標記回滾區塊開始 |
+| `-- +sanity PreCheck` / `-- -sanity PreCheck` | **可選**，成對出現，包裹前置檢查 |
+| `-- +sanity PostCheck` / `-- -sanity PostCheck` | **可選**，成對出現，包裹後置檢查 |
+| `EXPECT_ROWS:` | 期望查詢**有**返回資料，否則檢查失敗 |
+| `EXPECT_NO_ROWS:` | 期望查詢**無**返回資料，否則檢查失敗 |
+| `DELIMITER` | Stored Procedure/Function **必須**使用 |
+| DCL 檔案 | **不需要** `+migrate Up/Down`，整個檔案就是要執行的內容 |
+
+---
+
+## 4. 危險指令列表
 
 ### 🔴 絕對禁止 (Forbidden) - 需 `--allow-forbidden`
 
@@ -132,7 +373,7 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 4. 如何允許危險指令
+## 5. 如何允許危險指令
 
 ### 方法一：在檔案中加入 Annotation（推薦）
 
@@ -171,11 +412,11 @@ docker compose run --rm migrate validate --allow TRUNCATE_TABLE,DROP_INDEX -c <c
 
 ---
 
-## 5. Sanity Check 機制
+## 6. Sanity Check 機制
 
 Sanity Check 提供 **Pre-Check（前置檢查）** 和 **Post-Check（後置檢查）** 機制，確保 migration 執行前後的狀態正確，並支援**自動回滾**。
 
-### 5.1 Sanity Check 語法格式
+### 6.1 Sanity Check 語法格式
 
 ```sql
 -- +migrate Up
@@ -199,14 +440,14 @@ ALTER TABLE users ADD COLUMN phone VARCHAR(20);
 ALTER TABLE users DROP COLUMN phone;
 ```
 
-### 5.2 檢查指令說明
+### 6.2 檢查指令說明
 
 | 指令 | 語法 | 說明 |
 |------|------|------|
 | `EXPECT_ROWS` | `-- EXPECT_ROWS: SELECT ...` | 預期查詢**有**回傳結果，否則失敗 |
 | `EXPECT_NO_ROWS` | `-- EXPECT_NO_ROWS: SELECT ...` | 預期查詢**沒有**回傳結果，否則失敗 |
 
-### 5.3 執行流程
+### 6.3 執行流程
 
 ```
 ┌─────────────────┐
@@ -227,7 +468,7 @@ ALTER TABLE users DROP COLUMN phone;
       完成 ✅
 ```
 
-### 5.4 CLI 使用方式
+### 6.4 CLI 使用方式
 
 ```bash
 # 啟用 Sanity Check 執行遷移
@@ -237,7 +478,7 @@ docker compose run --rm migrate up --sanity-check -c /app/databases/mariadb/your
 docker compose run --rm migrate up --sanity-check --no-auto-rollback -c /app/databases/mariadb/your-project/ddl/config.js
 ```
 
-### 5.5 Sanity Check 情境範例
+### 6.5 Sanity Check 情境範例
 
 #### 範例 1：新增欄位前確認不存在
 
@@ -402,9 +643,9 @@ UPDATE old_users SET migrated = 0 WHERE migrated = 1;
 
 ---
 
-## 6. Docker 環境設定與 CLI 使用
+## 7. Docker 環境設定與 CLI 使用
 
-### 6.1 取得 Docker Image
+### 7.1 取得 Docker Image
 
 ```bash
 # 方法一：從 Registry 拉取（如果已發布）
@@ -416,7 +657,7 @@ cd ddl-migrate
 docker compose build migrate
 ```
 
-### 6.2 本地環境準備
+### 7.2 本地環境準備
 
 **目錄結構：**
 ```
@@ -454,7 +695,7 @@ export default {
 };
 ```
 
-### 6.3 CLI 命令大全
+### 7.3 CLI 命令大全
 
 ```bash
 # ═══════════════════════════════════════════════════════════
@@ -507,7 +748,7 @@ docker compose run --rm migrate create-dcl "create-app-user" -n 001 -c /app/data
 
 ---
 
-## 7. 情境範例教學
+## 8. 情境範例教學
 
 ### 情境 1：建立新資料表 (DDL)
 

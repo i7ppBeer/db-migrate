@@ -8,10 +8,12 @@
 
 1. [檔案類型說明](#1-檔案類型說明)
 2. [Versioned vs Repeatable 語法對照](#2-versioned-vs-repeatable-語法對照)
-3. [危險指令列表](#3-危險指令列表)
-4. [如何允許危險指令](#4-如何允許危險指令)
-5. [Docker 環境設定與 CLI 使用](#5-docker-環境設定與-cli-使用)
-6. [情境範例教學](#6-情境範例教學)
+3. [Migration 檔案結構詳解](#3-migration-檔案結構詳解)
+4. [危險指令列表](#4-危險指令列表)
+5. [如何允許危險指令](#5-如何允許危險指令)
+6. [Sanity Check 機制](#6-sanity-check-機制)
+7. [Docker 環境設定與 CLI 使用](#7-docker-環境設定與-cli-使用)
+8. [情境範例教學](#8-情境範例教學)
 
 ---
 
@@ -106,7 +108,387 @@ export async function down(db, client) {
 
 ---
 
-## 3. 危險指令列表
+## 3. Migration 檔案結構詳解
+
+### 3.1 完整檔案結構圖
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     MongoDB Migration 檔案結構 (.js)                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ ANNOTATION 區塊 (可選) - 使用 // 註解                                │   │
+│  │ // @description: 說明這個 migration 的用途                           │   │
+│  │ // @allow-dangerous: true                                           │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ export async function up(db, client) {    ← 🔵 UP 函數 (必要)        │   │
+│  │ │                                                                    │   │
+│  │ │  ┌─────────────────────────────────────────────────────────┐      │   │
+│  │ │  │ // ══ PreCheck ══                  ← 🟡 前置檢查 (可選)  │      │   │
+│  │ │  │ const exists = await db.listCollections({name}).toArray()│      │   │
+│  │ │  │ if (exists.length === 0) throw new Error('PreCheck failed')    │   │
+│  │ │  └─────────────────────────────────────────────────────────┘      │   │
+│  │ │                                                                    │   │
+│  │ │  ┌─────────────────────────────────────────────────────────┐      │   │
+│  │ │  │ // ══ Main Migration ══            ← 🟢 主要邏輯        │      │   │
+│  │ │  │ await db.collection('users').createIndex({email: 1})    │      │   │
+│  │ │  │ await db.collection('users').updateMany(...)            │      │   │
+│  │ │  └─────────────────────────────────────────────────────────┘      │   │
+│  │ │                                                                    │   │
+│  │ │  ┌─────────────────────────────────────────────────────────┐      │   │
+│  │ │  │ // ══ PostCheck ══                 ← 🟡 後置檢查 (可選)  │      │   │
+│  │ │  │ const indexes = await db.collection('users').indexes()  │      │   │
+│  │ │  │ if (!indexes.find(i => i.name === 'idx')) throw Error() │      │   │
+│  │ │  └─────────────────────────────────────────────────────────┘      │   │
+│  │ │                                                                    │   │
+│  │ }                                                                    │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ export async function down(db, client) {  ← 🔴 DOWN 函數 (建議有)    │   │
+│  │ │                                                                    │   │
+│  │ │  await db.collection('users').dropIndex('idx_email')              │   │
+│  │ │  await db.collection('users').drop()                              │   │
+│  │ │                                                                    │   │
+│  │ }                                                                    │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 3.2 各區塊說明
+
+| 區塊 | 寫法 | 必要性 | 用途 |
+|------|------|--------|------|
+| **up()** | `export async function up(db, client)` | ✅ 必要 | 定義「正向遷移」邏輯 |
+| **down()** | `export async function down(db, client)` | ⚠️ 建議 | 定義「回滾」邏輯 |
+| **PreCheck** | 在 up() 開頭的檢查程式碼 | ❌ 可選 | 執行前的狀態檢查 |
+| **PostCheck** | 在 up() 結尾的驗證程式碼 | ❌ 可選 | 執行後的結果驗證 |
+
+### 3.3 執行流程
+
+```
+                        migrate up 命令
+                              │
+                              ▼
+                    ┌─────────────────┐
+                    │  載入 .js 檔案   │
+                    └────────┬────────┘
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │   執行 up()     │
+                    └────────┬────────┘
+                             │
+              ┌──────────────┴──────────────┐
+              ▼                              │
+     ┌─────────────────┐                     │
+     │ PreCheck 程式碼  │                     │
+     │ (throw Error    │                     │
+     │  if failed)     │                     │
+     └────────┬────────┘                     │
+              │                              │
+         通過 │   失敗 (throw)               │
+              │     └──────▶ ❌ 停止，up() 中斷│
+              ▼                              │
+     ┌─────────────────┐◀────────────────────┘
+     │ 執行主要邏輯    │
+     │ (createIndex,   │
+     │  updateMany...) │
+     └────────┬────────┘
+              │
+              ▼
+     ┌─────────────────┐
+     │ PostCheck 程式碼 │
+     │ (throw Error    │
+     │  if failed)     │
+     └────────┬────────┘
+              │
+         通過 │   失敗 (throw)
+              │     └──▶ 🔄 可手動執行 down() 回滾
+              ▼
+     ┌─────────────────┐
+     │    ✅ 完成      │
+     └─────────────────┘
+```
+
+### 3.4 基本範例 (只有 up/down)
+
+```javascript
+export async function up(db, client) {
+  // 建立 Collection
+  await db.createCollection('users');
+  
+  // 建立索引
+  await db.collection('users').createIndex(
+    { email: 1 },
+    { unique: true, name: 'uk_users_email' }
+  );
+  
+  await db.collection('users').createIndex(
+    { createdAt: -1 },
+    { name: 'idx_users_createdAt' }
+  );
+}
+
+export async function down(db, client) {
+  await db.collection('users').drop();
+}
+```
+
+### 3.5 完整範例 (含 PreCheck/PostCheck)
+
+```javascript
+/**
+ * 新增 phone 欄位到所有 users
+ * @description: Add phone field to users collection
+ * @allow-dangerous: true
+ */
+
+export async function up(db, client) {
+  const collection = db.collection('users');
+  
+  // ═══════════════════════════════════════════════════════════════
+  // PreCheck: 前置檢查
+  // ═══════════════════════════════════════════════════════════════
+  
+  // 確認 users collection 存在
+  const collections = await db.listCollections({ name: 'users' }).toArray();
+  if (collections.length === 0) {
+    throw new Error('PreCheck failed: users collection does not exist');
+  }
+  
+  // 確認尚未有 phone 欄位（避免重複執行）
+  const existingDoc = await collection.findOne({ phone: { $exists: true } });
+  if (existingDoc) {
+    console.log('phone field already exists, skipping migration');
+    return; // 冪等性：已存在則跳過
+  }
+  
+  // ═══════════════════════════════════════════════════════════════
+  // Main Migration: 主要邏輯
+  // ═══════════════════════════════════════════════════════════════
+  
+  // 為所有文件新增 phone 欄位
+  const result = await collection.updateMany(
+    { phone: { $exists: false } },
+    { $set: { phone: null, updatedAt: new Date() } }
+  );
+  console.log(`Updated ${result.modifiedCount} documents`);
+  
+  // 建立索引
+  await collection.createIndex(
+    { phone: 1 },
+    { name: 'idx_users_phone', sparse: true }
+  );
+  
+  // ═══════════════════════════════════════════════════════════════
+  // PostCheck: 後置驗證
+  // ═══════════════════════════════════════════════════════════════
+  
+  // 確認所有文件都有 phone 欄位
+  const missingPhone = await collection.countDocuments({ phone: { $exists: false } });
+  if (missingPhone > 0) {
+    throw new Error(`PostCheck failed: ${missingPhone} documents still missing phone field`);
+  }
+  
+  // 確認索引已建立
+  const indexes = await collection.indexes();
+  const phoneIndex = indexes.find(idx => idx.name === 'idx_users_phone');
+  if (!phoneIndex) {
+    throw new Error('PostCheck failed: idx_users_phone index not created');
+  }
+  
+  console.log('Migration completed successfully');
+}
+
+export async function down(db, client) {
+  const collection = db.collection('users');
+  
+  // 刪除索引
+  await collection.dropIndex('idx_users_phone').catch(() => {});
+  
+  // 移除 phone 欄位
+  await collection.updateMany(
+    {},
+    { $unset: { phone: '' } }
+  );
+}
+```
+
+### 3.6 Schema Validation 範例
+
+```javascript
+/**
+ * 設定 products collection 的 Schema Validation
+ */
+
+export async function up(db, client) {
+  // ═══════════════════════════════════════════════════════════════
+  // PreCheck
+  // ═══════════════════════════════════════════════════════════════
+  
+  // 確認 collection 存在
+  const collections = await db.listCollections({ name: 'products' }).toArray();
+  if (collections.length === 0) {
+    // 不存在則建立
+    await db.createCollection('products');
+  }
+  
+  // ═══════════════════════════════════════════════════════════════
+  // Main Migration: 套用 Schema Validation
+  // ═══════════════════════════════════════════════════════════════
+  
+  await db.command({
+    collMod: 'products',
+    validator: {
+      $jsonSchema: {
+        bsonType: 'object',
+        required: ['name', 'price'],
+        properties: {
+          name: {
+            bsonType: 'string',
+            minLength: 1,
+            description: 'Product name is required'
+          },
+          price: {
+            bsonType: 'decimal',
+            minimum: 0,
+            description: 'Price must be a positive number'
+          },
+          category: {
+            bsonType: 'string'
+          },
+          stock: {
+            bsonType: 'int',
+            minimum: 0
+          }
+        }
+      }
+    },
+    validationLevel: 'moderate',
+    validationAction: 'warn'
+  });
+  
+  // ═══════════════════════════════════════════════════════════════
+  // PostCheck
+  // ═══════════════════════════════════════════════════════════════
+  
+  const collInfo = await db.listCollections({ name: 'products' }).toArray();
+  if (!collInfo[0]?.options?.validator) {
+    throw new Error('PostCheck failed: Schema validation not applied');
+  }
+}
+
+export async function down(db, client) {
+  // 移除 Schema Validation
+  await db.command({
+    collMod: 'products',
+    validator: {},
+    validationLevel: 'off'
+  });
+}
+```
+
+### 3.7 DCL (Repeatable) 範例
+
+```javascript
+/**
+ * 建立應用程式使用者
+ * @description: Create application database users
+ * @type: dcl
+ * @allow-dangerous: true
+ */
+
+// 注意：DCL 檔案也需要 up() 和 down() 函數
+// 但 down() 通常只記錄日誌，不實際回滾
+
+export async function up(db, client) {
+  const adminDb = client.db('admin');
+  
+  // ═══════════════════════════════════════════════════════════════
+  // 建立 app_user (讀寫權限)
+  // ═══════════════════════════════════════════════════════════════
+  
+  try {
+    // 嘗試建立使用者
+    await adminDb.command({
+      createUser: 'app_user',
+      pwd: 'secure_password_here',
+      roles: [
+        { role: 'readWrite', db: 'mydb' }
+      ]
+    });
+    console.log('Created user: app_user');
+  } catch (error) {
+    if (error.code === 51003) {
+      // 使用者已存在，更新角色
+      await adminDb.command({
+        updateUser: 'app_user',
+        roles: [
+          { role: 'readWrite', db: 'mydb' }
+        ]
+      });
+      console.log('Updated user: app_user');
+    } else {
+      throw error;
+    }
+  }
+  
+  // ═══════════════════════════════════════════════════════════════
+  // 建立 readonly_user (唯讀權限)
+  // ═══════════════════════════════════════════════════════════════
+  
+  try {
+    await adminDb.command({
+      createUser: 'readonly_user',
+      pwd: 'readonly_password_here',
+      roles: [
+        { role: 'read', db: 'mydb' }
+      ]
+    });
+    console.log('Created user: readonly_user');
+  } catch (error) {
+    if (error.code === 51003) {
+      await adminDb.command({
+        updateUser: 'readonly_user',
+        roles: [
+          { role: 'read', db: 'mydb' }
+        ]
+      });
+      console.log('Updated user: readonly_user');
+    } else {
+      throw error;
+    }
+  }
+}
+
+export async function down(db, client) {
+  // DCL 通常不回滾
+  console.log('DCL migrations typically do not support rollback');
+  console.log('To remove users, create a new migration');
+}
+```
+
+### 3.8 關鍵規則總結
+
+| 規則 | 說明 |
+|------|------|
+| `export async function up(db, client)` | **必須**有，定義正向遷移邏輯 |
+| `export async function down(db, client)` | **建議**有，定義回滾邏輯 |
+| PreCheck | 在 up() **開頭**寫檢查，失敗時 `throw new Error()` |
+| PostCheck | 在 up() **結尾**寫驗證，失敗時 `throw new Error()` |
+| 冪等性 | 檢查是否已執行過，若是則 `return` 跳過 |
+| 參數 `db` | 當前資料庫實例 |
+| 參數 `client` | MongoDB Client，可用於存取其他資料庫如 `client.db('admin')` |
+| DCL 檔案 | 也需要 up/down 函數，但 down 通常只是記錄日誌 |
+
+---
+
+## 4. 危險指令列表
 
 ### 🔴 絕對禁止 (Forbidden) - 需 `--allow-forbidden`
 
@@ -160,7 +542,7 @@ export async function down(db, client) {
 
 ---
 
-## 4. 如何允許危險指令
+## 5. 如何允許危險指令
 
 ### 方法一：在檔案中加入 Annotation（推薦）
 
@@ -213,11 +595,11 @@ docker compose run --rm migrate validate --allow DROP_COLLECTION,DELETE_ALL -c <
 
 ---
 
-## 5. Sanity Check 機制
+## 6. Sanity Check 機制
 
 Sanity Check 提供 **Pre-Check（前置檢查）** 和 **Post-Check（後置檢查）** 機制，確保 migration 執行前後的狀態正確，並支援**自動回滾**。
 
-### 5.1 Sanity Check 程式碼結構
+### 6.1 Sanity Check 程式碼結構
 
 ```javascript
 export async function up(db, client) {
@@ -269,7 +651,7 @@ export async function down(db, client) {
 }
 ```
 
-### 5.2 執行流程
+### 6.2 執行流程
 
 ```
 ┌─────────────────┐
@@ -290,7 +672,7 @@ export async function down(db, client) {
       完成 ✅
 ```
 
-### 5.3 Sanity Check 情境範例
+### 6.3 Sanity Check 情境範例
 
 #### 範例 1：新增欄位前確認 Collection 存在
 
@@ -659,9 +1041,9 @@ export async function down(db, client) {
 
 ---
 
-## 6. Docker 環境設定與 CLI 使用
+## 7. Docker 環境設定與 CLI 使用
 
-### 6.1 取得 Docker Image
+### 7.1 取得 Docker Image
 
 ```bash
 # 方法一：從 Registry 拉取（如果已發布）
@@ -673,7 +1055,7 @@ cd ddl-migrate
 docker compose build migrate
 ```
 
-### 6.2 本地環境準備
+### 7.2 本地環境準備
 
 **目錄結構：**
 ```
@@ -709,7 +1091,7 @@ export default {
 };
 ```
 
-### 6.3 CLI 命令大全
+### 7.3 CLI 命令大全
 
 ```bash
 # ═══════════════════════════════════════════════════════════
@@ -759,7 +1141,7 @@ docker compose run --rm migrate create-dcl "create-app-user" -n 001 -c /app/data
 
 ---
 
-## 7. 情境範例教學
+## 8. 情境範例教學
 
 ### 情境 1：建立新 Collection 並設定索引 (DDL)
 
