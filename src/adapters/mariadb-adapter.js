@@ -784,6 +784,11 @@ export class MariaDBAdapter extends BaseAdapter {
 
     const upSQL = this.extractSection(content, 'Up');
     const downSQL = this.extractSection(content, 'Down');
+    
+    // Normalize SQL for pattern matching (remove comments, collapse whitespace)
+    const normalizedContent = this.normalizeSQL(content);
+    const normalizedUpSQL = this.normalizeSQL(upSQL);
+    const normalizedDownSQL = this.normalizeSQL(downSQL);
 
     // === 1. Extract created and dropped tables ===
     const createdTables = this.extractCreatedTables(upSQL);
@@ -828,7 +833,8 @@ export class MariaDBAdapter extends BaseAdapter {
           continue;
         }
 
-        if (rule.pattern.test(content)) {
+        // Use normalized content for pattern matching
+        if (rule.pattern.test(normalizedContent)) {
           const isAllowed = options.allowForbidden || 
             (options.allowedCodes && options.allowedCodes.includes(rule.code));
           
@@ -852,7 +858,8 @@ export class MariaDBAdapter extends BaseAdapter {
     // === 4. Check DANGEROUS operations ===
     for (const category of Object.keys(rules.dangerous)) {
       for (const rule of rules.dangerous[category]) {
-        if (rule.pattern.test(content)) {
+        // Use normalized content for pattern matching
+        if (rule.pattern.test(normalizedContent)) {
           const isAllowed = options.allowDangerous || 
             (options.allowedCodes && options.allowedCodes.includes(rule.code));
           
@@ -877,7 +884,8 @@ export class MariaDBAdapter extends BaseAdapter {
 
     // === 5. Check WARNING operations ===
     for (const rule of rules.warnings.operations) {
-      if (rule.pattern.test(content)) {
+      // Use normalized content for pattern matching
+      if (rule.pattern.test(normalizedContent)) {
         warnings.push({
           type: 'warning',
           message: rule.message
@@ -941,6 +949,29 @@ export class MariaDBAdapter extends BaseAdapter {
     const regex = new RegExp(`--\\s*\\+migrate\\s+${section}([\\s\\S]*?)(?=--\\s*\\+migrate|$)`, 'i');
     const match = content.match(regex);
     return match ? match[1].trim() : '';
+  }
+
+  /**
+   * Normalize SQL content for pattern matching
+   * - Remove single-line comments (except EXPECT directives)
+   * - Remove multi-line comments
+   * - Collapse multiple whitespace/newlines to single space
+   * - Preserve case for case-insensitive matching
+   * 
+   * @param {string} sql - Raw SQL content
+   * @returns {string} - Normalized SQL
+   */
+  normalizeSQL(sql) {
+    if (!sql) return '';
+    return sql
+      // Remove single-line comments (but preserve -- EXPECT_ROWS: and -- EXPECT_NO_ROWS:)
+      .replace(/--(?!\s*EXPECT).*$/gm, ' ')
+      // Remove multi-line comments /* ... */
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      // Collapse multiple whitespace/newlines to single space
+      .replace(/\s+/g, ' ')
+      // Trim
+      .trim();
   }
 }
 

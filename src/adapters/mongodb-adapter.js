@@ -551,9 +551,16 @@ export async function down(db, client) {
     const forbiddenOps = [];
     const rules = this.getValidationRules();
 
+    // Normalize content for pattern matching (remove comments, collapse whitespace)
+    const normalizedContent = this.normalizeJS(content);
+
     // Extract up() and down() function bodies
     const upBody = this.extractFunctionBody(content, 'up');
     const downBody = this.extractFunctionBody(content, 'down');
+    
+    // Normalize function bodies
+    const normalizedUpBody = this.normalizeJS(upBody);
+    const normalizedDownBody = this.normalizeJS(downBody);
 
     // === 1. Check for empty down() when up() has operations ===
     const upHasOperations = upBody.trim().length > 0 && 
@@ -604,7 +611,8 @@ export async function down(db, client) {
     // === 4. Check for forbidden operations ===
     for (const category of Object.keys(rules.forbidden)) {
       for (const rule of rules.forbidden[category]) {
-        if (rule.pattern.test(content)) {
+        // Use normalized content for pattern matching
+        if (rule.pattern.test(normalizedContent)) {
           const isAllowed = options.allowForbidden || 
             (options.allowedCodes && options.allowedCodes.includes(rule.code));
           
@@ -645,7 +653,8 @@ export async function down(db, client) {
           }
         }
 
-        if (rule.pattern.test(content)) {
+        // Use normalized content for pattern matching
+        if (rule.pattern.test(normalizedContent)) {
           const isAllowed = options.allowDangerous || 
             (options.allowedCodes && options.allowedCodes.includes(rule.code));
           
@@ -670,7 +679,8 @@ export async function down(db, client) {
 
     // === 6. Check for warning operations ===
     for (const rule of rules.warnings.operations) {
-      if (rule.pattern.test(content)) {
+      // Use normalized content for pattern matching
+      if (rule.pattern.test(normalizedContent)) {
         warnings.push({
           type: 'warning',
           message: rule.message
@@ -745,6 +755,28 @@ export async function down(db, client) {
       new RegExp(`${operation}\\s*:\\s*[\\w$]`),      // createUser: variableName
     ];
     return patterns.some(p => p.test(code));
+  }
+
+  /**
+   * Normalize JavaScript content for pattern matching
+   * - Remove single-line comments (// ...)
+   * - Remove multi-line comments (/* ... *\/)
+   * - Collapse multiple whitespace/newlines to single space
+   * 
+   * @param {string} js - Raw JavaScript content
+   * @returns {string} - Normalized JavaScript
+   */
+  normalizeJS(js) {
+    if (!js) return '';
+    return js
+      // Remove single-line comments (but not URLs like http://)
+      .replace(/(?<!:)\/\/.*$/gm, ' ')
+      // Remove multi-line comments /* ... */
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      // Collapse multiple whitespace/newlines to single space
+      .replace(/\s+/g, ' ')
+      // Trim
+      .trim();
   }
 }
 
