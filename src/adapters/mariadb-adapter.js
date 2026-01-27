@@ -63,13 +63,14 @@ export class MariaDBAdapter extends BaseAdapter {
           { pattern: /\bINTO\s+DUMPFILE/i, code: 'INTO_DUMPFILE', message: '🔴 DATA RISK: Export data is forbidden / 禁止匯出資料' }
         ],
         system: [
-          { pattern: /\bSHUTDOWN/i, code: 'SHUTDOWN', message: '🔴 SYSTEM: Shutdown database is forbidden / 禁止關閉資料庫' },
-          { pattern: /\bRESET\s+MASTER/i, code: 'RESET_MASTER', message: '🔴 SYSTEM: Reset master is forbidden / 禁止重置主庫' },
-          { pattern: /\bRESET\s+SLAVE/i, code: 'RESET_SLAVE', message: '🔴 SYSTEM: Reset slave is forbidden / 禁止重置從庫' },
-          { pattern: /\bSTOP\s+SLAVE/i, code: 'STOP_SLAVE', message: '🔴 SYSTEM: Stop replication is forbidden / 禁止停止複製' },
-          { pattern: /\bCHANGE\s+MASTER/i, code: 'CHANGE_MASTER', message: '🔴 SYSTEM: Change master config is forbidden / 禁止變更主庫設定' },
-          { pattern: /\bSET\s+GLOBAL/i, code: 'SET_GLOBAL', message: '🔴 SYSTEM: Change global settings is forbidden / 禁止變更全域設定' },
-          { pattern: /\bKILL\s+(?:CONNECTION|QUERY)/i, code: 'KILL', message: '🔴 SYSTEM: Kill connection/query is forbidden / 禁止終止連線/查詢' }
+          // SHUTDOWN must be standalone command (followed by ; or end, not part of identifier)
+          { pattern: /\bSHUTDOWN\s*(?:;|$)/i, code: 'SHUTDOWN', message: '🔴 SYSTEM: Shutdown database is forbidden / 禁止關閉資料庫' },
+          { pattern: /\bRESET\s+MASTER\b/i, code: 'RESET_MASTER', message: '🔴 SYSTEM: Reset master is forbidden / 禁止重置主庫' },
+          { pattern: /\bRESET\s+SLAVE\b/i, code: 'RESET_SLAVE', message: '🔴 SYSTEM: Reset slave is forbidden / 禁止重置從庫' },
+          { pattern: /\bSTOP\s+SLAVE\b/i, code: 'STOP_SLAVE', message: '🔴 SYSTEM: Stop replication is forbidden / 禁止停止複製' },
+          { pattern: /\bCHANGE\s+MASTER\b/i, code: 'CHANGE_MASTER', message: '🔴 SYSTEM: Change master config is forbidden / 禁止變更主庫設定' },
+          { pattern: /\bSET\s+GLOBAL\s+/i, code: 'SET_GLOBAL', message: '🔴 SYSTEM: Change global settings is forbidden / 禁止變更全域設定' },
+          { pattern: /\bKILL\s+(?:CONNECTION|QUERY)\s+/i, code: 'KILL', message: '🔴 SYSTEM: Kill connection/query is forbidden / 禁止終止連線/查詢' }
         ]
       },
 
@@ -82,20 +83,20 @@ export class MariaDBAdapter extends BaseAdapter {
         ],
         blocking: [
           { pattern: /LOCK\s+TABLE/i, code: 'LOCK_TABLE', message: '🟠 BLOCKING: LOCK TABLE will block all queries / 會阻塞所有查詢', suggestion: 'Consider using transaction isolation level or row locks / 考慮使用交易隔離等級或行鎖' },
-          { pattern: /ALTER\s+TABLE\s+\w+\s+(?:ADD|DROP|MODIFY|CHANGE)\s+(?!.*ALGORITHM\s*=\s*INPLACE)/i, code: 'ALTER_TABLE_BLOCKING', message: '🟠 BLOCKING: ALTER TABLE may cause long table lock / 可能造成長時間鎖表', suggestion: 'Use ALGORITHM=INPLACE, LOCK=NONE or pt-online-schema-change / 建議使用 ALGORITHM=INPLACE, LOCK=NONE' },
+          { pattern: /ALTER\s+TABLE\s+(?:`[^`]+`|\w+)\s+(?:ADD|DROP|MODIFY|CHANGE)\s+(?!.*ALGORITHM\s*=\s*INPLACE)/i, code: 'ALTER_TABLE_BLOCKING', message: '🟠 BLOCKING: ALTER TABLE may cause long table lock / 可能造成長時間鎖表', suggestion: 'Use ALGORITHM=INPLACE, LOCK=NONE or pt-online-schema-change / 建議使用 ALGORITHM=INPLACE, LOCK=NONE' },
           { pattern: /CREATE\s+(?:UNIQUE\s+)?INDEX\s+\w+\s+ON\s+(?!.*ALGORITHM\s*=\s*INPLACE)/i, code: 'CREATE_INDEX_BLOCKING', message: '🟠 BLOCKING: CREATE INDEX may cause long table lock / 可能造成長時間鎖表', suggestion: 'Use ALGORITHM=INPLACE, LOCK=NONE / 建議使用 ALGORITHM=INPLACE, LOCK=NONE' },
           { pattern: /SELECT\s+[\s\S]*?\s+FOR\s+UPDATE/i, code: 'SELECT_FOR_UPDATE', message: '🟠 BLOCKING: SELECT FOR UPDATE causes exclusive row lock / 會造成排他行鎖', suggestion: 'Confirm if lock is needed, consider optimistic locking / 確認是否真的需要鎖定，考慮使用樂觀鎖' },
           { pattern: /SELECT\s+[\s\S]*?\s+LOCK\s+IN\s+SHARE\s+MODE/i, code: 'LOCK_IN_SHARE_MODE', message: '🟠 BLOCKING: LOCK IN SHARE MODE causes shared row lock / 會造成共享行鎖', suggestion: 'Confirm if shared lock is needed / 確認是否真的需要共享鎖' }
         ],
         bulkOperation: [
-          { pattern: /DELETE\s+FROM\s+\w+\s*(?:;|$)/i, code: 'DELETE_ALL', message: '🟠 DATA RISK: DELETE without WHERE will delete all rows / 缺少 WHERE 條件會刪除全表資料', suggestion: 'Add WHERE condition / 請加上 WHERE 條件' },
-          { pattern: /UPDATE\s+\w+\s+SET\s+[^;]*(?:;|$)(?![\s\S]*WHERE)/i, code: 'UPDATE_ALL', message: '🟠 DATA RISK: UPDATE without WHERE will update all rows / 缺少 WHERE 條件會更新全表資料', suggestion: 'Add WHERE condition / 請加上 WHERE 條件' },
+          { pattern: /DELETE\s+FROM\s+(?:`[^`]+`|\w+)\s*(?:;|$)/i, code: 'DELETE_ALL', message: '🟠 DATA RISK: DELETE without WHERE will delete all rows / 缺少 WHERE 條件會刪除全表資料', suggestion: 'Add WHERE condition / 請加上 WHERE 條件' },
+          { pattern: /UPDATE\s+(?:`[^`]+`|\w+)\s+SET\s+[^;]*(?:;|$)(?![\s\S]*WHERE)/i, code: 'UPDATE_ALL', message: '🟠 DATA RISK: UPDATE without WHERE will update all rows / 缺少 WHERE 條件會更新全表資料', suggestion: 'Add WHERE condition / 請加上 WHERE 條件' },
           { pattern: /INSERT\s+[\s\S]*?\s+SELECT\s+/i, code: 'INSERT_SELECT', message: '🟠 BLOCKING: INSERT...SELECT will lock source table / 會對來源表加共享鎖', suggestion: 'Consider batch processing / 考慮分批處理' }
         ],
         schemaChange: [
-          { pattern: /ALTER\s+TABLE\s+\w+\s+DROP\s+COLUMN/i, code: 'DROP_COLUMN', message: '🟠 DATA LOSS: DROP COLUMN will permanently delete column data / 會永久刪除欄位資料', suggestion: 'Confirm column is no longer used / 先確認該欄位已無使用' },
+          { pattern: /ALTER\s+TABLE\s+(?:`[^`]+`|\w+)\s+DROP\s+COLUMN/i, code: 'DROP_COLUMN', message: '🟠 DATA LOSS: DROP COLUMN will permanently delete column data / 會永久刪除欄位資料', suggestion: 'Confirm column is no longer used / 先確認該欄位已無使用' },
           { pattern: /RENAME\s+TABLE/i, code: 'RENAME_TABLE', message: '🟠 BREAKING: RENAME TABLE may break applications / 可能破壞應用程式', suggestion: 'Confirm all apps have updated table references / 確認所有應用程式都已更新表名引用' },
-          { pattern: /ALTER\s+TABLE\s+\w+\s+RENAME\s+TO/i, code: 'ALTER_RENAME', message: '🟠 BREAKING: RENAME TABLE may break applications / 可能破壞應用程式', suggestion: 'Confirm all apps have updated table references / 確認所有應用程式都已更新表名引用' },
+          { pattern: /ALTER\s+TABLE\s+(?:`[^`]+`|\w+)\s+RENAME\s+TO/i, code: 'ALTER_RENAME', message: '🟠 BREAKING: RENAME TABLE may break applications / 可能破壞應用程式', suggestion: 'Confirm all apps have updated table references / 確認所有應用程式都已更新表名引用' },
           { pattern: /MODIFY\s+COLUMN\s+\w+\s+\w+/i, code: 'MODIFY_COLUMN', message: '🟠 DATA RISK: MODIFY COLUMN may cause data conversion failure / 可能造成資料轉換失敗', suggestion: 'Test in staging environment first / 先在測試環境驗證' },
           { pattern: /CHANGE\s+COLUMN/i, code: 'CHANGE_COLUMN', message: '🟠 DATA RISK: CHANGE COLUMN may cause data conversion failure / 可能造成資料轉換失敗', suggestion: 'Test in staging environment first / 先在測試環境驗證' },
           { pattern: /DROP\s+INDEX/i, code: 'DROP_INDEX', message: '🟠 PERFORMANCE: DROP INDEX may affect query performance / 可能影響查詢效能', suggestion: 'Confirm index is no longer used / 確認該索引已無查詢使用' },
@@ -109,7 +110,7 @@ export class MariaDBAdapter extends BaseAdapter {
       // ========================================
       warnings: {
         operations: [
-          { pattern: /ALTER\s+TABLE\s+\w+\s+ADD\s+COLUMN/i, message: '⚠️ ALTER TABLE ADD COLUMN may take long on large tables / 在大表上可能需要較長時間' },
+          { pattern: /ALTER\s+TABLE\s+(?:`[^`]+`|\w+)\s+ADD\s+COLUMN/i, message: '⚠️ ALTER TABLE ADD COLUMN may take long on large tables / 在大表上可能需要較長時間' },
           { pattern: /ADD\s+(?:CONSTRAINT\s+)?\w*\s*NOT\s+NULL(?!\s+DEFAULT)/i, message: '⚠️ Adding NOT NULL column should have DEFAULT value / 新增 NOT NULL 欄位建議搭配 DEFAULT 值' },
           { pattern: /AUTO_INCREMENT\s*=/i, message: '⚠️ Manual AUTO_INCREMENT may cause ID conflicts / 手動設定 AUTO_INCREMENT 可能造成 ID 衝突' },
           { pattern: /ENGINE\s*=\s*MyISAM/i, message: '⚠️ MyISAM does not support transactions, use InnoDB / MyISAM 引擎不支援交易，建議使用 InnoDB' },
@@ -122,11 +123,56 @@ export class MariaDBAdapter extends BaseAdapter {
       },
 
       // ========================================
+      // 🟡 可疑名稱檢測 - 資料庫/表/欄位名稱包含危險關鍵字
+      // ========================================
+      suspiciousNames: {
+        // 這些關鍵字出現在識別符（表名/欄位名）中時發出警告
+        keywords: [
+          'drop_database', 'dropdatabase', 'drop_schema', 'dropschema',
+          'truncate', 'shutdown', 'reset_master', 'reset_slave',
+          'grant_all', 'revoke_all', 'create_user', 'drop_user'
+        ],
+        message: '⚠️ SUSPICIOUS NAME: Identifier contains dangerous keyword which may cause false positive/negative detection'
+      },
+
+      // ========================================
       // CREATE/DROP 配對檢測
       // ========================================
       createDropPairs: {
         create: /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"]?(\w+)[`"]?/i,
         drop: /DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?[`"]?(\w+)[`"]?/i
+      },
+
+      // ========================================
+      // 🔶 效能檢測 - Performance Checks
+      // ========================================
+      performance: {
+        // 閾值設定
+        thresholds: {
+          maxQueryLength: 5000,           // 單一語句超過 5000 字元視為過長
+          maxTotalLength: 50000,          // 整個 migration 超過 50000 字元視為過長
+          maxIndexesPerMigration: 5,      // 單一 migration 最多建立 5 個索引
+          maxAlterTablesPerMigration: 10, // 單一 migration 最多 10 個 ALTER TABLE
+          maxStatementsPerMigration: 50,  // 單一 migration 最多 50 個語句
+          maxColumnsPerInsert: 20,        // INSERT 語句超過 20 個欄位視為複雜
+          maxJoinsPerQuery: 5,            // 單一查詢超過 5 個 JOIN 視為複雜
+          maxSubqueries: 3                // 單一查詢超過 3 個子查詢視為複雜
+        },
+        // 效能警告訊息
+        messages: {
+          queryTooLong: '🔶 PERFORMANCE: Query is very long ({length} chars), may cause timeout or be hard to debug / 查詢過長 ({length} 字元)，可能造成超時或難以除錯',
+          migrationTooLong: '🔶 PERFORMANCE: Migration file is very long ({length} chars), consider splitting / Migration 檔案過長 ({length} 字元)，建議拆分',
+          tooManyIndexes: '🔶 PERFORMANCE: Creating {count} indexes in one migration may cause long lock time / 單次建立 {count} 個索引可能造成長時間鎖定',
+          tooManyAlterTables: '🔶 PERFORMANCE: {count} ALTER TABLE statements in one migration may cause performance issues / 單次 {count} 個 ALTER TABLE 可能影響效能',
+          tooManyStatements: '🔶 PERFORMANCE: {count} statements in one migration, consider splitting / 單次 {count} 個語句，建議拆分',
+          complexInsert: '🔶 PERFORMANCE: INSERT with {count} columns may indicate denormalized data / INSERT 有 {count} 個欄位，可能表示資料未正規化',
+          tooManyJoins: '🔶 PERFORMANCE: Query has {count} JOINs, may be slow on large tables / 查詢有 {count} 個 JOIN，大表可能很慢',
+          tooManySubqueries: '🔶 PERFORMANCE: Query has {count} subqueries, consider using JOINs or CTEs / 查詢有 {count} 個子查詢，建議改用 JOIN 或 CTE',
+          multipleIndexOnSameTable: '🔶 PERFORMANCE: Multiple indexes on table "{table}" in same migration, consider combining / 同一 migration 對 "{table}" 建立多個索引，建議合併',
+          fullTableScan: '🔶 PERFORMANCE: Query may cause full table scan (no WHERE or index hint) / 查詢可能造成全表掃描',
+          selectStar: '🔶 PERFORMANCE: SELECT * may fetch unnecessary data, specify columns / SELECT * 可能取得不必要資料，建議指定欄位',
+          orderByWithoutIndex: '🔶 PERFORMANCE: ORDER BY without LIMIT on large result set may be slow / 大結果集的 ORDER BY 沒有 LIMIT 可能很慢'
+        }
       }
     };
   }
@@ -893,7 +939,16 @@ export class MariaDBAdapter extends BaseAdapter {
       }
     }
 
-    // === 6. Check if DOWN section exists ===
+    // === 6. Check SUSPICIOUS NAMES (identifiers containing dangerous keywords) ===
+    const suspiciousNameWarnings = this.checkSuspiciousNames(content);
+    warnings.push(...suspiciousNameWarnings);
+
+    // === 7. Check PERFORMANCE ISSUES ===
+    const performanceResult = this.checkPerformanceIssues(content, fileName);
+    const performanceWarnings = performanceResult.warnings;
+    warnings.push(...performanceWarnings);
+
+    // === 8. Check if DOWN section exists ===
     if (!downSQL || downSQL.trim() === '') {
       warnings.push({
         type: 'missing-down',
@@ -910,11 +965,16 @@ export class MariaDBAdapter extends BaseAdapter {
       warnings,
       forbiddenOps,
       dangerousOps,
+      suspiciousNames: suspiciousNameWarnings,
+      performanceIssues: performanceWarnings,
+      performanceMetrics: performanceResult.metrics,
       summary: {
         forbidden: forbiddenOps.length,
         dangerous: dangerousOps.length,
         warnings: warnings.length,
-        structural: errors.length
+        structural: errors.length,
+        suspiciousNames: suspiciousNameWarnings.length,
+        performanceIssues: performanceWarnings.length
       }
     };
   }
@@ -953,6 +1013,7 @@ export class MariaDBAdapter extends BaseAdapter {
 
   /**
    * Normalize SQL content for pattern matching
+   * - Remove string literals to avoid false positives from data values
    * - Remove single-line comments (except EXPECT directives)
    * - Remove multi-line comments
    * - Collapse multiple whitespace/newlines to single space
@@ -964,6 +1025,12 @@ export class MariaDBAdapter extends BaseAdapter {
   normalizeSQL(sql) {
     if (!sql) return '';
     return sql
+      // Remove string literals (single quotes) to avoid false positives
+      // e.g., INSERT INTO log VALUES ('DROP DATABASE test') should NOT trigger
+      // Use a placeholder to preserve syntax
+      .replace(/'(?:[^'\\]|\\.)*'/g, "'__STRING__'")
+      // Remove string literals (double quotes)
+      .replace(/"(?:[^"\\]|\\.)*"/g, '"__STRING__"')
       // Remove single-line comments (but preserve -- EXPECT_ROWS: and -- EXPECT_NO_ROWS:)
       .replace(/--(?!\s*EXPECT).*$/gm, ' ')
       // Remove multi-line comments /* ... */
@@ -972,6 +1039,322 @@ export class MariaDBAdapter extends BaseAdapter {
       .replace(/\s+/g, ' ')
       // Trim
       .trim();
+  }
+
+  /**
+   * Extract identifiers (table names, column names) from SQL for suspicious name checking
+   * @param {string} sql - SQL content
+   * @returns {string[]} - Array of identifiers found
+   */
+  extractIdentifiers(sql) {
+    if (!sql) return [];
+    const identifiers = [];
+    
+    // Match backtick-quoted identifiers
+    const backtickRegex = /`([^`]+)`/g;
+    let match;
+    while ((match = backtickRegex.exec(sql)) !== null) {
+      identifiers.push(match[1]);
+    }
+    
+    // Match common identifier patterns (table/column names after keywords)
+    // CREATE TABLE name, ALTER TABLE name, DROP TABLE name
+    const tableRegex = /(?:CREATE|ALTER|DROP|TRUNCATE)\s+TABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?[`"]?(\w+)[`"]?/gi;
+    while ((match = tableRegex.exec(sql)) !== null) {
+      identifiers.push(match[1]);
+    }
+    
+    // Column names: ADD COLUMN name, DROP COLUMN name, MODIFY COLUMN name
+    const columnRegex = /(?:ADD|DROP|MODIFY|CHANGE)\s+COLUMN\s+[`"]?(\w+)[`"]?/gi;
+    while ((match = columnRegex.exec(sql)) !== null) {
+      identifiers.push(match[1]);
+    }
+    
+    return [...new Set(identifiers)]; // Remove duplicates
+  }
+
+  /**
+   * Check for suspicious identifier names that may cause confusion
+   * @param {string} sql - SQL content
+   * @returns {Object[]} - Array of warnings for suspicious names
+   */
+  checkSuspiciousNames(sql) {
+    const rules = this.getValidationRules();
+    const warnings = [];
+    const identifiers = this.extractIdentifiers(sql);
+    
+    for (const identifier of identifiers) {
+      const lowerName = identifier.toLowerCase();
+      for (const keyword of rules.suspiciousNames.keywords) {
+        if (lowerName.includes(keyword)) {
+          warnings.push({
+            type: 'suspicious-name',
+            identifier,
+            keyword,
+            message: `⚠️ SUSPICIOUS NAME: Identifier '${identifier}' contains keyword '${keyword}' - this may cause false positive/negative detection / 識別符包含危險關鍵字，可能導致誤判`
+          });
+        }
+      }
+    }
+    
+    return warnings;
+  }
+
+  /**
+   * Check for performance issues in SQL content
+   * @param {string} sql - SQL content  
+   * @param {string} fileName - File name for context
+   * @returns {Object} - Performance analysis result
+   */
+  checkPerformanceIssues(sql, fileName = '') {
+    const rules = this.getValidationRules();
+    const thresholds = rules.performance.thresholds;
+    const messages = rules.performance.messages;
+    const warnings = [];
+    const metrics = {};
+
+    if (!sql) {
+      return { warnings, metrics };
+    }
+
+    // Helper to replace all occurrences of a placeholder
+    const replaceAll = (str, search, replacement) => str.split(search).join(replacement);
+
+    // 1. Check total migration length
+    metrics.totalLength = sql.length;
+    if (sql.length > thresholds.maxTotalLength) {
+      warnings.push({
+        type: 'performance-migration-length',
+        code: 'MIGRATION_TOO_LONG',
+        message: replaceAll(messages.migrationTooLong, '{length}', sql.length),
+        value: sql.length,
+        threshold: thresholds.maxTotalLength
+      });
+    }
+
+    // 2. Split into statements and analyze each
+    const statements = this.splitStatements(sql);
+    metrics.statementCount = statements.length;
+
+    if (statements.length > thresholds.maxStatementsPerMigration) {
+      warnings.push({
+        type: 'performance-statement-count',
+        code: 'TOO_MANY_STATEMENTS',
+        message: replaceAll(messages.tooManyStatements, '{count}', statements.length),
+        value: statements.length,
+        threshold: thresholds.maxStatementsPerMigration
+      });
+    }
+
+    // 3. Check individual statement length
+    const longStatements = [];
+    for (let i = 0; i < statements.length; i++) {
+      const stmt = statements[i];
+      if (stmt.length > thresholds.maxQueryLength) {
+        longStatements.push({
+          index: i + 1,
+          length: stmt.length,
+          preview: stmt.substring(0, 100) + '...'
+        });
+      }
+    }
+    
+    if (longStatements.length > 0) {
+      metrics.longStatements = longStatements;
+      warnings.push({
+        type: 'performance-query-length',
+        code: 'QUERY_TOO_LONG',
+        message: replaceAll(messages.queryTooLong, '{length}', longStatements[0].length),
+        details: longStatements
+      });
+    }
+
+    // 4. Count CREATE INDEX statements
+    const indexMatches = sql.match(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+[`"]?(\w+)[`"]?\s+ON\s+[`"]?(\w+)[`"]?/gi) || [];
+    metrics.indexCount = indexMatches.length;
+
+    if (indexMatches.length > thresholds.maxIndexesPerMigration) {
+      warnings.push({
+        type: 'performance-index-count',
+        code: 'TOO_MANY_INDEXES',
+        message: replaceAll(messages.tooManyIndexes, '{count}', indexMatches.length),
+        value: indexMatches.length,
+        threshold: thresholds.maxIndexesPerMigration
+      });
+    }
+
+    // 5. Check for multiple indexes on same table
+    const indexesByTable = {};
+    const indexRegex = /CREATE\s+(?:UNIQUE\s+)?INDEX\s+[`"]?(\w+)[`"]?\s+ON\s+[`"]?(\w+)[`"]?/gi;
+    let indexMatch;
+    while ((indexMatch = indexRegex.exec(sql)) !== null) {
+      const tableName = indexMatch[2].toLowerCase();
+      if (!indexesByTable[tableName]) {
+        indexesByTable[tableName] = [];
+      }
+      indexesByTable[tableName].push(indexMatch[1]);
+    }
+
+    for (const [table, indexes] of Object.entries(indexesByTable)) {
+      if (indexes.length > 1) {
+        warnings.push({
+          type: 'performance-multiple-indexes-same-table',
+          code: 'MULTIPLE_INDEXES_SAME_TABLE',
+          message: replaceAll(messages.multipleIndexOnSameTable, '{table}', table),
+          table,
+          indexes
+        });
+      }
+    }
+
+    // 6. Count ALTER TABLE statements
+    const alterTableMatches = sql.match(/ALTER\s+TABLE\s+/gi) || [];
+    metrics.alterTableCount = alterTableMatches.length;
+
+    if (alterTableMatches.length > thresholds.maxAlterTablesPerMigration) {
+      warnings.push({
+        type: 'performance-alter-table-count',
+        code: 'TOO_MANY_ALTER_TABLES',
+        message: replaceAll(messages.tooManyAlterTables, '{count}', alterTableMatches.length),
+        value: alterTableMatches.length,
+        threshold: thresholds.maxAlterTablesPerMigration
+      });
+    }
+
+    // 7. Check for SELECT * (code smell in migrations, usually in triggers/procedures)
+    if (/SELECT\s+\*\s+FROM/i.test(sql)) {
+      warnings.push({
+        type: 'performance-select-star',
+        code: 'SELECT_STAR',
+        message: messages.selectStar
+      });
+    }
+
+    // 8. Count JOINs in queries
+    const joinCount = (sql.match(/\b(?:INNER|LEFT|RIGHT|FULL|CROSS)?\s*JOIN\s+/gi) || []).length;
+    metrics.joinCount = joinCount;
+    
+    if (joinCount > thresholds.maxJoinsPerQuery) {
+      warnings.push({
+        type: 'performance-too-many-joins',
+        code: 'TOO_MANY_JOINS',
+        message: replaceAll(messages.tooManyJoins, '{count}', joinCount),
+        value: joinCount,
+        threshold: thresholds.maxJoinsPerQuery
+      });
+    }
+
+    // 9. Count subqueries
+    const subqueryCount = (sql.match(/\(\s*SELECT\s+/gi) || []).length;
+    metrics.subqueryCount = subqueryCount;
+
+    if (subqueryCount > thresholds.maxSubqueries) {
+      warnings.push({
+        type: 'performance-too-many-subqueries',
+        code: 'TOO_MANY_SUBQUERIES',
+        message: replaceAll(messages.tooManySubqueries, '{count}', subqueryCount),
+        value: subqueryCount,
+        threshold: thresholds.maxSubqueries
+      });
+    }
+
+    // 10. Check for ORDER BY without LIMIT (potential performance issue)
+    // Simple approach: check if ORDER BY exists and LIMIT does not follow
+    const hasOrderBy = /\bORDER\s+BY\b/i.test(sql);
+    const hasLimit = /\bLIMIT\s+\d+/i.test(sql);
+    
+    if (hasOrderBy && !hasLimit) {
+      // Only warn if it's a SELECT statement (not CREATE TABLE, etc.)
+      if (/\bSELECT\b[\s\S]+\bORDER\s+BY\b/i.test(sql)) {
+        warnings.push({
+          type: 'performance-order-by-no-limit',
+          code: 'ORDER_BY_NO_LIMIT',
+          message: messages.orderByWithoutIndex
+        });
+      }
+    }
+
+    // 11. Check INSERT column count
+    const insertMatch = sql.match(/INSERT\s+INTO\s+[`"]?\w+[`"]?\s*\(([^)]+)\)/i);
+    if (insertMatch) {
+      const columns = insertMatch[1].split(',').length;
+      metrics.maxInsertColumns = columns;
+      
+      if (columns > thresholds.maxColumnsPerInsert) {
+        warnings.push({
+          type: 'performance-complex-insert',
+          code: 'COMPLEX_INSERT',
+          message: replaceAll(messages.complexInsert, '{count}', columns),
+          value: columns,
+          threshold: thresholds.maxColumnsPerInsert
+        });
+      }
+    }
+
+    return {
+      warnings,
+      metrics,
+      summary: {
+        totalWarnings: warnings.length,
+        hasCriticalPerformanceIssues: warnings.some(w => 
+          ['TOO_MANY_INDEXES', 'TOO_MANY_ALTER_TABLES', 'QUERY_TOO_LONG'].includes(w.code)
+        )
+      }
+    };
+  }
+
+  /**
+   * Split SQL content into individual statements
+   * @param {string} sql - SQL content
+   * @returns {string[]} - Array of statements
+   */
+  splitStatements(sql) {
+    if (!sql) return [];
+    
+    // Remove comments first
+    const cleanSQL = sql
+      .replace(/--.*$/gm, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '');
+    
+    // Split by semicolon, but be careful with strings
+    const statements = [];
+    let current = '';
+    let inString = false;
+    let stringChar = '';
+    
+    for (let i = 0; i < cleanSQL.length; i++) {
+      const char = cleanSQL[i];
+      const prevChar = cleanSQL[i - 1];
+      
+      // Handle string boundaries
+      if ((char === "'" || char === '"') && prevChar !== '\\') {
+        if (!inString) {
+          inString = true;
+          stringChar = char;
+        } else if (char === stringChar) {
+          inString = false;
+        }
+      }
+      
+      // Split on semicolon if not in string
+      if (char === ';' && !inString) {
+        const stmt = current.trim();
+        if (stmt) {
+          statements.push(stmt);
+        }
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    
+    // Add last statement if exists
+    const lastStmt = current.trim();
+    if (lastStmt) {
+      statements.push(lastStmt);
+    }
+    
+    return statements;
   }
 }
 

@@ -118,6 +118,46 @@ export class MongoDBAdapter extends BaseAdapter {
           { pattern: /\.deleteMany\s*\(/i, message: '⚠️ deleteMany may affect large amounts of data / 可能影響大量資料' },
           { pattern: /\.updateMany\s*\(/i, message: '⚠️ updateMany may affect large amounts of data / 可能影響大量資料' }
         ]
+      },
+
+      // ========================================
+      // 🟡 可疑名稱檢測 - 識別符包含危險關鍵字
+      // ========================================
+      suspiciousNames: {
+        keywords: [
+          'dropdatabase', 'drop_database', 'dropdb',
+          'deleteall', 'delete_all', 'removeall', 'remove_all',
+          'shutdown', 'createuser', 'create_user', 'dropuser', 'drop_user',
+          'grantrole', 'grant_role', 'revokerole', 'revoke_role'
+        ],
+        message: '⚠️ SUSPICIOUS NAME: Identifier contains dangerous keyword which may cause false positive/negative detection'
+      },
+
+      // ========================================
+      // 🔶 效能檢測 - Performance Checks
+      // ========================================
+      performance: {
+        thresholds: {
+          maxQueryLength: 5000,           // 單一語句超過 5000 字元視為過長
+          maxTotalLength: 50000,          // 整個 migration 超過 50000 字元視為過長
+          maxIndexesPerMigration: 5,      // 單一 migration 最多建立 5 個索引
+          maxBulkOpsPerMigration: 10,     // 單一 migration 最多 10 個 bulk 操作
+          maxStatementsPerMigration: 50,  // 單一 migration 最多 50 個語句
+          maxLookupStages: 3,             // 單一 aggregate 最多 3 個 $lookup
+          maxPipelineStages: 10           // 單一 aggregate 最多 10 個 pipeline stages
+        },
+        messages: {
+          migrationTooLong: '🔶 PERFORMANCE: Migration file is very long ({length} chars), consider splitting / Migration 檔案過長 ({length} 字元)，建議拆分',
+          tooManyIndexes: '🔶 PERFORMANCE: Creating {count} indexes in one migration may cause long lock time / 單次建立 {count} 個索引可能造成長時間鎖定',
+          tooManyBulkOps: '🔶 PERFORMANCE: {count} bulk operations in one migration may cause performance issues / 單次 {count} 個 bulk 操作可能影響效能',
+          tooManyStatements: '🔶 PERFORMANCE: {count} statements in one migration, consider splitting / 單次 {count} 個語句，建議拆分',
+          multipleIndexOnSameCollection: '🔶 PERFORMANCE: Multiple indexes on collection "{collection}" in same migration, consider combining / 同一 migration 對 "{collection}" 建立多個索引，建議合併',
+          tooManyLookups: '🔶 PERFORMANCE: Aggregate has {count} $lookup stages, may be slow / Aggregate 有 {count} 個 $lookup，可能很慢',
+          tooManyPipelineStages: '🔶 PERFORMANCE: Aggregate has {count} pipeline stages, consider simplifying / Aggregate 有 {count} 個 stages，建議簡化',
+          noIndexHint: '🔶 PERFORMANCE: Query without index hint on large collection may be slow / 大 Collection 的查詢沒有 index hint 可能很慢',
+          unboundedFind: '🔶 PERFORMANCE: find() without limit() may return too many documents / find() 沒有 limit() 可能返回過多文件',
+          sortWithoutIndex: '🔶 PERFORMANCE: sort() without proper index may cause in-memory sort / sort() 沒有適當索引可能造成記憶體排序'
+        }
       }
     };
   }
@@ -688,6 +728,18 @@ export async function down(db, client) {
       }
     }
 
+    // === 7. Check for suspicious identifier names ===
+    const suspiciousNames = this.checkSuspiciousNames(content);
+    for (const suspicious of suspiciousNames) {
+      warnings.push(suspicious);
+    }
+
+    // === 8. Check for performance issues ===
+    const performanceResult = this.checkPerformanceIssues(content, fileName);
+    for (const perfWarning of performanceResult.warnings) {
+      warnings.push(perfWarning);
+    }
+
     // Combine errors
     const allErrors = [...errors, ...forbiddenOps, ...dangerousOps];
 
@@ -697,11 +749,16 @@ export async function down(db, client) {
       warnings,
       forbiddenOps,
       dangerousOps,
+      suspiciousNames,
+      performanceIssues: performanceResult.warnings,
+      performanceMetrics: performanceResult.metrics,
       summary: {
         forbidden: forbiddenOps.length,
         dangerous: dangerousOps.length,
         warnings: warnings.length,
-        structural: errors.length
+        structural: errors.length,
+        suspiciousNames: suspiciousNames.length,
+        performanceIssues: performanceResult.warnings.length
       }
     };
   }
@@ -759,6 +816,7 @@ export async function down(db, client) {
 
   /**
    * Normalize JavaScript content for pattern matching
+   * - Remove string literals to avoid false positives from data values
    * - Remove single-line comments (// ...)
    * - Remove multi-line comments (/* ... *\/)
    * - Collapse multiple whitespace/newlines to single space
@@ -769,6 +827,12 @@ export async function down(db, client) {
   normalizeJS(js) {
     if (!js) return '';
     return js
+      // Remove template literals (backticks) - replace with placeholder
+      .replace(/`(?:[^`\\]|\\.)*`/g, "'__STRING__'")
+      // Remove string literals (single quotes) to avoid false positives
+      .replace(/'(?:[^'\\]|\\.)*'/g, "'__STRING__'")
+      // Remove string literals (double quotes)
+      .replace(/"(?:[^"\\]|\\.)*"/g, '"__STRING__"')
       // Remove single-line comments (but not URLs like http://)
       .replace(/(?<!:)\/\/.*$/gm, ' ')
       // Remove multi-line comments /* ... */
@@ -777,6 +841,221 @@ export async function down(db, client) {
       .replace(/\s+/g, ' ')
       // Trim
       .trim();
+  }
+
+  /**
+   * Extract identifiers (collection names, variable names) from JavaScript for suspicious name checking
+   * @param {string} js - JavaScript content
+   * @returns {string[]} - Array of identifiers found
+   */
+  extractIdentifiers(js) {
+    if (!js) return [];
+    const identifiers = [];
+    
+    // Match collection names: collection('name') or collection("name")
+    const collectionRegex = /\.collection\s*\(\s*['"]([^'"]+)['"]/g;
+    let match;
+    while ((match = collectionRegex.exec(js)) !== null) {
+      identifiers.push(match[1]);
+    }
+    
+    // Match createCollection('name')
+    const createCollRegex = /createCollection\s*\(\s*['"]([^'"]+)['"]/g;
+    while ((match = createCollRegex.exec(js)) !== null) {
+      identifiers.push(match[1]);
+    }
+    
+    // Match index names: createIndex({}, {name: 'indexName'})
+    const indexNameRegex = /name\s*:\s*['"]([^'"]+)['"]/g;
+    while ((match = indexNameRegex.exec(js)) !== null) {
+      identifiers.push(match[1]);
+    }
+    
+    // Match variable declarations: const varName = or let varName =
+    const varRegex = /(?:const|let|var)\s+(\w+)\s*=/g;
+    while ((match = varRegex.exec(js)) !== null) {
+      identifiers.push(match[1]);
+    }
+    
+    return [...new Set(identifiers)]; // Remove duplicates
+  }
+
+  /**
+   * Check for suspicious identifier names that may cause confusion
+   * @param {string} js - JavaScript content
+   * @returns {Object[]} - Array of warnings for suspicious names
+   */
+  checkSuspiciousNames(js) {
+    const rules = this.getValidationRules();
+    const warnings = [];
+    const identifiers = this.extractIdentifiers(js);
+    
+    for (const identifier of identifiers) {
+      const lowerName = identifier.toLowerCase().replace(/[_-]/g, '');
+      for (const keyword of rules.suspiciousNames.keywords) {
+        const normalizedKeyword = keyword.replace(/[_-]/g, '');
+        if (lowerName.includes(normalizedKeyword)) {
+          warnings.push({
+            type: 'suspicious-name',
+            identifier,
+            keyword,
+            message: `⚠️ SUSPICIOUS NAME: Identifier '${identifier}' contains keyword '${keyword}' - this may cause false positive/negative detection / 識別符包含危險關鍵字，可能導致誤判`
+          });
+        }
+      }
+    }
+    
+    return warnings;
+  }
+
+  /**
+   * Check for performance issues in JavaScript migration content
+   * @param {string} js - JavaScript content  
+   * @param {string} fileName - File name for context
+   * @returns {Object} - Performance analysis result
+   */
+  checkPerformanceIssues(js, fileName = '') {
+    const rules = this.getValidationRules();
+    const thresholds = rules.performance.thresholds;
+    const messages = rules.performance.messages;
+    const warnings = [];
+    const metrics = {};
+
+    if (!js) {
+      return { warnings, metrics };
+    }
+
+    // Helper to replace all occurrences
+    const replaceAll = (str, search, replacement) => str.split(search).join(replacement);
+
+    // 1. Check total migration length
+    metrics.totalLength = js.length;
+    if (js.length > thresholds.maxTotalLength) {
+      warnings.push({
+        type: 'performance-migration-length',
+        code: 'MIGRATION_TOO_LONG',
+        message: replaceAll(messages.migrationTooLong, '{length}', js.length),
+        value: js.length,
+        threshold: thresholds.maxTotalLength
+      });
+    }
+
+    // 2. Count createIndex operations
+    const indexMatches = js.match(/\.createIndex\s*\(/g) || [];
+    metrics.indexCount = indexMatches.length;
+
+    if (indexMatches.length > thresholds.maxIndexesPerMigration) {
+      warnings.push({
+        type: 'performance-index-count',
+        code: 'TOO_MANY_INDEXES',
+        message: replaceAll(messages.tooManyIndexes, '{count}', indexMatches.length),
+        value: indexMatches.length,
+        threshold: thresholds.maxIndexesPerMigration
+      });
+    }
+
+    // 3. Check for multiple indexes on same collection
+    const indexesByCollection = {};
+    const indexRegex = /\.collection\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.\s*createIndex/g;
+    let indexMatch;
+    while ((indexMatch = indexRegex.exec(js)) !== null) {
+      const collName = indexMatch[1];
+      if (!indexesByCollection[collName]) {
+        indexesByCollection[collName] = 0;
+      }
+      indexesByCollection[collName]++;
+    }
+
+    for (const [collection, count] of Object.entries(indexesByCollection)) {
+      if (count > 1) {
+        warnings.push({
+          type: 'performance-multiple-indexes-same-collection',
+          code: 'MULTIPLE_INDEXES_SAME_COLLECTION',
+          message: replaceAll(messages.multipleIndexOnSameCollection, '{collection}', collection),
+          collection,
+          count
+        });
+      }
+    }
+
+    // 4. Count bulk operations (insertMany, updateMany, deleteMany, bulkWrite)
+    const bulkOps = (js.match(/\.(insertMany|updateMany|deleteMany|bulkWrite)\s*\(/g) || []).length;
+    metrics.bulkOpsCount = bulkOps;
+
+    if (bulkOps > thresholds.maxBulkOpsPerMigration) {
+      warnings.push({
+        type: 'performance-bulk-ops-count',
+        code: 'TOO_MANY_BULK_OPS',
+        message: replaceAll(messages.tooManyBulkOps, '{count}', bulkOps),
+        value: bulkOps,
+        threshold: thresholds.maxBulkOpsPerMigration
+      });
+    }
+
+    // 5. Count $lookup stages in aggregates
+    const lookupCount = (js.match(/\$lookup\s*:/g) || []).length;
+    metrics.lookupCount = lookupCount;
+
+    if (lookupCount > thresholds.maxLookupStages) {
+      warnings.push({
+        type: 'performance-too-many-lookups',
+        code: 'TOO_MANY_LOOKUPS',
+        message: replaceAll(messages.tooManyLookups, '{count}', lookupCount),
+        value: lookupCount,
+        threshold: thresholds.maxLookupStages
+      });
+    }
+
+    // 6. Check for find() without limit()
+    // Match: .find(...) not followed by .limit(
+    if (/\.find\s*\([^)]*\)(?!\s*\.\s*limit)/i.test(js)) {
+      // Exclude cases where toArray() or forEach is used with reasonable patterns
+      if (!/\.find\s*\([^)]*\)\s*\.\s*(?:limit|count|countDocuments)/i.test(js)) {
+        warnings.push({
+          type: 'performance-unbounded-find',
+          code: 'UNBOUNDED_FIND',
+          message: messages.unboundedFind
+        });
+      }
+    }
+
+    // 7. Check for sort() without limit() (potential memory issues)
+    if (/\.sort\s*\([^)]*\)(?!\s*\.\s*limit)/i.test(js)) {
+      warnings.push({
+        type: 'performance-sort-without-limit',
+        code: 'SORT_WITHOUT_LIMIT',
+        message: messages.sortWithoutIndex
+      });
+    }
+
+    // 8. Count aggregate pipeline complexity
+    const aggregateMatches = js.match(/\.aggregate\s*\(\s*\[/g) || [];
+    metrics.aggregateCount = aggregateMatches.length;
+
+    // Count total pipeline stages (rough estimate by counting $stage patterns)
+    const pipelineStages = (js.match(/\$(?:match|project|group|sort|limit|skip|unwind|lookup|addFields|set|replaceRoot|merge|out|facet)\s*:/g) || []).length;
+    metrics.pipelineStagesCount = pipelineStages;
+
+    if (pipelineStages > thresholds.maxPipelineStages) {
+      warnings.push({
+        type: 'performance-complex-aggregate',
+        code: 'COMPLEX_AGGREGATE',
+        message: replaceAll(messages.tooManyPipelineStages, '{count}', pipelineStages),
+        value: pipelineStages,
+        threshold: thresholds.maxPipelineStages
+      });
+    }
+
+    return {
+      warnings,
+      metrics,
+      summary: {
+        totalWarnings: warnings.length,
+        hasCriticalPerformanceIssues: warnings.some(w => 
+          ['TOO_MANY_INDEXES', 'TOO_MANY_BULK_OPS', 'MIGRATION_TOO_LONG'].includes(w.code)
+        )
+      }
+    };
   }
 }
 

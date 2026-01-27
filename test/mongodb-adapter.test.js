@@ -173,4 +173,356 @@ describe('MongoDBAdapter', () => {
       expect(migration.down).not.toHaveBeenCalled();
     });
   });
+
+  // =========================================
+  // String Literal False Positive Prevention Tests
+  // 字串常量誤判防護測試
+  // =========================================
+  describe('normalizeJS - String Literal Protection', () => {
+    it('should replace single-quoted strings with placeholder', () => {
+      const js = "const msg = 'dropDatabase is dangerous';";
+      const normalized = adapter.normalizeJS(js);
+      expect(normalized).toBe("const msg = '__STRING__';");
+      expect(normalized).not.toContain('dropDatabase');
+    });
+
+    it('should replace double-quoted strings with placeholder', () => {
+      const js = 'const msg = "dropDatabase is dangerous";';
+      const normalized = adapter.normalizeJS(js);
+      expect(normalized).toBe('const msg = "__STRING__";');
+      expect(normalized).not.toContain('dropDatabase');
+    });
+
+    it('should replace template literals with placeholder', () => {
+      const js = 'const msg = `dropDatabase is ${action}`;';
+      const normalized = adapter.normalizeJS(js);
+      expect(normalized).toBe("const msg = '__STRING__';");
+      expect(normalized).not.toContain('dropDatabase');
+    });
+
+    it('should not trigger dangerous detection on string values', () => {
+      // Log message contains dangerous keyword, but it's just a string value
+      const js = `
+        export const up = async (db) => {
+          console.log('Warning: dropDatabase is forbidden');
+          await db.collection('audit_log').insertOne({
+            action: "User tried to dropDatabase",
+            timestamp: new Date()
+          });
+        };
+      `;
+      
+      const result = adapter.validateContent(js, 'test.js');
+      // Should not have forbidden errors related to DROP_DATABASE
+      const dropErrors = result.forbiddenOps.filter(e => e.code === 'DROP_DATABASE');
+      expect(dropErrors.length).toBe(0);
+    });
+
+    it('should still detect actual dangerous operations', () => {
+      const js = `
+        export const up = async (db) => {
+          await db.dropDatabase();
+        };
+      `;
+      
+      const result = adapter.validateContent(js, 'test.js');
+      const dropErrors = result.forbiddenOps.filter(e => e.code === 'DROP_DATABASE');
+      expect(dropErrors.length).toBe(1);
+    });
+
+    it('should handle escaped quotes in strings', () => {
+      const js = "const msg = 'It\\'s dropDatabase';";
+      const normalized = adapter.normalizeJS(js);
+      expect(normalized).toBe("const msg = '__STRING__';");
+      expect(normalized).not.toContain('dropDatabase');
+    });
+
+    it('should preserve code structure while removing string content', () => {
+      const js = `
+        const a = 'dropDatabase';
+        const b = actualDropDatabase();
+        const c = "another dropDatabase message";
+      `;
+      const normalized = adapter.normalizeJS(js);
+      expect(normalized).toContain('actualDropDatabase');
+      expect(normalized).toContain("'__STRING__'");
+      expect(normalized).toContain('"__STRING__"');
+    });
+  });
+
+  // =========================================
+  // Identifier Extraction Tests  
+  // 識別符提取測試
+  // =========================================
+  describe('extractIdentifiers', () => {
+    it('should extract collection names from collection() calls', () => {
+      const js = `
+        db.collection('users').find();
+        db.collection("orders").insertOne({});
+      `;
+      const ids = adapter.extractIdentifiers(js);
+      expect(ids).toContain('users');
+      expect(ids).toContain('orders');
+    });
+
+    it('should extract collection names from createCollection()', () => {
+      const js = `
+        await db.createCollection('products');
+        await db.createCollection("categories");
+      `;
+      const ids = adapter.extractIdentifiers(js);
+      expect(ids).toContain('products');
+      expect(ids).toContain('categories');
+    });
+
+    it('should extract index names', () => {
+      const js = `
+        await db.collection('users').createIndex({ email: 1 }, { name: 'idx_email' });
+        await db.collection('orders').createIndex({ date: -1 }, { name: "idx_date" });
+      `;
+      const ids = adapter.extractIdentifiers(js);
+      expect(ids).toContain('idx_email');
+      expect(ids).toContain('idx_date');
+    });
+
+    it('should extract variable names', () => {
+      const js = `
+        const dropDatabaseHelper = () => {};
+        let removeAllUsers = async () => {};
+        var deleteAllData = function() {};
+      `;
+      const ids = adapter.extractIdentifiers(js);
+      expect(ids).toContain('dropDatabaseHelper');
+      expect(ids).toContain('removeAllUsers');
+      expect(ids).toContain('deleteAllData');
+    });
+
+    it('should remove duplicate identifiers', () => {
+      const js = `
+        db.collection('users').find();
+        db.collection('users').insertOne({});
+      `;
+      const ids = adapter.extractIdentifiers(js);
+      const usersCount = ids.filter(id => id === 'users').length;
+      expect(usersCount).toBe(1);
+    });
+  });
+
+  // =========================================
+  // Suspicious Name Detection Tests
+  // 可疑名稱檢測測試
+  // =========================================
+  describe('checkSuspiciousNames', () => {
+    it('should detect suspicious collection names', () => {
+      const js = `
+        await db.createCollection('drop_database_log');
+      `;
+      const warnings = adapter.checkSuspiciousNames(js);
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(warnings[0].identifier).toBe('drop_database_log');
+    });
+
+    it('should detect suspicious variable names', () => {
+      const js = `
+        const dropDatabaseHelper = () => {};
+      `;
+      const warnings = adapter.checkSuspiciousNames(js);
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(warnings.some(w => w.identifier === 'dropDatabaseHelper')).toBe(true);
+    });
+
+    it('should detect suspicious index names', () => {
+      const js = `
+        await db.collection('users').createIndex({ email: 1 }, { name: 'idx_shutdown_status' });
+      `;
+      const warnings = adapter.checkSuspiciousNames(js);
+      expect(warnings.some(w => w.identifier === 'idx_shutdown_status')).toBe(true);
+    });
+
+    it('should not flag normal identifiers', () => {
+      const js = `
+        const helper = () => {};
+        await db.createCollection('users');
+        await db.collection('orders').createIndex({ date: 1 }, { name: 'idx_date' });
+      `;
+      const warnings = adapter.checkSuspiciousNames(js);
+      expect(warnings.length).toBe(0);
+    });
+
+    it('should detect multiple suspicious names', () => {
+      const js = `
+        await db.createCollection('deleteall_logs');
+        const dropDatabaseUtil = () => {};
+        const removeAllHelper = async () => {};
+      `;
+      const warnings = adapter.checkSuspiciousNames(js);
+      // Each identifier may match multiple keywords
+      // 'deleteall_logs' matches 'deleteall', 'deleteall_logs' matches 'delete_all' (normalized)
+      // 'dropDatabaseUtil' matches 'dropdatabase', 'drop_database'
+      // 'removeAllHelper' matches 'removeall', 'remove_all'
+      expect(warnings.length).toBeGreaterThanOrEqual(3);
+      const identifiers = warnings.map(w => w.identifier);
+      expect(identifiers).toContain('deleteall_logs');
+      expect(identifiers).toContain('dropDatabaseUtil');
+      expect(identifiers).toContain('removeAllHelper');
+    });
+
+    it('should include suspicious names in validateContent result', () => {
+      const js = `
+        export const up = async (db) => {
+          await db.createCollection('drop_database_backup');
+        };
+        export const down = async (db) => {
+          await db.collection('drop_database_backup').drop();
+        };
+      `;
+      const result = adapter.validateContent(js, 'test.js');
+      expect(result.suspiciousNames).toBeDefined();
+      expect(result.suspiciousNames.length).toBeGreaterThan(0);
+      expect(result.summary.suspiciousNames).toBeGreaterThan(0);
+    });
+  });
+
+  // =========================================
+  // Performance Issue Detection Tests
+  // 效能問題檢測測試
+  // =========================================
+  describe('checkPerformanceIssues', () => {
+    it('should detect too many indexes in one migration', () => {
+      const js = `
+        await db.collection('a').createIndex({ f1: 1 });
+        await db.collection('b').createIndex({ f2: 1 });
+        await db.collection('c').createIndex({ f3: 1 });
+        await db.collection('d').createIndex({ f4: 1 });
+        await db.collection('e').createIndex({ f5: 1 });
+        await db.collection('f').createIndex({ f6: 1 });
+      `;
+      const result = adapter.checkPerformanceIssues(js);
+      const tooManyIndexes = result.warnings.find(w => w.code === 'TOO_MANY_INDEXES');
+      expect(tooManyIndexes).toBeDefined();
+      expect(result.metrics.indexCount).toBe(6);
+    });
+
+    it('should detect multiple indexes on same collection', () => {
+      const js = `
+        await db.collection('users').createIndex({ email: 1 });
+        await db.collection('users').createIndex({ name: 1 });
+        await db.collection('users').createIndex({ createdAt: -1 });
+      `;
+      const result = adapter.checkPerformanceIssues(js);
+      const multipleIndexes = result.warnings.find(w => w.code === 'MULTIPLE_INDEXES_SAME_COLLECTION');
+      expect(multipleIndexes).toBeDefined();
+      expect(multipleIndexes.collection).toBe('users');
+    });
+
+    it('should detect too many bulk operations', () => {
+      const js = `
+        await db.collection('a').insertMany([]);
+        await db.collection('b').updateMany({}, {});
+        await db.collection('c').deleteMany({});
+        await db.collection('d').bulkWrite([]);
+        await db.collection('e').insertMany([]);
+        await db.collection('f').updateMany({}, {});
+        await db.collection('g').deleteMany({});
+        await db.collection('h').bulkWrite([]);
+        await db.collection('i').insertMany([]);
+        await db.collection('j').updateMany({}, {});
+        await db.collection('k').deleteMany({});
+      `;
+      const result = adapter.checkPerformanceIssues(js);
+      const tooManyBulkOps = result.warnings.find(w => w.code === 'TOO_MANY_BULK_OPS');
+      expect(tooManyBulkOps).toBeDefined();
+      expect(result.metrics.bulkOpsCount).toBe(11);
+    });
+
+    it('should detect too many $lookup stages', () => {
+      const js = `
+        await db.collection('orders').aggregate([
+          { $lookup: { from: 'users', localField: 'userId', foreignField: '_id', as: 'user' } },
+          { $lookup: { from: 'products', localField: 'productId', foreignField: '_id', as: 'product' } },
+          { $lookup: { from: 'shipping', localField: 'shippingId', foreignField: '_id', as: 'shipping' } },
+          { $lookup: { from: 'payments', localField: 'paymentId', foreignField: '_id', as: 'payment' } }
+        ]);
+      `;
+      const result = adapter.checkPerformanceIssues(js);
+      const tooManyLookups = result.warnings.find(w => w.code === 'TOO_MANY_LOOKUPS');
+      expect(tooManyLookups).toBeDefined();
+      expect(result.metrics.lookupCount).toBe(4);
+    });
+
+    it('should detect complex aggregate pipelines', () => {
+      const js = `
+        await db.collection('orders').aggregate([
+          { $match: { status: 'active' } },
+          { $project: { _id: 1, total: 1 } },
+          { $group: { _id: '$category', total: { $sum: '$total' } } },
+          { $sort: { total: -1 } },
+          { $limit: 10 },
+          { $skip: 0 },
+          { $unwind: '$items' },
+          { $lookup: { from: 'users', localField: 'userId', foreignField: '_id', as: 'user' } },
+          { $addFields: { fullName: { $concat: ['$firstName', ' ', '$lastName'] } } },
+          { $set: { processed: true } },
+          { $replaceRoot: { newRoot: '$data' } }
+        ]);
+      `;
+      const result = adapter.checkPerformanceIssues(js);
+      const complexPipeline = result.warnings.find(w => w.code === 'COMPLEX_AGGREGATE');
+      expect(complexPipeline).toBeDefined();
+      expect(result.metrics.pipelineStagesCount).toBeGreaterThan(10);
+    });
+
+    it('should detect migration file too long', () => {
+      // Generate a very long migration
+      const longCode = 'a'.repeat(51000);
+      const result = adapter.checkPerformanceIssues(longCode);
+      const tooLong = result.warnings.find(w => w.code === 'MIGRATION_TOO_LONG');
+      expect(tooLong).toBeDefined();
+      expect(result.metrics.totalLength).toBeGreaterThan(50000);
+    });
+
+    it('should not warn when within limits', () => {
+      const js = `
+        await db.collection('users').createIndex({ email: 1 });
+        await db.collection('orders').insertMany([]);
+      `;
+      const result = adapter.checkPerformanceIssues(js);
+      expect(result.warnings.length).toBe(0);
+    });
+
+    it('should include performance issues in validateContent result', () => {
+      const js = `
+        export const up = async (db) => {
+          await db.collection('a').createIndex({ f1: 1 });
+          await db.collection('b').createIndex({ f2: 1 });
+          await db.collection('c').createIndex({ f3: 1 });
+          await db.collection('d').createIndex({ f4: 1 });
+          await db.collection('e').createIndex({ f5: 1 });
+          await db.collection('f').createIndex({ f6: 1 });
+        };
+        export const down = async (db) => {};
+      `;
+      const result = adapter.validateContent(js, 'test.js');
+      expect(result.performanceIssues).toBeDefined();
+      expect(result.performanceIssues.length).toBeGreaterThan(0);
+      expect(result.performanceMetrics).toBeDefined();
+      expect(result.performanceMetrics.indexCount).toBe(6);
+      expect(result.summary.performanceIssues).toBeGreaterThan(0);
+    });
+
+    it('should provide performance summary', () => {
+      const js = `
+        await db.collection('a').createIndex({ f1: 1 });
+        await db.collection('b').createIndex({ f2: 1 });
+        await db.collection('c').createIndex({ f3: 1 });
+        await db.collection('d').createIndex({ f4: 1 });
+        await db.collection('e').createIndex({ f5: 1 });
+        await db.collection('f').createIndex({ f6: 1 });
+      `;
+      const result = adapter.checkPerformanceIssues(js);
+      expect(result.summary).toBeDefined();
+      expect(result.summary.totalWarnings).toBeGreaterThan(0);
+      expect(result.summary.hasCriticalPerformanceIssues).toBe(true);
+    });
+  });
 });
