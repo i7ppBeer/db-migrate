@@ -84,54 +84,86 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. Migration 檔案結構詳解
+## 3. 檔案結構詳解
 
 ### 3.1 完整檔案結構圖
 
+#### MariaDB Migration 檔案結構
+
+**📄 ANNOTATION 區塊** *(可選)*
+> 檔案開頭的 metadata 設定
+
+```sql
+-- @description: 說明這個 migration 的用途
+-- @allow-dangerous: true
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     MariaDB Migration 檔案結構                               │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ ANNOTATION 區塊 (可選)                                               │   │
-│  │ -- @description: 說明這個 migration 的用途                           │   │
-│  │ -- @allow-dangerous: true                                           │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ -- +migrate Up          ← 🔵 UP 區塊開始標記 (必要)                  │   │
-│  │ │                                                                    │   │
-│  │ │  ┌─────────────────────────────────────────────────────────┐      │   │
-│  │ │  │ -- +sanity PreCheck   ← 🟡 前置檢查開始 (可選)           │      │   │
-│  │ │  │ -- EXPECT_NO_ROWS: SELECT 1 FROM ... WHERE ...          │      │   │
-│  │ │  │ -- EXPECT_ROWS: SELECT 1 FROM ... WHERE ...             │      │   │
-│  │ │  │ -- -sanity PreCheck   ← 🟡 前置檢查結束                  │      │   │
-│  │ │  └─────────────────────────────────────────────────────────┘      │   │
-│  │ │                                                                    │   │
-│  │ │  ┌─────────────────────────────────────────────────────────┐      │   │
-│  │ │  │ 🟢 主要 SQL 語句                                         │      │   │
-│  │ │  │ ALTER TABLE users ADD COLUMN phone VARCHAR(20);         │      │   │
-│  │ │  │ CREATE INDEX idx_phone ON users(phone);                 │      │   │
-│  │ │  └─────────────────────────────────────────────────────────┘      │   │
-│  │ │                                                                    │   │
-│  │ │  ┌─────────────────────────────────────────────────────────┐      │   │
-│  │ │  │ -- +sanity PostCheck  ← 🟡 後置檢查開始 (可選)           │      │   │
-│  │ │  │ -- EXPECT_ROWS: SELECT 1 FROM information_schema...     │      │   │
-│  │ │  │ -- -sanity PostCheck  ← 🟡 後置檢查結束                  │      │   │
-│  │ │  └─────────────────────────────────────────────────────────┘      │   │
-│  │ │                                                                    │   │
-│  └─┴────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ -- +migrate Down        ← 🔴 DOWN 區塊開始標記 (建議有)              │   │
-│  │ │                                                                    │   │
-│  │ │  DROP INDEX idx_phone ON users;                                   │   │
-│  │ │  ALTER TABLE users DROP COLUMN phone;                             │   │
-│  │ │                                                                    │   │
-│  └─┴────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+
+---
+
+**🔵 UP 區塊** *(必要)*
+> 標記：`-- +migrate Up`
+
+包含以下子區塊：
+
+| 區塊 | 標記 | 必要性 | 說明 |
+|------|------|--------|------|
+| 🟡 **PreCheck** | `-- +sanity PreCheck` ... `-- -sanity PreCheck` | 可選 | 執行前的狀態檢查 |
+| 🟢 **主要 SQL** | 無標記 | 必要 | 實際要執行的 DDL 語句 |
+| 🟡 **PostCheck** | `-- +sanity PostCheck` ... `-- -sanity PostCheck` | 可選 | 執行後的結果驗證 |
+
+**PreCheck 範例：**
+```sql
+-- +sanity PreCheck
+-- EXPECT_NO_ROWS: SELECT 1 FROM ... WHERE ...
+-- EXPECT_ROWS: SELECT 1 FROM ... WHERE ...
+-- -sanity PreCheck
+```
+
+**主要 SQL 範例：**
+```sql
+ALTER TABLE users ADD COLUMN phone VARCHAR(20);
+CREATE INDEX idx_phone ON users(phone);
+```
+
+**PostCheck 範例：**
+```sql
+-- +sanity PostCheck
+-- EXPECT_ROWS: SELECT 1 FROM information_schema...
+-- -sanity PostCheck
+```
+
+---
+
+**🔴 DOWN 區塊** *(建議有)*
+> 標記：`-- +migrate Down`
+
+```sql
+DROP INDEX idx_phone ON users;
+ALTER TABLE users DROP COLUMN phone;
+```
+
+---
+
+#### 完整範例結構
+
+```sql
+-- @description: ...        -- ANNOTATION 區塊
+-- @allow-dangerous: true
+
+-- +migrate Up              -- UP 區塊開始
+
+-- +sanity PreCheck         -- PreCheck 開始
+-- EXPECT_NO_ROWS: ...
+-- -sanity PreCheck         -- PreCheck 結束
+
+ALTER TABLE ...             -- 主要 SQL
+
+-- +sanity PostCheck        -- PostCheck 開始
+-- EXPECT_ROWS: ...
+-- -sanity PostCheck        -- PostCheck 結束
+
+-- +migrate Down            -- DOWN 區塊開始
+DROP TABLE ...
 ```
 
 ### 3.2 各區塊說明
@@ -145,54 +177,9 @@ FLUSH PRIVILEGES;
 
 ### 3.3 執行流程
 
-```
-                        migrate up 命令
-                              │
-                              ▼
-                    ┌─────────────────┐
-                    │   解析 Up 區塊   │
-                    └────────┬────────┘
-                             │
-              ┌──────────────┴──────────────┐
-              ▼                              │
-     ┌─────────────────┐                     │
-     │ 有 PreCheck?    │                     │
-     └────────┬────────┘                     │
-              │                              │
-         是   │   否                         │
-              ▼                              │
-     ┌─────────────────┐                     │
-     │ 執行 PreCheck   │                     │
-     │ (EXPECT_ROWS/   │                     │
-     │  EXPECT_NO_ROWS)│                     │
-     └────────┬────────┘                     │
-              │                              │
-         通過 │   失敗                        │
-              │     └──────▶ ❌ 停止，不執行 Up │
-              ▼                              │
-     ┌─────────────────┐◀────────────────────┘
-     │ 執行主要 SQL    │
-     │ (ALTER, CREATE) │
-     └────────┬────────┘
-              │
-              ▼
-     ┌─────────────────┐
-     │ 有 PostCheck?   │
-     └────────┬────────┘
-              │
-         是   │   否
-              ▼     └──────────────────────┐
-     ┌─────────────────┐                   │
-     │ 執行 PostCheck  │                   │
-     └────────┬────────┘                   │
-              │                            │
-         通過 │   失敗                      │
-              │     └──▶ 🔄 自動執行 Down 回滾│
-              ▼                            │
-     ┌─────────────────┐◀──────────────────┘
-     │    ✅ 完成      │
-     └─────────────────┘
-```
+![MariaDB 執行流程](images/mariadb-execution-flow.drawio.svg)
+
+> 💡 **提示**：此圖表可使用 VS Code 的 [Draw.io Integration](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio) 擴充套件直接編輯。
 
 ### 3.4 基本範例 (只有 Up/Down)
 

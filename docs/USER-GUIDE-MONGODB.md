@@ -112,51 +112,90 @@ export async function down(db, client) {
 
 ### 3.1 完整檔案結構圖
 
+#### MongoDB Migration 檔案結構 (.js)
+
+**📄 ANNOTATION 區塊** *(可選)*
+> 使用 `//` 註解的 metadata 設定
+
+```javascript
+// @description: 說明這個 migration 的用途
+// @allow-dangerous: true
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     MongoDB Migration 檔案結構 (.js)                         │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ ANNOTATION 區塊 (可選) - 使用 // 註解                                │   │
-│  │ // @description: 說明這個 migration 的用途                           │   │
-│  │ // @allow-dangerous: true                                           │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ export async function up(db, client) {    ← 🔵 UP 函數 (必要)        │   │
-│  │ │                                                                    │   │
-│  │ │  ┌─────────────────────────────────────────────────────────┐      │   │
-│  │ │  │ // ══ PreCheck ══                  ← 🟡 前置檢查 (可選)  │      │   │
-│  │ │  │ const exists = await db.listCollections({name}).toArray()│      │   │
-│  │ │  │ if (exists.length === 0) throw new Error('PreCheck failed')    │   │
-│  │ │  └─────────────────────────────────────────────────────────┘      │   │
-│  │ │                                                                    │   │
-│  │ │  ┌─────────────────────────────────────────────────────────┐      │   │
-│  │ │  │ // ══ Main Migration ══            ← 🟢 主要邏輯        │      │   │
-│  │ │  │ await db.collection('users').createIndex({email: 1})    │      │   │
-│  │ │  │ await db.collection('users').updateMany(...)            │      │   │
-│  │ │  └─────────────────────────────────────────────────────────┘      │   │
-│  │ │                                                                    │   │
-│  │ │  ┌─────────────────────────────────────────────────────────┐      │   │
-│  │ │  │ // ══ PostCheck ══                 ← 🟡 後置檢查 (可選)  │      │   │
-│  │ │  │ const indexes = await db.collection('users').indexes()  │      │   │
-│  │ │  │ if (!indexes.find(i => i.name === 'idx')) throw Error() │      │   │
-│  │ │  └─────────────────────────────────────────────────────────┘      │   │
-│  │ │                                                                    │   │
-│  │ }                                                                    │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ export async function down(db, client) {  ← 🔴 DOWN 函數 (建議有)    │   │
-│  │ │                                                                    │   │
-│  │ │  await db.collection('users').dropIndex('idx_email')              │   │
-│  │ │  await db.collection('users').drop()                              │   │
-│  │ │                                                                    │   │
-│  │ }                                                                    │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+
+---
+
+**🔵 UP 函數** *(必要)*
+> `export async function up(db, client) { ... }`
+
+包含以下子區塊：
+
+| 區塊 | 寫法 | 必要性 | 說明 |
+|------|------|--------|------|
+| 🟡 **PreCheck** | `// ══ PreCheck ══` + throw Error | 可選 | 執行前的狀態檢查 |
+| 🟢 **主要邏輯** | `// ══ Main Migration ══` | 必要 | 實際要執行的 DDL 操作 |
+| 🟡 **PostCheck** | `// ══ PostCheck ══` + throw Error | 可選 | 執行後的結果驗證 |
+
+**PreCheck 範例：**
+```javascript
+// ══ PreCheck ══
+const exists = await db.listCollections({name: 'users'}).toArray();
+if (exists.length === 0) throw new Error('PreCheck failed: users collection not found');
+```
+
+**主要邏輯範例：**
+```javascript
+// ══ Main Migration ══
+await db.collection('users').createIndex({email: 1});
+await db.collection('users').updateMany(...);
+```
+
+**PostCheck 範例：**
+```javascript
+// ══ PostCheck ══
+const indexes = await db.collection('users').indexes();
+if (!indexes.find(i => i.name === 'idx_email')) {
+  throw new Error('PostCheck failed: index not created');
+}
+```
+
+---
+
+**🔴 DOWN 函數** *(建議有)*
+> `export async function down(db, client) { ... }`
+
+```javascript
+await db.collection('users').dropIndex('idx_email');
+await db.collection('users').drop();
+```
+
+---
+
+#### 完整範例結構
+
+```javascript
+// @description: ...              // ANNOTATION 區塊
+// @allow-dangerous: true
+
+export async function up(db, client) {   // UP 函數開始
+  
+  // ══ PreCheck ══               // PreCheck 開始
+  const exists = await db.listCollections({name: 'users'}).toArray();
+  if (exists.length === 0) throw new Error('PreCheck failed');
+  
+  // ══ Main Migration ══         // 主要邏輯
+  await db.createCollection('orders');
+  await db.collection('orders').createIndex({userId: 1});
+  
+  // ══ PostCheck ══              // PostCheck 開始
+  const indexes = await db.collection('orders').indexes();
+  if (!indexes.find(i => i.name === 'userId_1')) {
+    throw new Error('PostCheck failed');
+  }
+}
+
+export async function down(db, client) { // DOWN 函數開始
+  await db.collection('orders').drop();
+}
 ```
 
 ### 3.2 各區塊說明
@@ -170,50 +209,9 @@ export async function down(db, client) {
 
 ### 3.3 執行流程
 
-```
-                        migrate up 命令
-                              │
-                              ▼
-                    ┌─────────────────┐
-                    │  載入 .js 檔案   │
-                    └────────┬────────┘
-                             │
-                             ▼
-                    ┌─────────────────┐
-                    │   執行 up()     │
-                    └────────┬────────┘
-                             │
-              ┌──────────────┴──────────────┐
-              ▼                              │
-     ┌─────────────────┐                     │
-     │ PreCheck 程式碼  │                     │
-     │ (throw Error    │                     │
-     │  if failed)     │                     │
-     └────────┬────────┘                     │
-              │                              │
-         通過 │   失敗 (throw)               │
-              │     └──────▶ ❌ 停止，up() 中斷│
-              ▼                              │
-     ┌─────────────────┐◀────────────────────┘
-     │ 執行主要邏輯    │
-     │ (createIndex,   │
-     │  updateMany...) │
-     └────────┬────────┘
-              │
-              ▼
-     ┌─────────────────┐
-     │ PostCheck 程式碼 │
-     │ (throw Error    │
-     │  if failed)     │
-     └────────┬────────┘
-              │
-         通過 │   失敗 (throw)
-              │     └──▶ 🔄 可手動執行 down() 回滾
-              ▼
-     ┌─────────────────┐
-     │    ✅ 完成      │
-     └─────────────────┘
-```
+![MongoDB 執行流程](images/mongodb-execution-flow.drawio.svg)
+
+> 💡 **提示**：此圖表可使用 VS Code 的 [Draw.io Integration](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio) 擴充套件直接編輯。
 
 ### 3.4 基本範例 (只有 up/down)
 
