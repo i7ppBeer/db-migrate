@@ -343,8 +343,9 @@ FLUSH PRIVILEGES;
 | `RENAME_TABLE` | `RENAME TABLE xxx` | 破壞應用程式 | 確認所有引用已更新 |
 | `MODIFY_COLUMN` | `MODIFY COLUMN xxx` | 資料轉換失敗 | 先在測試環境驗證 |
 | `LOCK_TABLE` | `LOCK TABLE xxx` | 阻塞所有查詢 | 使用交易或行鎖 |
-| `ALTER_TABLE_BLOCKING` | `ALTER TABLE` (無 ALGORITHM) | 長時間鎖表 | 用 ALGORITHM=INPLACE |
-| `INSERT_SELECT` | `INSERT ... SELECT` | 鎖定來源表 | 分批處理 |
+| `ALTER_TABLE_MODIFY` | `ALTER TABLE MODIFY/CHANGE COLUMN` | 重建表並長時間鎖表 | 先在測試環境驗證 |
+| `ALTER_TABLE_REBUILD` | `ALTER TABLE CONVERT TO / ENGINE=` | 完整重建表 | 大表用 pt-osc |
+| `INSERT_SELECT` | `INSERT ... SELECT` (無 WHERE / 無 ON DUPLICATE KEY) | 鎖定整張來源表 | 加 WHERE 或分批處理 |
 
 ### 🟡 警告提示 (Warnings) - 不阻擋但提醒
 

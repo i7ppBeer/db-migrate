@@ -83,15 +83,14 @@ export class MariaDBAdapter extends BaseAdapter {
         ],
         blocking: [
           { pattern: /LOCK\s+TABLE/i, code: 'LOCK_TABLE', message: '🟠 BLOCKING: LOCK TABLE will block all queries / 會阻塞所有查詢', suggestion: 'Consider using transaction isolation level or row locks / 考慮使用交易隔離等級或行鎖' },
-          { pattern: /ALTER\s+TABLE\s+(?:`[^`]+`|\w+)\s+(?:ADD|DROP|MODIFY|CHANGE)\s+(?!.*ALGORITHM\s*=\s*INPLACE)/i, code: 'ALTER_TABLE_BLOCKING', message: '🟠 BLOCKING: ALTER TABLE may cause long table lock / 可能造成長時間鎖表', suggestion: 'Use ALGORITHM=INPLACE, LOCK=NONE or pt-online-schema-change / 建議使用 ALGORITHM=INPLACE, LOCK=NONE' },
-          { pattern: /CREATE\s+(?:UNIQUE\s+)?INDEX\s+\w+\s+ON\s+(?!.*ALGORITHM\s*=\s*INPLACE)/i, code: 'CREATE_INDEX_BLOCKING', message: '🟠 BLOCKING: CREATE INDEX may cause long table lock / 可能造成長時間鎖表', suggestion: 'Use ALGORITHM=INPLACE, LOCK=NONE / 建議使用 ALGORITHM=INPLACE, LOCK=NONE' },
+          { pattern: /ALTER\s+TABLE\s+(?:`[^`]+`|\w+)\s+(?:MODIFY|CHANGE)\s+(?:COLUMN\s+)?\w+\s+\w+/i, code: 'ALTER_TABLE_MODIFY', message: '🟠 BLOCKING: MODIFY/CHANGE COLUMN may rebuild table and cause long lock / 修改欄位型別可能重建表並長時間鎖表', suggestion: 'Test in staging, consider pt-online-schema-change / 先在測試環境驗證，考慮 pt-online-schema-change' },
+          { pattern: /ALTER\s+TABLE\s+(?:`[^`]+`|\w+)\s+(?:CONVERT\s+TO\s+CHARACTER\s+SET|ENGINE\s*=)/i, code: 'ALTER_TABLE_REBUILD', message: '🟠 BLOCKING: This ALTER requires full table rebuild / 此 ALTER 需要完整重建表', suggestion: 'Use pt-online-schema-change for large tables / 大表建議用 pt-online-schema-change' },
           { pattern: /SELECT\s+[\s\S]*?\s+FOR\s+UPDATE/i, code: 'SELECT_FOR_UPDATE', message: '🟠 BLOCKING: SELECT FOR UPDATE causes exclusive row lock / 會造成排他行鎖', suggestion: 'Confirm if lock is needed, consider optimistic locking / 確認是否真的需要鎖定，考慮使用樂觀鎖' },
           { pattern: /SELECT\s+[\s\S]*?\s+LOCK\s+IN\s+SHARE\s+MODE/i, code: 'LOCK_IN_SHARE_MODE', message: '🟠 BLOCKING: LOCK IN SHARE MODE causes shared row lock / 會造成共享行鎖', suggestion: 'Confirm if shared lock is needed / 確認是否真的需要共享鎖' }
         ],
         bulkOperation: [
           { pattern: /DELETE\s+FROM\s+(?:`[^`]+`|\w+)\s*(?:;|$)/i, code: 'DELETE_ALL', message: '🟠 DATA RISK: DELETE without WHERE will delete all rows / 缺少 WHERE 條件會刪除全表資料', suggestion: 'Add WHERE condition / 請加上 WHERE 條件' },
-          { pattern: /UPDATE\s+(?:`[^`]+`|\w+)\s+SET\s+[^;]*(?:;|$)(?![\s\S]*WHERE)/i, code: 'UPDATE_ALL', message: '🟠 DATA RISK: UPDATE without WHERE will update all rows / 缺少 WHERE 條件會更新全表資料', suggestion: 'Add WHERE condition / 請加上 WHERE 條件' },
-          { pattern: /INSERT\s+[\s\S]*?\s+SELECT\s+/i, code: 'INSERT_SELECT', message: '🟠 BLOCKING: INSERT...SELECT will lock source table / 會對來源表加共享鎖', suggestion: 'Consider batch processing / 考慮分批處理' }
+          { pattern: /UPDATE\s+(?:`[^`]+`|\w+)\s+SET\s+[^;]*(?:;|$)(?![\s\S]*WHERE)/i, code: 'UPDATE_ALL', message: '🟠 DATA RISK: UPDATE without WHERE will update all rows / 缺少 WHERE 條件會更新全表資料', suggestion: 'Add WHERE condition / 請加上 WHERE 條件' }
         ],
         schemaChange: [
           { pattern: /ALTER\s+TABLE\s+(?:`[^`]+`|\w+)\s+DROP\s+COLUMN/i, code: 'DROP_COLUMN', message: '🟠 DATA LOSS: DROP COLUMN will permanently delete column data / 會永久刪除欄位資料', suggestion: 'Confirm column is no longer used / 先確認該欄位已無使用' },
@@ -118,7 +117,8 @@ export class MariaDBAdapter extends BaseAdapter {
           { pattern: /\b(?:FLOAT|DOUBLE)\b/i, message: '⚠️ FLOAT/DOUBLE has precision issues, use DECIMAL for money / 有精度問題，金額建議用 DECIMAL' },
           { pattern: /DATETIME(?!\s*\(\d+\))/i, message: '⚠️ DATETIME without precision truncates microseconds / 沒有指定精度，微秒會被截斷' },
           { pattern: /ON\s+DELETE\s+CASCADE/i, message: '⚠️ ON DELETE CASCADE may cause cascading deletes / 可能造成連鎖刪除' },
-          { pattern: /ON\s+UPDATE\s+CASCADE/i, message: '⚠️ ON UPDATE CASCADE may cause cascading updates / 可能造成連鎖更新' }
+          { pattern: /ON\s+UPDATE\s+CASCADE/i, message: '⚠️ ON UPDATE CASCADE may cause cascading updates / 可能造成連鎖更新' },
+          { pattern: /CREATE\s+(?:UNIQUE\s+)?INDEX\s+\w+\s+ON\s+/i, message: '⚠️ CREATE INDEX may take long on large tables (online DDL in MariaDB 10.4+) / 大表上建索引可能較久（MariaDB 10.4+ 為線上操作）' }
         ]
       },
 
@@ -837,6 +837,9 @@ export class MariaDBAdapter extends BaseAdapter {
     const normalizedContent = this.normalizeSQL(content);
     const normalizedUpSQL = this.normalizeSQL(upSQL);
     const normalizedDownSQL = this.normalizeSQL(downSQL);
+    // For dangerous/warning checks: only check UP section (DOWN is rollback, destructive ops are expected).
+    // Fall back to full content for R__ files without -- +migrate Up/Down markers.
+    const normalizedCheckTarget = normalizedUpSQL || normalizedContent;
 
     // === 1. Extract created and dropped tables ===
     const createdTables = this.extractCreatedTables(upSQL);
@@ -903,11 +906,11 @@ export class MariaDBAdapter extends BaseAdapter {
       }
     }
 
-    // === 4. Check DANGEROUS operations ===
+    // === 4. Check DANGEROUS operations (UP section only; DOWN rollback ops are expected) ===
     for (const category of Object.keys(rules.dangerous)) {
       for (const rule of rules.dangerous[category]) {
-        // Use normalized content for pattern matching
-        if (rule.pattern.test(normalizedContent)) {
+        // Only check UP section (or full content for files without UP/DOWN markers)
+        if (rule.pattern.test(normalizedCheckTarget)) {
           const isAllowed = options.allowDangerous || 
             (options.allowedCodes && options.allowedCodes.includes(rule.code));
           
@@ -930,10 +933,50 @@ export class MariaDBAdapter extends BaseAdapter {
       }
     }
 
-    // === 5. Check WARNING operations ===
+    // === 5. Check INSERT...SELECT (UP section only, statement-level to avoid subquery false positives) ===
+    const insertSelectStatements = normalizedCheckTarget.split(';').filter(stmt =>
+      /INSERT\s+(?:IGNORE\s+)?INTO\s+[\s\S]*?\bSELECT\b/i.test(stmt)
+    );
+    for (const stmt of insertSelectStatements) {
+      // Find the FIRST SELECT after INSERT INTO (the main SELECT, not subqueries)
+      const mainSelectMatch = stmt.match(/INSERT\s+(?:IGNORE\s+)?INTO\s+[^)]*(?:\([^)]*\))?\s*(SELECT\b)/i);
+      if (mainSelectMatch) {
+        const afterSelect = stmt.slice(mainSelectMatch.index + mainSelectMatch[0].length);
+        // Check if there's a top-level WHERE (not inside a subquery parenthesis)
+        const hasTopLevelWhere = /\bWHERE\b/i.test(afterSelect);
+        const hasOnDuplicateKey = /\bON\s+DUPLICATE\s+KEY\b/i.test(stmt);
+        
+        if (hasTopLevelWhere || hasOnDuplicateKey) {
+          warnings.push({
+            type: 'warning',
+            message: '⚠️ INSERT...SELECT with WHERE may briefly lock source rows / INSERT...SELECT 有 WHERE 條件，可能短暫鎖定來源行'
+          });
+        } else {
+          const isAllowed = options.allowDangerous ||
+            (options.allowedCodes && options.allowedCodes.includes('INSERT_SELECT'));
+          if (isAllowed) {
+            warnings.push({
+              type: 'dangerous-allowed',
+              code: 'INSERT_SELECT',
+              message: '✅ [ALLOWED] 🟠 BLOCKING: INSERT...SELECT without WHERE will lock entire source table / 無 WHERE 條件會鎖住整張來源表',
+              suggestion: 'Add WHERE condition or use batch processing / 加上 WHERE 條件或分批處理'
+            });
+          } else {
+            dangerousOps.push({
+              type: 'dangerous-bulkOperation',
+              code: 'INSERT_SELECT',
+              message: '🟠 BLOCKING: INSERT...SELECT without WHERE will lock entire source table / 無 WHERE 條件會鎖住整張來源表',
+              suggestion: 'Add WHERE condition or use batch processing / 加上 WHERE 條件或分批處理'
+            });
+          }
+        }
+      }
+    }
+
+    // === 6. Check WARNING operations (UP section only) ===
     for (const rule of rules.warnings.operations) {
-      // Use normalized content for pattern matching
-      if (rule.pattern.test(normalizedContent)) {
+      // Only check UP section (or full content for files without UP/DOWN markers)
+      if (rule.pattern.test(normalizedCheckTarget)) {
         warnings.push({
           type: 'warning',
           message: rule.message
@@ -941,16 +984,16 @@ export class MariaDBAdapter extends BaseAdapter {
       }
     }
 
-    // === 6. Check SUSPICIOUS NAMES (identifiers containing dangerous keywords) ===
+    // === 7. Check SUSPICIOUS NAMES (identifiers containing dangerous keywords) ===
     const suspiciousNameWarnings = this.checkSuspiciousNames(content);
     warnings.push(...suspiciousNameWarnings);
 
-    // === 7. Check PERFORMANCE ISSUES ===
+    // === 8. Check PERFORMANCE ISSUES ===
     const performanceResult = this.checkPerformanceIssues(content, fileName);
     const performanceWarnings = performanceResult.warnings;
     warnings.push(...performanceWarnings);
 
-    // === 8. Check if DOWN section exists ===
+    // === 9. Check if DOWN section exists ===
     if (!downSQL || downSQL.trim() === '') {
       warnings.push({
         type: 'missing-down',

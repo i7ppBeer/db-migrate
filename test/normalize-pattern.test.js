@@ -192,24 +192,143 @@ ON mydb.* TO 'user'@'%';
   });
 
   describe('Pattern Matching - ALTER TABLE Variations', () => {
-    it('should detect ALTER TABLE ADD COLUMN with various spacing', () => {
+    it('should NOT flag ALTER TABLE ADD COLUMN as dangerous (online DDL in MariaDB 10.4+)', () => {
       const content = `-- +migrate Up
 ALTER   TABLE   users   ADD   COLUMN   email   VARCHAR(255);
 -- +migrate Down
 ALTER TABLE users DROP COLUMN email;
 `;
       const result = adapter.validateContent(content, 'test.sql');
-      expect(result.dangerousOps.some(op => op.code === 'ALTER_TABLE_BLOCKING')).toBe(true);
+      // ADD COLUMN should only be a warning, not dangerous
+      expect(result.dangerousOps.some(op => op.code === 'ALTER_TABLE_BLOCKING')).toBe(false);
+      // DROP COLUMN in DOWN section should NOT be flagged (it's rollback)
+      expect(result.dangerousOps.some(op => op.code === 'DROP_COLUMN')).toBe(false);
+      // ADD COLUMN should appear as warning
+      expect(result.warnings.length).toBeGreaterThan(0);
     });
 
-    it('should detect ALTER TABLE with backtick table name', () => {
+    it('should flag DROP COLUMN in UP section as dangerous', () => {
       const content = `-- +migrate Up
-ALTER TABLE \`user-data\` ADD COLUMN status INT;
+ALTER TABLE users DROP COLUMN old_field;
 -- +migrate Down
-ALTER TABLE \`user-data\` DROP COLUMN status;
+ALTER TABLE users ADD COLUMN old_field VARCHAR(255);
 `;
       const result = adapter.validateContent(content, 'test.sql');
-      expect(result.dangerousOps.some(op => op.code === 'ALTER_TABLE_BLOCKING')).toBe(true);
+      expect(result.dangerousOps.some(op => op.code === 'DROP_COLUMN')).toBe(true);
+    });
+
+    it('should NOT flag DROP COLUMN / DROP INDEX in DOWN section', () => {
+      const content = `-- +migrate Up
+ALTER TABLE users ADD COLUMN phone VARCHAR(20);
+CREATE INDEX idx_phone ON users(phone);
+-- +migrate Down
+DROP INDEX idx_phone ON users;
+ALTER TABLE users DROP COLUMN phone;
+`;
+      const result = adapter.validateContent(content, 'test.sql');
+      expect(result.dangerousOps.some(op => op.code === 'DROP_COLUMN')).toBe(false);
+      expect(result.dangerousOps.some(op => op.code === 'DROP_INDEX')).toBe(false);
+    });
+
+    it('should detect ALTER TABLE MODIFY COLUMN as dangerous', () => {
+      const content = `-- +migrate Up
+ALTER TABLE users MODIFY COLUMN email TEXT;
+-- +migrate Down
+ALTER TABLE users MODIFY COLUMN email VARCHAR(255);
+`;
+      const result = adapter.validateContent(content, 'test.sql');
+      expect(result.dangerousOps.some(op => op.code === 'ALTER_TABLE_MODIFY' || op.code === 'MODIFY_COLUMN')).toBe(true);
+    });
+
+    it('should detect ALTER TABLE CHANGE COLUMN as dangerous', () => {
+      const content = `-- +migrate Up
+ALTER TABLE users CHANGE COLUMN email user_email VARCHAR(255);
+-- +migrate Down
+ALTER TABLE users CHANGE COLUMN user_email email VARCHAR(255);
+`;
+      const result = adapter.validateContent(content, 'test.sql');
+      expect(result.dangerousOps.some(op => op.code === 'ALTER_TABLE_MODIFY' || op.code === 'CHANGE_COLUMN')).toBe(true);
+    });
+
+    it('should detect ALTER TABLE with backtick table name (MODIFY)', () => {
+      const content = `-- +migrate Up
+ALTER TABLE \`user-data\` MODIFY COLUMN status INT;
+-- +migrate Down
+ALTER TABLE \`user-data\` MODIFY COLUMN status TINYINT;
+`;
+      const result = adapter.validateContent(content, 'test.sql');
+      expect(result.dangerousOps.some(op => op.code === 'ALTER_TABLE_MODIFY' || op.code === 'MODIFY_COLUMN')).toBe(true);
+    });
+
+    it('should detect ALTER TABLE CONVERT TO CHARACTER SET as dangerous', () => {
+      const content = `-- +migrate Up
+ALTER TABLE users CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+-- +migrate Down
+SELECT 1;
+`;
+      const result = adapter.validateContent(content, 'test.sql');
+      expect(result.dangerousOps.some(op => op.code === 'ALTER_TABLE_REBUILD')).toBe(true);
+    });
+
+    it('should detect ALTER TABLE ENGINE= as dangerous', () => {
+      const content = `-- +migrate Up
+ALTER TABLE users ENGINE=InnoDB;
+-- +migrate Down
+SELECT 1;
+`;
+      const result = adapter.validateContent(content, 'test.sql');
+      expect(result.dangerousOps.some(op => op.code === 'ALTER_TABLE_REBUILD')).toBe(true);
+    });
+  });
+
+  describe('Pattern Matching - INSERT...SELECT Variations', () => {
+    it('should NOT flag INSERT...SELECT with WHERE as dangerous', () => {
+      const content = `-- +migrate Up
+INSERT IGNORE INTO orders_archive (id, user_id)
+SELECT id, user_id FROM orders
+WHERE order_date < DATE_SUB(NOW(), INTERVAL 365 DAY);
+-- +migrate Down
+DELETE FROM orders_archive WHERE archived_at > NOW() - INTERVAL 1 DAY;
+`;
+      const result = adapter.validateContent(content, 'test.sql');
+      expect(result.dangerousOps.some(op => op.code === 'INSERT_SELECT')).toBe(false);
+      // Should appear as warning instead
+      expect(result.warnings.some(w => w.message?.includes('INSERT...SELECT'))).toBe(true);
+    });
+
+    it('should flag INSERT...SELECT without WHERE as dangerous', () => {
+      const content = `-- +migrate Up
+INSERT INTO backup_table (id, name)
+SELECT id, name FROM users;
+-- +migrate Down
+DROP TABLE backup_table;
+`;
+      const result = adapter.validateContent(content, 'test.sql');
+      expect(result.dangerousOps.some(op => op.code === 'INSERT_SELECT')).toBe(true);
+    });
+
+    it('should NOT flag INSERT...SELECT with ON DUPLICATE KEY as dangerous', () => {
+      const content = `-- +migrate Up
+INSERT INTO user_preferences (user_id, theme)
+SELECT id, 'system' FROM users
+ON DUPLICATE KEY UPDATE updated_at = CURRENT_TIMESTAMP;
+-- +migrate Down
+DELETE FROM user_preferences;
+`;
+      const result = adapter.validateContent(content, 'test.sql');
+      expect(result.dangerousOps.some(op => op.code === 'INSERT_SELECT')).toBe(false);
+      expect(result.warnings.some(w => w.message?.includes('INSERT...SELECT'))).toBe(true);
+    });
+
+    it('should flag CREATE INDEX as warning not dangerous (online DDL)', () => {
+      const content = `-- +migrate Up
+CREATE INDEX idx_users_phone ON users(phone);
+-- +migrate Down
+DROP INDEX idx_users_phone ON users;
+`;
+      const result = adapter.validateContent(content, 'test.sql');
+      expect(result.dangerousOps.some(op => op.code === 'CREATE_INDEX_BLOCKING')).toBe(false);
+      expect(result.warnings.some(w => w.message?.includes('CREATE INDEX'))).toBe(true);
     });
   });
 
