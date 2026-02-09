@@ -55,9 +55,15 @@ CMD ["node", "src/cli.js", "--help"]
 # ============================================================
 FROM production AS runner
 
+# Switch to root to copy and chmod entrypoint
+USER root
+
 # Copy entrypoint script
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# Switch back to non-root
+USER 1000
 
 # Environment variables
 ENV DB_TYPE=mongodb

@@ -8,7 +8,7 @@
  * - Auto-rollback if postCheck fails
  */
 
-import { MongoDBChecks } from '../src/core/sanity-checker.js';
+import { MongoDBChecks } from '../../../../../src/core/sanity-checker.js';
 
 /**
  * Pre-Check: Validate preconditions before migration

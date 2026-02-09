@@ -165,7 +165,12 @@ export class MongoDBAdapter extends BaseAdapter {
   async connect() {
     try {
       // Set migrate-mongo config
-      migrateMongo.config.set(this.config);
+      // migrate-mongo expects 'changelogCollectionName', map from our 'changelogCollection'
+      const migrateMongoConfig = {
+        ...this.config,
+        changelogCollectionName: this.config.changelogCollection || this.config.changelogCollectionName || 'changelog'
+      };
+      migrateMongo.config.set(migrateMongoConfig);
       
       // Connect using migrate-mongo's method
       const { db, client } = await migrateMongo.database.connect();

@@ -35,10 +35,10 @@ export async function up(db, client) {
           profile: {
             bsonType: 'object',
             properties: {
-              avatar: { bsonType: 'string' },
+              avatar: { bsonType: ['string', 'null'] },
               bio: { bsonType: 'string', maxLength: 500 },
-              website: { bsonType: 'string' },
-              location: { bsonType: 'string' },
+              website: { bsonType: ['string', 'null'] },
+              location: { bsonType: ['string', 'null'] },
               preferences: {
                 bsonType: 'object',
                 properties: {
