@@ -16,10 +16,6 @@ export default {
   mongodb: {
     uri: process.env.MONGODB_URI || 'mongodb://localhost:27017',
     databaseName: process.env.MONGODB_DB || 'your_database',  // 請修改為實際資料庫名稱
-    options: {
-      useNewUrlParser: true,
-      useUnifiedTopology: true
-    }
   },
   
   // Migration 檔案目錄 (相對於此 config 檔案)

@@ -58,7 +58,7 @@ fi
 
 # Check MariaDB
 if command -v mysql &> /dev/null; then
-    if mysql -h localhost -P 3306 -u root -prootpass -e "SELECT 1" 2>/dev/null; then
+    if mysql -h localhost -P 3306 -u root -p"${MARIADB_ROOT_PASSWORD:-rootpass}" -e "SELECT 1" 2>/dev/null; then
         echo -e "${GREEN}✓ MariaDB is running${NC}"
         MARIADB_UP=true
     else
@@ -84,7 +84,7 @@ if [ "$MONGO_UP" = true ]; then
             
             # Run validation
             echo -e "  ${YELLOW}→ Running validation...${NC}"
-            if node "$PROJECT_DIR/src/cli-v2.js" -c "$config_file" validate 2>&1; then
+            if node "$PROJECT_DIR/src/cli.js" -c "$config_file" validate 2>&1; then
                 echo -e "  ${GREEN}✓ Validation passed${NC}"
             else
                 echo -e "  ${RED}✗ Validation failed${NC}"
@@ -93,7 +93,7 @@ if [ "$MONGO_UP" = true ]; then
             # Run Up-Down-Up test (only for success tests)
             if [[ "$test_name" == *"success"* ]]; then
                 echo -e "  ${YELLOW}→ Running Up-Down-Up test...${NC}"
-                if node "$PROJECT_DIR/src/cli-v2.js" -c "$config_file" test 2>&1; then
+                if node "$PROJECT_DIR/src/cli.js" -c "$config_file" test 2>&1; then
                     echo -e "  ${GREEN}✓ Up-Down-Up test passed${NC}"
                 else
                     echo -e "  ${RED}✗ Up-Down-Up test failed${NC}"
@@ -119,7 +119,7 @@ if [ "$MARIADB_UP" = true ]; then
             
             # Run validation
             echo -e "  ${YELLOW}→ Running validation...${NC}"
-            if node "$PROJECT_DIR/src/cli-v2.js" -c "$config_file" validate 2>&1; then
+            if node "$PROJECT_DIR/src/cli.js" -c "$config_file" validate 2>&1; then
                 echo -e "  ${GREEN}✓ Validation passed${NC}"
             else
                 echo -e "  ${RED}✗ Validation failed${NC}"
@@ -128,7 +128,7 @@ if [ "$MARIADB_UP" = true ]; then
             # Run Up-Down-Up test (only for success tests)
             if [[ "$test_name" == *"success"* ]]; then
                 echo -e "  ${YELLOW}→ Running Up-Down-Up test...${NC}"
-                if node "$PROJECT_DIR/src/cli-v2.js" -c "$config_file" test 2>&1; then
+                if node "$PROJECT_DIR/src/cli.js" -c "$config_file" test 2>&1; then
                     echo -e "  ${GREEN}✓ Up-Down-Up test passed${NC}"
                 else
                     echo -e "  ${RED}✗ Up-Down-Up test failed${NC}"

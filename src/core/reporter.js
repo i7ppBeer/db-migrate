@@ -6,6 +6,21 @@
 import fs from 'fs/promises';
 import path from 'path';
 
+/**
+ * Escape HTML special characters to prevent XSS
+ * @param {string} str
+ * @returns {string}
+ */
+function escapeHtml(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export class Reporter {
   constructor() {
     this.results = [];
@@ -42,7 +57,7 @@ export class Reporter {
       total,
       passed,
       failed,
-      passRate: total > 0 ? ((passed / total) * 100).toFixed(1) : 0,
+      passRate: total > 0 ? ((passed / total) * 100).toFixed(1) : '0.0',
       duration,
       startTime: this.startTime?.toISOString(),
       endTime: this.endTime?.toISOString()
@@ -198,10 +213,10 @@ export class Reporter {
         <tbody>
           ${this.results.map(r => `
           <tr>
-            <td><strong>${r.database}</strong></td>
-            <td><span class="badge ${r.dbType}">${r.dbType}</span></td>
-            <td>${r.testType}</td>
-            <td><span class="status ${r.success ? 'pass' : 'fail'}">${r.success ? '✅ PASS' : '❌ FAIL'}</span>${r.error ? `<div class="error">${r.error}</div>` : ''}</td>
+            <td><strong>${escapeHtml(r.database)}</strong></td>
+            <td><span class="badge ${escapeHtml(r.dbType)}">${escapeHtml(r.dbType)}</span></td>
+            <td>${escapeHtml(r.testType)}</td>
+            <td><span class="status ${r.success ? 'pass' : 'fail'}">${r.success ? '✅ PASS' : '❌ FAIL'}</span>${r.error ? `<div class="error">${escapeHtml(r.error)}</div>` : ''}</td>
             <td>${(r.duration / 1000).toFixed(2)}s</td>
           </tr>
           `).join('')}

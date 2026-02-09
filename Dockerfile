@@ -35,7 +35,7 @@ CMD ["npm", "run", "dev"]
 # ============================================================
 FROM base AS production
 
-RUN npm ci --only=production
+RUN npm ci --omit=dev
 
 COPY src/ ./src/
 
@@ -43,6 +43,8 @@ COPY src/ ./src/
 # COPY migrations/ ./migrations/
 
 ENV NODE_ENV=production
+
+USER 1000
 
 # Default command
 CMD ["node", "src/cli.js", "--help"]

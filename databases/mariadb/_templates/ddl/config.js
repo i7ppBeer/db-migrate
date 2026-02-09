@@ -18,7 +18,12 @@ export default {
     port: parseInt(process.env.MARIADB_PORT || '3306', 10),
     database: process.env.MARIADB_DB || 'your_database',  // 請修改為實際資料庫名稱
     user: process.env.MARIADB_USER || 'root',
-    password: process.env.MARIADB_PASSWORD || 'rootpass'
+    password: process.env.MARIADB_PASSWORD || (() => {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('MARIADB_PASSWORD environment variable is required in production');
+      }
+      return 'rootpass'; // ⚠️ 僅限開發環境使用
+    })()
   },
   
   // Migration 檔案目錄 (相對於此 config 檔案)

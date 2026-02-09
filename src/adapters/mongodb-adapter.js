@@ -138,13 +138,13 @@ export class MongoDBAdapter extends BaseAdapter {
       // ========================================
       performance: {
         thresholds: {
-          maxQueryLength: 5000,           // 單一語句超過 5000 字元視為過長
-          maxTotalLength: 50000,          // 整個 migration 超過 50000 字元視為過長
-          maxIndexesPerMigration: 5,      // 單一 migration 最多建立 5 個索引
-          maxBulkOpsPerMigration: 10,     // 單一 migration 最多 10 個 bulk 操作
-          maxStatementsPerMigration: 50,  // 單一 migration 最多 50 個語句
-          maxLookupStages: 3,             // 單一 aggregate 最多 3 個 $lookup
-          maxPipelineStages: 10           // 單一 aggregate 最多 10 個 pipeline stages
+          maxQueryLength: this.config?.performance?.thresholds?.maxQueryLength ?? 5000,
+          maxTotalLength: this.config?.performance?.thresholds?.maxTotalLength ?? 50000,
+          maxIndexesPerMigration: this.config?.performance?.thresholds?.maxIndexesPerMigration ?? 5,
+          maxBulkOpsPerMigration: this.config?.performance?.thresholds?.maxBulkOpsPerMigration ?? 10,
+          maxStatementsPerMigration: this.config?.performance?.thresholds?.maxStatementsPerMigration ?? 50,
+          maxLookupStages: this.config?.performance?.thresholds?.maxLookupStages ?? 3,
+          maxPipelineStages: this.config?.performance?.thresholds?.maxPipelineStages ?? 10
         },
         messages: {
           migrationTooLong: '🔶 PERFORMANCE: Migration file is very long ({length} chars), consider splitting / Migration 檔案過長 ({length} 字元)，建議拆分',
@@ -827,6 +827,10 @@ export async function down(db, client) {
   normalizeJS(js) {
     if (!js) return '';
     return js
+      // Remove zero-width characters (Unicode confusion attack prevention)
+      .replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '')
+      // Convert fullwidth characters to halfwidth (Unicode normalization)
+      .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
       // Remove template literals (backticks) - replace with placeholder
       .replace(/`(?:[^`\\]|\\.)*`/g, "'__STRING__'")
       // Remove string literals (single quotes) to avoid false positives
@@ -875,6 +879,13 @@ export async function down(db, client) {
     const varRegex = /(?:const|let|var)\s+(\w+)\s*=/g;
     while ((match = varRegex.exec(js)) !== null) {
       identifiers.push(match[1]);
+    }
+    
+    // Match destructured variable names: const { name1, name2 } = require(...)
+    const destructureRegex = /(?:const|let|var)\s*\{\s*([^}]+)\}/g;
+    while ((match = destructureRegex.exec(js)) !== null) {
+      const vars = match[1].split(',').map(v => v.trim().split(/\s+as\s+|:/)[0].trim());
+      identifiers.push(...vars.filter(v => v && /^\w+$/.test(v)));
     }
     
     return [...new Set(identifiers)]; // Remove duplicates

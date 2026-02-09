@@ -36,20 +36,20 @@
 | `DROP_SCHEMA` | DROP SCHEMA | `\bDROP\s+SCHEMA\b` | 刪除整個 Schema |
 | `TRUNCATE_TABLE` | TRUNCATE TABLE | `\bTRUNCATE\s+TABLE\b` | 清空表格資料 |
 | `DROP_USER` | DROP USER | `\bDROP\s+USER\b` | 刪除使用者 |
-| `GRANT_ALL` | GRANT ALL | `\bGRANT\s+ALL\b` | 授予所有權限 |
-| `REVOKE_ALL` | REVOKE ALL | `\bREVOKE\s+ALL\b` | 撤銷所有權限 |
+| `GRANT` | GRANT | `\bGRANT\s+...` | 授予權限（需 DCL migration） |
+| `REVOKE` | REVOKE | `\bREVOKE\s+...` | 撤銷權限（需 DCL migration） |
 | `CREATE_USER` | CREATE USER | `\bCREATE\s+USER\b` | 建立使用者（需 DCL migration） |
 | `SHUTDOWN` | SHUTDOWN | `\bSHUTDOWN\s*(?:;|$)` | 關閉資料庫伺服器 |
 | `FLUSH_PRIVILEGES` | FLUSH PRIVILEGES | `\bFLUSH\s+PRIVILEGES\b` | 重載權限表 |
 | `LOAD_DATA` | LOAD DATA | `\bLOAD\s+DATA\b` | 從檔案載入資料 |
 | `INTO_OUTFILE` | INTO OUTFILE | `\bINTO\s+OUTFILE\b` | 輸出到檔案 |
-| `SELECT_STAR_LIMIT` | SELECT * without LIMIT | 見代碼 | 無限制的 SELECT * |
 
 ### Dangerous Operations / 危險操作
 
 | Code | 操作 | Pattern | 描述 |
 |------|------|---------|------|
 | `DROP_TABLE` | DROP TABLE | `\bDROP\s+TABLE\b` | 刪除表格 |
+| `TRUNCATE_TABLE` | TRUNCATE TABLE | `\bTRUNCATE\s+TABLE\b` | 清空表格資料 |
 | `DROP_INDEX` | DROP INDEX | `\bDROP\s+INDEX\b` | 刪除索引 |
 | `DROP_VIEW` | DROP VIEW | `\bDROP\s+VIEW\b` | 刪除視圖 |
 | `DROP_PROCEDURE` | DROP PROCEDURE | `\bDROP\s+PROCEDURE\b` | 刪除儲存過程 |
@@ -271,7 +271,8 @@ const dropDatabaseHelper = () => {};  // ⚠️ SUSPICIOUS NAME
 | **Cross-Adapter Edge Cases** | 4 |
 | **Repeatable Runner** | 11 |
 | **Sanity Checker** | 25 |
-| **總計** | **212** |
+| **Security Edge Cases** | 54 |
+| **總計** | **266** |
 
 ### 按功能分類
 
@@ -292,13 +293,13 @@ const dropDatabaseHelper = () => {};  // ⚠️ SUSPICIOUS NAME
 
 ```bash
 # 執行驗證
-node src/cli.js validate --path ./databases/mariadb/test-success
+node src/cli.js -c ./databases/mariadb/test-success/ddl/config.js validate
 
 # 允許危險操作
-node src/cli.js validate --path ./databases/mariadb/test-success --allow-dangerous
+node src/cli.js -c ./databases/mariadb/test-success/ddl/config.js validate --allow-dangerous
 
 # 允許特定 code
-node src/cli.js validate --path ./databases/mariadb/test-success --allow-codes DROP_TABLE,ALTER_TABLE
+node src/cli.js -c ./databases/mariadb/test-success/ddl/config.js validate --allow DROP_TABLE,ALTER_TABLE
 ```
 
 ### 程式化使用

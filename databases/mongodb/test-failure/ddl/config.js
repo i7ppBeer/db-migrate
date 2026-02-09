@@ -6,12 +6,8 @@ export default {
   type: 'mongodb',
   mongodb: {
     url: process.env.MONGO_URL || 'mongodb://localhost:27017',
-    databaseName: process.env.MONGO_DB || 'test_mongo_failure',
-    options: {
-      useNewUrlParser: true,
-      useUnifiedTopology: true
-    }
+    databaseName: process.env.MONGO_DB || 'test_mongo_failure'
   },
   migrationsDir: './migrations',
-  changelogCollectionName: 'changelog'
+  changelogCollection: 'changelog'
 };

@@ -29,6 +29,7 @@ async function checkMongoDB() {
     await client.close();
     process.exit(0);
   } catch (e) {
+    console.error(`MongoDB connection check failed: ${e.message}`);
     process.exit(1);
   }
 }
@@ -48,12 +49,13 @@ async function checkMariaDB() {
     await connection.end();
     process.exit(0);
   } catch (e) {
+    console.error(`MariaDB connection check failed: ${e.message}`);
     process.exit(1);
   }
 }
 
 if (DB_TYPE === 'mongodb') {
-  checkMongoDB();
+  await checkMongoDB();
 } else {
-  checkMariaDB();
+  await checkMariaDB();
 }

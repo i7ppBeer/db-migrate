@@ -13,10 +13,6 @@ export default {
   mongodb: {
     url: process.env.MONGODB_URL || 'mongodb://localhost:27017',
     databaseName: process.env.MONGODB_DATABASE || 'admin', // DCL operates on admin database
-    options: {
-      useNewUrlParser: true,
-      useUnifiedTopology: true
-    }
   },
   
   // DCL migrations directory (Repeatable mode)

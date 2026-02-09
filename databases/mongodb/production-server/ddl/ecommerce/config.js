@@ -12,18 +12,14 @@
 export default {
   mongodb: {
     url: process.env.MONGODB_URL || 'mongodb://ecommerce_app:ecommerce_app_secure_pass_123@localhost:27017',
-    databaseName: process.env.MONGODB_DATABASE || 'ecommerce',
-    options: {
-      useNewUrlParser: true,
-      useUnifiedTopology: true
-    }
+    databaseName: process.env.MONGODB_DATABASE || 'ecommerce'
   },
   
   // DDL migrations directory (Versioned mode)
   migrationsDir: './migrations',
   
   // Collection for tracking versioned migrations
-  changelogCollectionName: 'changelog',
+  changelogCollection: 'changelog',
   
   // Migration mode: 'versioned' for DDL (default)
   mode: 'versioned',

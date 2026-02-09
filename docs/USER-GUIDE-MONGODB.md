@@ -1084,7 +1084,7 @@ export default {
     options: {}
   },
   migrationsDir: './migrations',
-  changelogCollectionName: 'changelog'  // DDL 用
+  changelogCollection: 'changelog'  // DDL 用
   // checksumTable: '_dcl_migrations'    // DCL 用
 };
 ```

@@ -75,14 +75,10 @@ export default {
   type: 'mongodb',
   mongodb: {
     url: '${mongo_url}',
-    databaseName: '${DB_NAME}',
-    options: {
-      useNewUrlParser: true,
-      useUnifiedTopology: true
-    }
+    databaseName: '${DB_NAME}'
   },
   migrationsDir: '${MIGRATIONS_DIR}',
-  changelogCollectionName: 'changelog'
+  changelogCollection: 'changelog'
 };
 EOFCONFIG
         else
@@ -125,7 +121,7 @@ main() {
         wait)
             wait_for_database
             ;;
-        up|down|status|validate|test|create)
+        up|down|status|validate|test|create|dcl|dcl:status|dcl:verify)
             wait_for_database
             generate_config
             run_command "$command" "$@"
@@ -142,7 +138,7 @@ main() {
             ;;
         *)
             echo -e "${RED}[ERROR] Unknown command: $command${NC}"
-            echo "Available commands: up, down, status, validate, test, create, test-all, wait, help, shell"
+            echo "Available commands: up, down, status, validate, test, create, test-all, dcl, dcl:status, dcl:verify, wait, help, shell"
             exit 1
             ;;
     esac

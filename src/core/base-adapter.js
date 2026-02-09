@@ -158,6 +158,14 @@ export class BaseAdapter {
 
     } catch (error) {
       results.error = error.message;
+      // Attempt cleanup on failure to restore to a known state
+      try {
+        console.warn('\n⚠️  Test failed, attempting cleanup...');
+        await this.down(results.stages.up1.count || 0);
+        console.warn('   Cleanup completed.');
+      } catch (cleanupError) {
+        console.error(`   ❌ Cleanup also failed: ${cleanupError.message}`);
+      }
     }
 
     results.duration = Date.now() - startTime;

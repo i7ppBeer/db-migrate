@@ -14,10 +14,6 @@ export default {
   mongodb: {
     url: process.env.MONGODB_URI || 'mongodb://localhost:27017',
     databaseName: process.env.MONGODB_DB || 'admin',  // DCL 操作在 admin 資料庫
-    options: {
-      useNewUrlParser: true,
-      useUnifiedTopology: true
-    }
   },
   
   // Migration 檔案目錄 (相對於此 config 檔案)

@@ -53,8 +53,8 @@ export class MariaDBAdapter extends BaseAdapter {
           { pattern: /\bDROP\s+USER\s+(?:IF\s+EXISTS\s+)?['"`@]/i, code: 'DROP_USER', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
           { pattern: /\bALTER\s+USER\s+['"`@]/i, code: 'ALTER_USER', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
           { pattern: /\bSET\s+PASSWORD\s+FOR/i, code: 'SET_PASSWORD', message: '🔴 DCL: Password management should be in DCL project (Repeatable) / 密碼管理應在 DCL 專案' },
-          { pattern: /\bGRANT\s+(?:ALL|USAGE|SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|INDEX|EXECUTE)\s*(?:PRIVILEGES\s+)?(?:ON|,)/i, code: 'GRANT', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' },
-          { pattern: /\bREVOKE\s+(?:ALL|SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|INDEX|EXECUTE)\s*(?:PRIVILEGES\s+)?(?:ON|,)/i, code: 'REVOKE', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' },
+          { pattern: /\bGRANT\s+(?:ALL|USAGE|SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|INDEX|EXECUTE|REFERENCES|TRIGGER|EVENT|PROCESS|RELOAD|SUPER|REPLICATION|SHOW)\s*(?:PRIVILEGES\s+)?(?:ON|,)/i, code: 'GRANT', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' },
+          { pattern: /\bREVOKE\s+(?:ALL|SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|INDEX|EXECUTE|REFERENCES|TRIGGER|EVENT|PROCESS|RELOAD|SUPER|REPLICATION|SHOW)\s*(?:PRIVILEGES\s+)?(?:ON|,)/i, code: 'REVOKE', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' },
           { pattern: /\bFLUSH\s+PRIVILEGES/i, code: 'FLUSH_PRIVILEGES', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' }
         ],
         dataExfiltration: [
@@ -63,8 +63,8 @@ export class MariaDBAdapter extends BaseAdapter {
           { pattern: /\bINTO\s+DUMPFILE/i, code: 'INTO_DUMPFILE', message: '🔴 DATA RISK: Export data is forbidden / 禁止匯出資料' }
         ],
         system: [
-          // SHUTDOWN must be standalone command (followed by ; or end, not part of identifier)
-          { pattern: /\bSHUTDOWN\s*(?:;|$)/i, code: 'SHUTDOWN', message: '🔴 SYSTEM: Shutdown database is forbidden / 禁止關閉資料庫' },
+          // SHUTDOWN must be standalone command (followed by ; or end or whitespace, not part of identifier)
+          { pattern: /\bSHUTDOWN\s*(?:;|\s|$)/im, code: 'SHUTDOWN', message: '🔴 SYSTEM: Shutdown database is forbidden / 禁止關閉資料庫' },
           { pattern: /\bRESET\s+MASTER\b/i, code: 'RESET_MASTER', message: '🔴 SYSTEM: Reset master is forbidden / 禁止重置主庫' },
           { pattern: /\bRESET\s+SLAVE\b/i, code: 'RESET_SLAVE', message: '🔴 SYSTEM: Reset slave is forbidden / 禁止重置從庫' },
           { pattern: /\bSTOP\s+SLAVE\b/i, code: 'STOP_SLAVE', message: '🔴 SYSTEM: Stop replication is forbidden / 禁止停止複製' },
@@ -130,7 +130,9 @@ export class MariaDBAdapter extends BaseAdapter {
         keywords: [
           'drop_database', 'dropdatabase', 'drop_schema', 'dropschema',
           'truncate', 'shutdown', 'reset_master', 'reset_slave',
-          'grant_all', 'revoke_all', 'create_user', 'drop_user'
+          'grant_all', 'revoke_all', 'create_user', 'drop_user',
+          'delete_all', 'deleteall', 'purge', 'destroy',
+          'remove_all', 'removeall', 'wipe', 'wipeall'
         ],
         message: '⚠️ SUSPICIOUS NAME: Identifier contains dangerous keyword which may cause false positive/negative detection'
       },
@@ -147,16 +149,16 @@ export class MariaDBAdapter extends BaseAdapter {
       // 🔶 效能檢測 - Performance Checks
       // ========================================
       performance: {
-        // 閾值設定
+        // 閾值設定 (可透過 config.performance.thresholds 覆寫)
         thresholds: {
-          maxQueryLength: 5000,           // 單一語句超過 5000 字元視為過長
-          maxTotalLength: 50000,          // 整個 migration 超過 50000 字元視為過長
-          maxIndexesPerMigration: 5,      // 單一 migration 最多建立 5 個索引
-          maxAlterTablesPerMigration: 10, // 單一 migration 最多 10 個 ALTER TABLE
-          maxStatementsPerMigration: 50,  // 單一 migration 最多 50 個語句
-          maxColumnsPerInsert: 20,        // INSERT 語句超過 20 個欄位視為複雜
-          maxJoinsPerQuery: 5,            // 單一查詢超過 5 個 JOIN 視為複雜
-          maxSubqueries: 3                // 單一查詢超過 3 個子查詢視為複雜
+          maxQueryLength: this.config?.performance?.thresholds?.maxQueryLength ?? 5000,
+          maxTotalLength: this.config?.performance?.thresholds?.maxTotalLength ?? 50000,
+          maxIndexesPerMigration: this.config?.performance?.thresholds?.maxIndexesPerMigration ?? 5,
+          maxAlterTablesPerMigration: this.config?.performance?.thresholds?.maxAlterTablesPerMigration ?? 10,
+          maxStatementsPerMigration: this.config?.performance?.thresholds?.maxStatementsPerMigration ?? 50,
+          maxColumnsPerInsert: this.config?.performance?.thresholds?.maxColumnsPerInsert ?? 20,
+          maxJoinsPerQuery: this.config?.performance?.thresholds?.maxJoinsPerQuery ?? 5,
+          maxSubqueries: this.config?.performance?.thresholds?.maxSubqueries ?? 3
         },
         // 效能警告訊息
         messages: {
@@ -1025,6 +1027,10 @@ export class MariaDBAdapter extends BaseAdapter {
   normalizeSQL(sql) {
     if (!sql) return '';
     return sql
+      // Remove zero-width characters (Unicode confusion attack prevention)
+      .replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '')
+      // Convert fullwidth characters to halfwidth (Unicode normalization)
+      .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
       // Remove string literals (single quotes) to avoid false positives
       // e.g., INSERT INTO log VALUES ('DROP DATABASE test') should NOT trigger
       // Use a placeholder to preserve syntax
@@ -1033,8 +1039,14 @@ export class MariaDBAdapter extends BaseAdapter {
       .replace(/"(?:[^"\\]|\\.)*"/g, '"__STRING__"')
       // Remove single-line comments (but preserve -- EXPECT_ROWS: and -- EXPECT_NO_ROWS:)
       .replace(/--(?!\s*EXPECT).*$/gm, ' ')
-      // Remove multi-line comments /* ... */
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      // Remove multi-line comments /* ... */ (but detect MySQL conditional comments first)
+      .replace(/\/\*[\s\S]*?\*\//g, (match) => {
+        // MySQL conditional comments /*! ... */ are executed, preserve content
+        if (match.startsWith('/*!')) {
+          return match.slice(3, -2);
+        }
+        return ' ';
+      })
       // Collapse multiple whitespace/newlines to single space
       .replace(/\s+/g, ' ')
       // Trim

@@ -74,27 +74,32 @@ export function createAdapters(config) {
  * @returns {string}
  */
 function detectDatabaseType(config) {
-  // Explicit type declaration
+  // Explicit type declaration (highest priority)
   if (config.type) {
     return config.type.toLowerCase();
   }
   
-  // Detect from URL
-  if (config.mongodb?.url || config.url?.startsWith('mongodb')) {
+  // Detect from mongodb-specific config
+  if (config.mongodb) {
     return 'mongodb';
   }
   
-  // Detect from connection config
-  if (config.host || config.user || config.database) {
-    // If has mongodb-specific fields
-    if (config.mongodb) {
-      return 'mongodb';
-    }
-    // Default to mariadb for host/user/database pattern
+  // Detect from URL
+  if (config.url?.startsWith('mongodb')) {
+    return 'mongodb';
+  }
+  
+  // Detect from mariadb-specific config
+  if (config.mariadb) {
     return 'mariadb';
   }
   
-  throw new Error('Cannot detect database type from config');
+  // Detect from connection config (host/user/database pattern = relational DB)
+  if (config.host || config.user || config.database) {
+    return 'mariadb';
+  }
+  
+  throw new Error('Cannot detect database type from config. Set "type" explicitly (e.g. type: "mongodb" or type: "mariadb").');
 }
 
 /**
@@ -108,7 +113,16 @@ export async function loadConfig(configPath) {
       ? configPath 
       : `${process.cwd()}/${configPath}`;
     
-    const configModule = await import(`file://${absolutePath}`);
+    // Resolve to real path and validate it doesn't escape expected boundaries
+    const { resolve } = await import('path');
+    const resolvedPath = resolve(absolutePath);
+    
+    // Block null bytes (path traversal attack vector)
+    if (resolvedPath.includes('\0')) {
+      throw new Error('Config path contains invalid characters');
+    }
+    
+    const configModule = await import(`file://${resolvedPath}`);
     return configModule.default;
   } catch (error) {
     throw new Error(`Failed to load config from ${configPath}: ${error.message}`);

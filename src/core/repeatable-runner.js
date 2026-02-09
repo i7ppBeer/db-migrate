@@ -25,7 +25,12 @@ import crypto from 'crypto';
 export class RepeatableRunner {
   constructor(config) {
     this.config = config;
-    this.checksumTable = config.checksumTable || 'repeatable_migrations';
+    const tableName = config.checksumTable || 'repeatable_migrations';
+    // Validate table name to prevent SQL injection
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/.test(tableName)) {
+      throw new Error(`Invalid checksum table name: ${tableName}. Must be a valid identifier (letters, digits, underscores).`);
+    }
+    this.checksumTable = tableName;
   }
 
   /**

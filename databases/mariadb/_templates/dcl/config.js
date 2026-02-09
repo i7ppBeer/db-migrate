@@ -14,7 +14,12 @@ export default {
   host: process.env.MARIADB_HOST || 'localhost',
   port: parseInt(process.env.MARIADB_PORT || '3306'),
   user: process.env.MARIADB_USER || 'root',
-  password: process.env.MARIADB_PASSWORD || 'rootpass',
+  password: process.env.MARIADB_PASSWORD || (() => {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('MARIADB_PASSWORD environment variable is required in production');
+    }
+    return 'rootpass'; // ⚠️ 僅限開發環境使用
+  })(),
   
   // DCL 操作在 mysql 系統資料庫
   database: 'mysql',

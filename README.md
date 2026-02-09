@@ -55,16 +55,16 @@ docker compose ps
 
 ```bash
 # MongoDB 範例 - 查看狀態
-node src/cli.js -c databases/mongodb/test-success/config.js status
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js status
 
 # MongoDB 範例 - 執行遷移
-node src/cli.js -c databases/mongodb/test-success/config.js up
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js up
 
 # MariaDB 範例 - 查看狀態
-node src/cli.js -c databases/mariadb/test-success/config.js status
+node src/cli.js -c databases/mariadb/test-success/ddl/config.js status
 
 # MariaDB 範例 - 執行遷移
-node src/cli.js -c databases/mariadb/test-success/config.js up
+node src/cli.js -c databases/mariadb/test-success/ddl/config.js up
 ```
 
 ---
@@ -82,7 +82,7 @@ export default {
     databaseName: process.env.MONGO_DB || 'myapp'
   },
   migrationsDir: './migrations',
-  changelogCollectionName: 'changelog'
+  changelogCollection: 'changelog'
 };
 ```
 
@@ -115,7 +115,7 @@ export default {
         url: 'mongodb://localhost:27017',
         databaseName: 'app_primary'
       },
-      changelogCollectionName: 'changelog'
+      changelogCollection: 'changelog'
     },
     {
       name: 'mongo-secondary',
@@ -123,7 +123,7 @@ export default {
         url: 'mongodb://localhost:27017',
         databaseName: 'app_secondary'
       },
-      changelogCollectionName: 'changelog'
+      changelogCollection: 'changelog'
     }
   ]
 };
@@ -173,7 +173,7 @@ export default {
 node src/cli.js -c <config-path> status
 
 # 範例
-node src/cli.js -c databases/mongodb/test-success/config.js status
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js status
 ```
 
 輸出範例：
@@ -207,9 +207,9 @@ node src/cli.js -c <config-path> up --sanity-check
 node src/cli.js -c <config-path> up --sanity-check --no-auto-rollback
 
 # 範例
-node src/cli.js -c databases/mongodb/test-success/config.js up
-node src/cli.js -c databases/mariadb/test-success/config.js up --dry-run
-node src/cli.js -c databases/mongodb/test-success/config.js up --sanity-check
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js up
+node src/cli.js -c databases/mariadb/test-success/ddl/config.js up --dry-run
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js up --sanity-check
 ```
 
 #### 3. 回滾遷移 (`down`)
@@ -222,8 +222,8 @@ node src/cli.js -c <config-path> down
 node src/cli.js -c <config-path> down -n <count>
 
 # 範例
-node src/cli.js -c databases/mongodb/test-success/config.js down -n 1
-node src/cli.js -c databases/mongodb/test-success/config.js down -n 3
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js down -n 1
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js down -n 3
 ```
 
 #### 4. 建立新遷移 (`create`)
@@ -233,8 +233,8 @@ node src/cli.js -c databases/mongodb/test-success/config.js down -n 3
 node src/cli.js -c <config-path> create <migration-name>
 
 # 範例
-node src/cli.js -c databases/mongodb/test-success/config.js create add-user-avatar
-node src/cli.js -c databases/mariadb/test-success/config.js create create-orders-table
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js create add-user-avatar
+node src/cli.js -c databases/mariadb/test-success/ddl/config.js create create-orders-table
 ```
 
 輸出：
@@ -266,8 +266,8 @@ node src/cli.js -c <config-path> validate --allow TRUNCATE_TABLE,DROP_COLUMN
 node src/cli.js -c <config-path> validate --allow-dangerous --allow DROP_DATABASE
 
 # 範例
-node src/cli.js -c databases/mongodb/test-success/config.js validate
-node src/cli.js -c databases/mongodb/test-failure/config.js validate
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js validate
+node src/cli.js -c databases/mongodb/test-failure/ddl/config.js validate
 ```
 
 輸出範例：
@@ -439,7 +439,7 @@ node src/cli.js -c config.js validate --allow-dangerous --allow DROP_DATABASE
 node src/cli.js -c <config-path> test
 
 # 範例
-node src/cli.js -c databases/mongodb/test-success/config.js test
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js test
 ```
 
 測試流程：
@@ -657,34 +657,34 @@ databases/
 docker compose up -d mongodb mariadb
 
 # 2. 建立新遷移
-node src/cli.js -c databases/mongodb/test-success/config.js create add-user-roles
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js create add-user-roles
 
 # 3. 編輯遷移檔案（實現 up/down 函數）
 
 # 4. 驗證遷移
-node src/cli.js -c databases/mongodb/test-success/config.js validate
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js validate
 
 # 5. 執行遷移（先 dry-run）
-node src/cli.js -c databases/mongodb/test-success/config.js up --dry-run
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js up --dry-run
 
 # 6. 正式執行
-node src/cli.js -c databases/mongodb/test-success/config.js up
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js up
 
 # 7. 測試回滾
-node src/cli.js -c databases/mongodb/test-success/config.js test
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js test
 ```
 
 #### CI/CD 整合
 
 ```bash
 # 在 CI pipeline 中驗證所有遷移
-node src/cli.js -c databases/mongodb/test-success/config.js validate || exit 1
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js validate || exit 1
 
 # 執行完整測試
-node src/cli.js -c databases/mongodb/test-success/config.js test || exit 1
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js test || exit 1
 
 # 部署時執行遷移
-node src/cli.js -c databases/mongodb/test-success/config.js up
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js up
 ```
 
 #### 多環境部署
@@ -693,7 +693,7 @@ node src/cli.js -c databases/mongodb/test-success/config.js up
 # 使用環境變數切換環境
 MONGO_URL=mongodb://prod-server:27017 \
 MONGO_DB=production_db \
-node src/cli.js -c databases/mongodb/test-success/config.js up
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js up
 
 # 或建立環境特定配置
 node src/cli.js -c databases/mongodb/production/config.js status
@@ -733,12 +733,6 @@ db-migrate/
 │       └── production-server/      # 生產伺服器範例
 │           ├── dcl/                # DCL Repeatable 遷移
 │           └── ddl/                # DDL Versioned 遷移
-│   │   ├── test-failure/        # MongoDB 失敗案例（驗證測試）
-│   │   └── multi-instance/      # MongoDB 多實例範例
-│   └── mariadb/
-│       ├── test-success/        # MariaDB 成功案例
-│       ├── test-failure/        # MariaDB 失敗案例（驗證測試）
-│       └── multi-instance/      # MariaDB 多實例範例
 ├── charts/
 │   └── db-migrate/              # Helm Chart
 ├── docker/
@@ -914,16 +908,16 @@ docker compose up -d mongodb mariadb
 sleep 10
 
 # 執行驗證測試
-node src/cli.js -c databases/mongodb/test-success/config.js validate
-node src/cli.js -c databases/mariadb/test-success/config.js validate
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js validate
+node src/cli.js -c databases/mariadb/test-success/ddl/config.js validate
 
 # 執行危險操作檢測測試（應該失敗）
-node src/cli.js -c databases/mongodb/test-failure/config.js validate
-node src/cli.js -c databases/mariadb/test-failure/config.js validate
+node src/cli.js -c databases/mongodb/test-failure/ddl/config.js validate
+node src/cli.js -c databases/mariadb/test-failure/ddl/config.js validate
 
 # 執行 Up-Down-Up 測試
-node src/cli.js -c databases/mongodb/test-success/config.js test
-node src/cli.js -c databases/mariadb/test-success/config.js test
+node src/cli.js -c databases/mongodb/test-success/ddl/config.js test
+node src/cli.js -c databases/mariadb/test-success/ddl/config.js test
 
 # 執行所有測試並生成報表
 node src/cli.js test-all -o ./reports

@@ -49,14 +49,14 @@ spec:
       {{- end }}
       serviceAccountName: {{ include "db-migrate.serviceAccountName" $ }}
       securityContext:
-        {{- toYaml $.Values.securityContext | nindent 8 }}
+        {{- toYaml $.Values.podSecurityContext | nindent 8 }}
       restartPolicy: {{ $.Values.job.restartPolicy }}
       containers:
         - name: migration
           image: "{{ $.Values.global.imageRegistry }}{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
           imagePullPolicy: {{ $.Values.image.pullPolicy }}
           securityContext:
-            {{- toYaml $.Values.podSecurityContext | nindent 12 }}
+            {{- toYaml $.Values.containerSecurityContext | nindent 12 }}
           command:
             - /entrypoint.sh
             - {{ $.Values.migration.command }}
@@ -177,14 +177,14 @@ spec:
       {{- end }}
       serviceAccountName: {{ include "db-migrate.serviceAccountName" . }}
       securityContext:
-        {{- toYaml .Values.securityContext | nindent 8 }}
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       restartPolicy: {{ .Values.job.restartPolicy }}
       containers:
         - name: migration
           image: "{{ .Values.global.imageRegistry }}{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
-            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           command:
             - /entrypoint.sh
             - {{ .Values.migration.command }}

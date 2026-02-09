@@ -1,12 +1,19 @@
-export default {
-  testEnvironment: 'node',
-  collectCoverageFrom: [
-    'src/**/*.js',
-    '!src/**/*.test.js',
-  ],
-  coverageDirectory: 'coverage',
-  testMatch: [
-    '**/test/**/*.test.js',
-    '**/*.test.js',
-  ],
-};
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    include: [
+      'test/**/*.test.js',
+    ],
+    coverage: {
+      provider: 'v8',
+      include: [
+        'src/**/*.js',
+      ],
+      exclude: [
+        'src/**/*.test.js',
+      ],
+      reportsDirectory: 'coverage',
+    },
+  },
+});

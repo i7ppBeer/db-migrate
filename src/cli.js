@@ -123,7 +123,7 @@ program
       console.log('');
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
-      process.exit(1);
+      process.exitCode = 1;
     } finally {
       if (adapter) await adapter.disconnect();
     }
@@ -221,11 +221,11 @@ program
         for (const e of result.errors) {
           console.error(`   ${e}`);
         }
-        process.exit(1);
+        process.exitCode = 1;
       }
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
-      process.exit(1);
+      process.exitCode = 1;
     } finally {
       if (adapter) await adapter.disconnect();
     }
@@ -264,11 +264,11 @@ program
         for (const e of result.errors) {
           console.error(`   ${e}`);
         }
-        process.exit(1);
+        process.exitCode = 1;
       }
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
-      process.exit(1);
+      process.exitCode = 1;
     } finally {
       if (adapter) await adapter.disconnect();
     }
@@ -364,13 +364,13 @@ program
       if (result.errors && result.errors.length > 0) {
         console.error(chalk.red('\n❌ Errors:'));
         result.errors.forEach(e => console.error(`   ${e}`));
-        process.exit(1);
+        process.exitCode = 1;
       }
       
       console.log(chalk.gray('\n💡 Tip: Run "status" to verify the baseline.'));
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
-      process.exit(1);
+      process.exitCode = 1;
     } finally {
       if (adapter) await adapter.disconnect();
     }
@@ -531,13 +531,13 @@ program
           console.log(chalk.gray(`      或指定: --allow ${[...allForbidden].join(',')}`));
         }
         
-        process.exit(1);
+        process.exitCode = 1;
       }
       
       console.log(chalk.green('\n✅ All migrations are valid!'));
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
-      process.exit(1);
+      process.exitCode = 1;
     }
   });
 
@@ -565,11 +565,11 @@ program
       } else {
         console.log(chalk.red('\n❌ Up-Down-Up Test FAILED!'));
         console.log(chalk.red(`   Error: ${result.error}`));
-        process.exit(1);
+        process.exitCode = 1;
       }
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
-      process.exit(1);
+      process.exitCode = 1;
     } finally {
       if (adapter) await adapter.disconnect();
     }
@@ -1008,11 +1008,11 @@ program
         for (const e of result.errors) {
           console.error(`   ${e}`);
         }
-        process.exit(1);
+        process.exitCode = 1;
       }
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
-      process.exit(1);
+      process.exitCode = 1;
     } finally {
       if (adapter) await adapter.disconnect();
     }
@@ -1067,7 +1067,7 @@ program
       console.log('');
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
-      process.exit(1);
+      process.exitCode = 1;
     } finally {
       if (adapter) await adapter.disconnect();
     }
@@ -1146,11 +1146,11 @@ program
         console.log(chalk.green('\n✅ All DCL scripts are idempotent!'));
       } else {
         console.log(chalk.red('\n❌ Some DCL scripts failed idempotency check!'));
-        process.exit(1);
+        process.exitCode = 1;
       }
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
-      process.exit(1);
+      process.exitCode = 1;
     } finally {
       if (adapter) await adapter.disconnect();
     }

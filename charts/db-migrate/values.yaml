@@ -392,13 +392,13 @@ resources:
 # Security Context
 # ============================================================
 # Pod 層級安全設定
-securityContext:
+podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
   fsGroup: 1000
 
 # Container 層級安全設定
-podSecurityContext:
+containerSecurityContext:
   allowPrivilegeEscalation: false
   capabilities:
     drop:

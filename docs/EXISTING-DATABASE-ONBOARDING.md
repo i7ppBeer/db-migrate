@@ -69,7 +69,7 @@ export default {
     options: {}
   },
   migrationsDir: './migrations',
-  changelogCollectionName: 'changelog'
+  changelogCollection: 'changelog'
 };
 ```
 
