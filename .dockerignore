@@ -1,12 +1,17 @@
-# Ignore credentials
-k8s/mongodb-credentials.yaml
+# ============================================================
+# Docker Build Context — only allow essentials
+# ============================================================
 
-# Ignore build artifacts
-*.log
+# --- Ignore everything first ---
+*
+
+# --- Allow only what the image needs ---
+!package.json
+!package-lock.json
+!src/
+!docker/
+
+# --- Always ignore ---
 node_modules/
-dist/
-build/
-
-# Ignore local test data
-/data/
-*.db
+*.log
+.git/

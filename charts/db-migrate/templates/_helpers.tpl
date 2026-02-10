@@ -60,35 +60,8 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
-MongoDB connection URL
-*/}}
-{{- define "db-migrate.mongoUrl" -}}
-{{- if .Values.mongodb.auth.enabled }}
-{{- printf "mongodb://%s:%s@%s:%d/%s" .Values.mongodb.auth.username "$(MONGO_PASSWORD)" .Values.mongodb.host (int .Values.mongodb.port) .Values.mongodb.database }}
-{{- else }}
-{{- printf "mongodb://%s:%d/%s" .Values.mongodb.host (int .Values.mongodb.port) .Values.mongodb.database }}
-{{- end }}
-{{- if .Values.mongodb.options.replicaSet }}
-{{- printf "?replicaSet=%s" .Values.mongodb.options.replicaSet }}
-{{- end }}
-{{- end }}
-
-{{/*
-MariaDB connection string
-*/}}
-{{- define "db-migrate.mariadbHost" -}}
-{{- printf "%s:%d" .Values.mariadb.host (int .Values.mariadb.port) }}
-{{- end }}
-
-{{/*
-Get database type
+Get database type from enabled flags
 */}}
 {{- define "db-migrate.dbType" -}}
-{{- if .Values.mongodb.enabled }}
-{{- print "mongodb" }}
-{{- else if .Values.mariadb.enabled }}
-{{- print "mariadb" }}
-{{- else }}
-{{- .Values.dbType }}
-{{- end }}
+{{- if .Values.mongodb.enabled -}}mongodb{{- else -}}mariadb{{- end -}}
 {{- end }}

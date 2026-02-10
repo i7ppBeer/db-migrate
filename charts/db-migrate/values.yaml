@@ -1,384 +1,155 @@
 # ============================================================
 # DB-Migrate Helm Chart Values
-# Supports: MongoDB, MariaDB/MySQL
-# Version: 2.0.0
 # ============================================================
 #
-# ⚠️  重要安全提醒:
-#    資料庫密碼必須從 Kubernetes Secret 獲取，不支援直接在 values 中設定密碼。
-#    部署前請先建立 Secret。
+# 快速開始:
 #
-# 使用方式 (Usage Examples):
-#
-# ┌─────────────────────────────────────────────────────────┐
-# │ 1. MongoDB 基本安裝（無認證）                           │
-# └─────────────────────────────────────────────────────────┘
-#
+#   # MongoDB DDL — Job mode
 #   helm install my-migration ./charts/db-migrate \
-#     --set mongodb.host=mongodb.default.svc.cluster.local \
-#     --set mongodb.database=myapp
+#     --set mongodb.enabled=true \
+#     --set mongodb.host=mongodb --set mongodb.database=myapp \
+#     --set-file ddl.files.20260101000001-create-users\\.js=migrations/20260101000001-create-users.js
 #
-# ┌─────────────────────────────────────────────────────────┐
-# │ 2. MongoDB 帶認證（必須使用 Secret）                    │
-# └─────────────────────────────────────────────────────────┘
-#
-#   # Step 1: 建立 Secret
-#   kubectl create secret generic my-mongodb-secret \
-#     --from-literal=mongodb-password=<your-password>
-#
-#   # Step 2: 部署
+#   # MariaDB DDL + DCL — Job mode
+#   kubectl create secret generic ddl-secret --from-literal=password=<pw>
+#   kubectl create secret generic dcl-secret --from-literal=password=<pw>
 #   helm install my-migration ./charts/db-migrate \
-#     --set mongodb.host=mongodb \
-#     --set mongodb.database=myapp \
-#     --set mongodb.auth.enabled=true \
-#     --set mongodb.auth.username=admin \
-#     --set mongodb.auth.existingSecret=my-mongodb-secret
+#     --set mongodb.enabled=false --set mariadb.enabled=true \
+#     --set mariadb.host=mariadb --set mariadb.database=myapp \
+#     --set ddl.user=migrate --set ddl.existingSecret=ddl-secret \
+#     --set dcl.enabled=true --set dcl.user=root --set dcl.existingSecret=dcl-secret
 #
-# ┌─────────────────────────────────────────────────────────┐
-# │ 3. MongoDB Replica Set 帶認證                           │
-# └─────────────────────────────────────────────────────────┘
-#
-#   kubectl create secret generic mongo-rs-secret \
-#     --from-literal=mongodb-password=<your-password>
-#
+#   # Deployment mode (sleep infinity, exec in to run)
 #   helm install my-migration ./charts/db-migrate \
-#     --set mongodb.host=mongodb-0.mongodb-headless \
-#     --set mongodb.database=myapp \
-#     --set mongodb.auth.enabled=true \
-#     --set mongodb.auth.username=admin \
-#     --set mongodb.auth.existingSecret=mongo-rs-secret \
-#     --set mongodb.options.replicaSet=rs0
-#
-# ┌─────────────────────────────────────────────────────────┐
-# │ 4. MariaDB/MySQL 安裝（必須使用 Secret）                │
-# └─────────────────────────────────────────────────────────┘
-#
-#   # Step 1: 建立 Secret
-#   kubectl create secret generic my-mariadb-secret \
-#     --from-literal=mariadb-password=<your-password>
-#
-#   # Step 2: 部署
-#   helm install my-migration ./charts/db-migrate \
-#     --set mongodb.enabled=false \
-#     --set mariadb.enabled=true \
-#     --set mariadb.host=mariadb.default.svc.cluster.local \
-#     --set mariadb.database=myapp \
-#     --set mariadb.user=migrate \
-#     --set mariadb.existingSecret=my-mariadb-secret
-#
-# ┌─────────────────────────────────────────────────────────┐
-# │ 5. 執行特定指令                                         │
-# └─────────────────────────────────────────────────────────┘
-#
-#   # 查看遷移狀態
-#   helm install migration-status ./charts/db-migrate \
-#     --set mongodb.host=mongodb \
-#     --set mongodb.database=myapp \
-#     --set migration.command=status
-#
-#   # 執行遷移 (預設)
-#   helm install migration-up ./charts/db-migrate \
-#     --set mongodb.host=mongodb \
-#     --set mongodb.database=myapp \
-#     --set migration.command=up
-#
-#   # 回滾最後一個遷移
-#   helm install migration-down ./charts/db-migrate \
-#     --set mongodb.host=mongodb \
-#     --set mongodb.database=myapp \
-#     --set migration.command=down \
-#     --set migration.downCount=1
-#
-#   # 驗證遷移檔案
-#   helm install migration-validate ./charts/db-migrate \
-#     --set mongodb.host=mongodb \
-#     --set mongodb.database=myapp \
-#     --set migration.command=validate
-#
-#   # 測試遷移 (up 後立即 down)
-#   helm install migration-test ./charts/db-migrate \
-#     --set mongodb.host=mongodb \
-#     --set mongodb.database=myapp \
-#     --set migration.command=test
-#
-# ┌─────────────────────────────────────────────────────────┐
-# │ 6. 使用 ConfigMap 載入遷移檔案                          │
-# └─────────────────────────────────────────────────────────┘
-#
-#   # 從目錄建立 ConfigMap
-#   kubectl create configmap my-migrations \
-#     --from-file=./migrations/
-#
-#   helm install my-migration ./charts/db-migrate \
-#     --set mongodb.host=mongodb \
-#     --set mongodb.database=myapp \
-#     --set customMigrations.enabled=true \
-#     --set customMigrations.configMapName=my-migrations
-#
-# ┌─────────────────────────────────────────────────────────┐
-# │ 7. 使用 PVC 載入遷移檔案                                │
-# └─────────────────────────────────────────────────────────┘
-#
-#   helm install my-migration ./charts/db-migrate \
-#     --set mongodb.host=mongodb \
-#     --set mongodb.database=myapp \
-#     --set customMigrations.enabled=true \
-#     --set customMigrations.pvcName=migrations-pvc
-#
-# ┌─────────────────────────────────────────────────────────┐
-# │ 8. 使用 values 檔案 (推薦用於生產環境)                  │
-# └─────────────────────────────────────────────────────────┘
-#
-#   helm install my-migration ./charts/db-migrate \
-#     -f my-values.yaml
-#
-#   # my-values.yaml 範例:
-#   # mongodb:
-#   #   host: mongodb.production.svc.cluster.local
-#   #   database: production_db
-#   #   auth:
-#   #     enabled: true
-#   #     username: admin
-#   #     existingSecret: prod-mongodb-secret  # 必須預先建立
-#   # job:
-#   #   backoffLimit: 5
-#   #   ttlSecondsAfterFinished: 86400
-#
-# ┌─────────────────────────────────────────────────────────┐
-# │ 9. 多環境部署範例                                      │
-# └─────────────────────────────────────────────────────────┘
-#
-#   # 開發環境 (無認證)
-#   helm install dev-migration ./charts/db-migrate \
-#     --namespace development \
-#     --set mongodb.host=mongodb-dev \
-#     --set mongodb.database=dev_db
-#
-#   # 測試環境 (帶認證)
-#   kubectl -n testing create secret generic test-mongodb-secret \
-#     --from-literal=mongodb-password=testpass
-#
-#   helm install test-migration ./charts/db-migrate \
-#     --namespace testing \
-#     --set mongodb.host=mongodb-test \
-#     --set mongodb.database=test_db \
-#     --set mongodb.auth.enabled=true \
-#     --set mongodb.auth.username=admin \
-#     --set mongodb.auth.existingSecret=test-mongodb-secret
-#
-#   # 生產環境 (帶認證)
-#   kubectl -n production create secret generic prod-mongodb-secret \
-#     --from-literal=mongodb-password=<secure-password>
-#
-#   helm install prod-migration ./charts/db-migrate \
-#     --namespace production \
-#     --set mongodb.host=mongodb-prod \
-#     --set mongodb.database=prod_db \
-#     --set mongodb.auth.enabled=true \
-#     --set mongodb.auth.username=admin \
-#     --set mongodb.auth.existingSecret=prod-mongodb-secret
-#
-# ┌─────────────────────────────────────────────────────────┐
-# │ 10. 多 MongoDB 實例部署（同時遷移多個資料庫）           │
-# └─────────────────────────────────────────────────────────┘
-#
-#   # Step 1: 建立各實例的 Secret
-#   kubectl create secret generic mongo-primary-secret \
-#     --from-literal=mongodb-password=<password1>
-#   kubectl create secret generic mongo-secondary-secret \
-#     --from-literal=mongodb-password=<password2>
-#   kubectl create secret generic mongo-tertiary-secret \
-#     --from-literal=mongodb-password=<password3>
-#
-#   # Step 2: 使用 values 檔案部署 (見下方 values-multi-mongodb.yaml 範例)
-#   helm install multi-migration ./charts/db-migrate \
-#     -f values-multi-mongodb.yaml
+#     --set mode=deployment --set mongodb.host=mongodb
 #
 # ============================================================
 
-# ------------------------------------------------------------
-# Global Settings
-# ------------------------------------------------------------
+# --- Work mode ---
+# job        = one-shot Helm hook Job (runs on install/upgrade)
+# deployment = long-running pod (sleep infinity), exec in to run commands
+mode: job
+
+# --- Global ---
 global:
-  # Container registry prefix (e.g., "docker.io/", "ghcr.io/")
   imageRegistry: ""
-  # Image pull secrets for private registries
-  # Example: imagePullSecrets: ["my-registry-secret"]
   imagePullSecrets: []
 
-# Override chart name
 nameOverride: ""
 fullnameOverride: ""
 
-# ------------------------------------------------------------
-# Image Configuration
-# ------------------------------------------------------------
+# --- Image ---
 image:
   repository: db-migrate
-  tag: "2.0.0"
+  tag: "2.1.0"
   pullPolicy: IfNotPresent
 
 # ============================================================
-# MongoDB Configuration
+# Database — enable exactly one
 # ============================================================
+
 mongodb:
-  # 啟用 MongoDB (與 mariadb.enabled 互斥)
   enabled: true
-  
-  # ──────────────────────────────────────────────────────────
-  # 單一實例模式 (預設)
-  # ──────────────────────────────────────────────────────────
-  # Connection settings
-  host: mongodb                    # MongoDB 主機名稱或 Service 名稱
-  port: 27017                      # MongoDB 端口
-  database: myapp                  # 目標資料庫名稱
-  
-  # Authentication (認證設定)
+  host: mongodb
+  port: 27017
+  database: myapp
+
   auth:
-    enabled: false                 # 是否啟用認證
-    username: ""                   # 使用者名稱
-    # 密碼必須從 Kubernetes Secret 獲取 (必填)
-    existingSecret: ""             # 已存在的 Secret 名稱 (必填)
-    secretKey: "mongodb-password"  # Secret 中的 key 名稱
-  
-  # Connection options
-  options:
-    replicaSet: ""                 # Replica Set 名稱 (e.g., "rs0")
-    tls: false                     # 是否啟用 TLS/SSL
-    tlsCAFile: ""                  # CA 憑證檔案路徑
-    authSource: "admin"            # 認證來源資料庫
-  
-  # ──────────────────────────────────────────────────────────
-  # 多實例模式 (設定此項後，上方單一實例設定會被忽略)
-  # ──────────────────────────────────────────────────────────
-  # 當定義 instances 時，會為每個實例建立獨立的 Job
-  # 每個實例必須有自己的 Secret
-  #
-  # instances:
-  #   - name: primary              # 實例名稱 (用於 Job 命名)
-  #     host: mongodb-primary      # MongoDB 主機
-  #     port: 27017                # 端口 (選填，預設 27017)
-  #     database: app_primary      # 資料庫名稱
-  #     auth:                      # 認證設定 (選填)
-  #       enabled: true
-  #       username: admin
-  #       existingSecret: mongo-primary-secret
-  #       secretKey: mongodb-password
-  #
-  #   - name: secondary
-  #     host: mongodb-secondary
-  #     database: app_secondary
-  #     auth:
-  #       enabled: true
-  #       username: admin
-  #       existingSecret: mongo-secondary-secret
-  #
-  #   - name: tertiary
-  #     host: mongodb-tertiary
-  #     database: app_tertiary
-  #     auth:
-  #       enabled: false           # 無認證
-  instances: []
+    enabled: false
+    username: ""
+    existingSecret: ""          # key: mongodb-password
+    secretKey: "mongodb-password"
 
-# ============================================================
-# MariaDB/MySQL Configuration
-# ============================================================
+  options:
+    replicaSet: ""
+    tls: false
+    authSource: "admin"
+
 mariadb:
-  # 啟用 MariaDB/MySQL (與 mongodb.enabled 互斥)
   enabled: false
-  
-  # Connection settings
-  host: mariadb                    # MariaDB/MySQL 主機名稱
-  port: 3306                       # MariaDB/MySQL 端口
-  database: myapp                  # 目標資料庫名稱
-  user: migrate                    # 使用者名稱
-  
-  # 密碼必須從 Kubernetes Secret 獲取 (必填)
-  existingSecret: ""               # 已存在的 Secret 名稱 (必填)
-  secretKey: "mariadb-password"    # Secret 中的 key 名稱
-  
-  # Connection options
+  host: mariadb
+  port: 3306
+  database: myapp
+
   options:
-    connectTimeout: 10000          # 連線逾時 (毫秒)
-    charset: "utf8mb4"             # 字元集
-    ssl: false                     # 是否啟用 SSL
+    connectTimeout: 10000
+    charset: "utf8mb4"
+    ssl: false
 
 # ============================================================
-# Migration Settings (遷移設定)
+# DDL — versioned schema migrations
 # ============================================================
-migration:
-  # 容器內遷移檔案目錄
-  directory: /app/migrations
-  
-  # 遷移記錄表/集合名稱
-  changelogCollection: changelog   # MongoDB 用
-  changelogTable: _migrations      # MariaDB 用
-  
-  # 要執行的指令:
-  #   - up:       執行所有未執行的遷移
-  #   - down:     回滾遷移 (配合 downCount 使用)
-  #   - status:   顯示遷移狀態
-  #   - validate: 驗證遷移檔案語法和安全性
-  #   - test:     測試遷移 (up 後立即 down)
-  command: up
-  
-  # 回滾數量 (down 指令用)
-  downCount: 1
-  
-  # 驗證設定
-  validation:
-    enabled: true                  # 是否執行驗證
-    allowDangerous: false          # 是否允許危險操作 (DROP DATABASE 等)
-    failOnWarning: false           # 警告是否視為失敗
-  
-  # Sanity Check 設定 (Pre-Check / Post-Check / Auto-Rollback)
+ddl:
+  enabled: true
+  command: up                     # up | down | status | validate | test
+
+  # DB credentials (MariaDB only; MongoDB uses mongodb.auth)
+  user: ""
+  existingSecret: ""              # key: password
+  secretKey: "password"
+
   sanityCheck:
-    enabled: false                 # 是否啟用 Sanity Check
-    autoRollback: true             # Sanity Check 失敗時是否自動回滾
-    timeoutMs: 30000               # Sanity Check 超時時間 (毫秒)
+    enabled: false
+    autoRollback: true
+    timeoutMs: 30000
+
+  changelogTable: "_migrations"         # MariaDB
+  changelogCollection: "changelog"      # MongoDB
+
+  # Migration files — embedded in ConfigMap
+  # key = filename, value = file content
+  files: {}
+  #   20260101000001-create-users.sql: |
+  #     -- +migrate Up
+  #     CREATE TABLE IF NOT EXISTS users (
+  #       id INT AUTO_INCREMENT PRIMARY KEY,
+  #       name VARCHAR(255) NOT NULL
+  #     );
+  #     -- +migrate Down
+  #     DROP TABLE IF EXISTS users;
 
 # ============================================================
-# Job Configuration (Kubernetes Job 設定)
+# DCL — repeatable permission / user migrations
+# ============================================================
+dcl:
+  enabled: false
+  command: dcl                    # dcl | dcl:status | dcl:verify
+
+  # DB credentials (MariaDB only)
+  user: ""
+  existingSecret: ""              # key: password
+  secretKey: "password"
+
+  database: "mysql"               # DCL usually targets 'mysql' system DB
+  checksumTable: "_dcl_migrations"
+
+  # Migration files — embedded in ConfigMap
+  files: {}
+  #   R__01_readonly_user.sql: |
+  #     CREATE USER IF NOT EXISTS 'reader'@'%' IDENTIFIED BY 'xxx';
+  #     GRANT SELECT ON myapp.* TO 'reader'@'%';
+
+# ============================================================
+# Job settings (mode=job only)
 # ============================================================
 job:
-  # 是否建立 Migration Job
-  enabled: true
-  
-  # Job 重啟策略: Never 或 OnFailure
   restartPolicy: Never
-  
-  # 失敗重試次數
   backoffLimit: 3
-  
-  # Job 完成後保留時間 (秒)，設為 null 則不自動刪除
   ttlSecondsAfterFinished: 600
-  
-  # Job 執行超時時間 (秒)
   activeDeadlineSeconds: 300
-  
-  # Job annotations
   annotations: {}
-    # example.com/trigger: "true"
-  
-  # Pod annotations
   podAnnotations: {}
-    # prometheus.io/scrape: "false"
 
 # ============================================================
-# Custom Migrations (自訂遷移檔案來源)
+# Deployment settings (mode=deployment only)
 # ============================================================
-customMigrations:
-  # 是否啟用自訂遷移檔案
-  enabled: false
-  
-  # 方式一: 從 ConfigMap 掛載
-  configMapName: ""
-  
-  # 方式二: 從 PVC 掛載
-  pvcName: ""
+deployment:
+  replicas: 1
+  annotations: {}
+  podAnnotations: {}
 
 # ============================================================
-# Resources (資源限制)
+# Resources
 # ============================================================
 resources:
   limits:
@@ -389,161 +160,30 @@ resources:
     memory: 128Mi
 
 # ============================================================
-# Security Context
+# Security
 # ============================================================
-# Pod 層級安全設定
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
   fsGroup: 1000
 
-# Container 層級安全設定
 containerSecurityContext:
   allowPrivilegeEscalation: false
   capabilities:
-    drop:
-      - ALL
+    drop: [ALL]
   readOnlyRootFilesystem: true
 
 # ============================================================
-# Service Account
+# ServiceAccount
 # ============================================================
 serviceAccount:
-  # 是否建立 ServiceAccount
   create: true
-  # ServiceAccount 名稱 (留空則自動生成)
   name: ""
-  # ServiceAccount annotations
   annotations: {}
-    # eks.amazonaws.com/role-arn: arn:aws:iam::123456789:role/my-role
 
 # ============================================================
-# Scheduling (排程設定)
+# Scheduling
 # ============================================================
 nodeSelector: {}
-  # kubernetes.io/os: linux
-
 tolerations: []
-  # - key: "dedicated"
-  #   operator: "Equal"
-  #   value: "database"
-  #   effect: "NoSchedule"
-
 affinity: {}
-  # nodeAffinity:
-  #   requiredDuringSchedulingIgnoredDuringExecution:
-  #     nodeSelectorTerms:
-  #       - matchExpressions:
-  #           - key: kubernetes.io/os
-  #             operator: In
-  #             values:
-  #               - linux
-
-# ============================================================
-# Example Values Files (範例)
-# ============================================================
-#
-# ⚠️ 重要: 所有密碼必須從 Secret 獲取，部署前請先建立 Secret
-#
-# --- values-mongodb-dev.yaml (無認證) ---
-# mongodb:
-#   enabled: true
-#   host: mongodb.development
-#   database: dev_db
-#   auth:
-#     enabled: false
-# migration:
-#   command: up
-# job:
-#   ttlSecondsAfterFinished: 300
-#
-# --- values-mongodb-prod.yaml (帶認證) ---
-# # 部署前執行:
-# # kubectl create secret generic mongodb-prod-secret \
-# #   --from-literal=mongodb-password=<your-secure-password>
-#
-# mongodb:
-#   enabled: true
-#   host: mongodb.production
-#   database: prod_db
-#   auth:
-#     enabled: true
-#     username: admin
-#     existingSecret: mongodb-prod-secret  # 必須預先建立
-#     secretKey: mongodb-password
-# migration:
-#   command: up
-#   validation:
-#     enabled: true
-#     allowDangerous: false
-# job:
-#   backoffLimit: 5
-#   ttlSecondsAfterFinished: 86400
-#
-# --- values-mariadb-prod.yaml ---
-# # 部署前執行:
-# # kubectl create secret generic mariadb-prod-secret \
-# #   --from-literal=mariadb-password=<your-secure-password>
-#
-# mongodb:
-#   enabled: false
-# mariadb:
-#   enabled: true
-#   host: mariadb.production
-#   database: prod_db
-#   user: migrate
-#   existingSecret: mariadb-prod-secret  # 必須預先建立
-#   secretKey: mariadb-password
-# migration:
-#   command: up
-#   validation:
-#     enabled: true
-#
-# --- values-multi-mongodb.yaml (多 MongoDB 實例) ---
-# # 部署前執行:
-# # kubectl create secret generic mongo-primary-secret \
-# #   --from-literal=mongodb-password=<password1>
-# # kubectl create secret generic mongo-secondary-secret \
-# #   --from-literal=mongodb-password=<password2>
-# # kubectl create secret generic mongo-tertiary-secret \
-# #   --from-literal=mongodb-password=<password3>
-#
-# mongodb:
-#   enabled: true
-#   instances:
-#     - name: primary
-#       host: mongodb-primary.default.svc.cluster.local
-#       port: 27017
-#       database: app_primary
-#       auth:
-#         enabled: true
-#         username: admin
-#         existingSecret: mongo-primary-secret
-#         secretKey: mongodb-password
-#
-#     - name: secondary
-#       host: mongodb-secondary.default.svc.cluster.local
-#       port: 27017
-#       database: app_secondary
-#       auth:
-#         enabled: true
-#         username: admin
-#         existingSecret: mongo-secondary-secret
-#         secretKey: mongodb-password
-#
-#     - name: tertiary
-#       host: mongodb-tertiary.default.svc.cluster.local
-#       port: 27017
-#       database: app_tertiary
-#       auth:
-#         enabled: true
-#         username: admin
-#         existingSecret: mongo-tertiary-secret
-#         secretKey: mongodb-password
-#
-# migration:
-#   command: up
-# job:
-#   backoffLimit: 3
-#   ttlSecondsAfterFinished: 600
-#

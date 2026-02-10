@@ -1,9 +1,9 @@
 apiVersion: v2
 name: db-migrate
-description: Multi-database migration management (MongoDB & MariaDB/MySQL)
+description: Database migration chart — Job or Deployment mode with ConfigMap-based migration files
 type: application
-version: 2.0.0
-appVersion: "2.0.0"
+version: 3.0.0
+appVersion: "2.1.0"
 keywords:
   - database
   - migration

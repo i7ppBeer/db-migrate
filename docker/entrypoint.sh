@@ -82,7 +82,33 @@ export default {
 };
 EOFCONFIG
         else
-            cat > "$CONFIG_PATH" << EOFCONFIG
+            # Determine if this is a DCL config (DB_NAME=mysql or MIGRATION_MODE=dcl)
+            local migration_mode="${MIGRATION_MODE:-ddl}"
+            
+            if [ "$DB_NAME" = "mysql" ] || [ "$migration_mode" = "dcl" ]; then
+                # DCL config: repeatable mode for user/permission management
+                cat > "$CONFIG_PATH" << EOFCONFIG
+export default {
+  type: 'mariadb',
+  mariadb: {
+    host: '${DB_HOST}',
+    port: ${DB_PORT},
+    database: '${DB_NAME:-mysql}',
+    user: '${DB_USER:-root}',
+    password: '${DB_PASSWORD:-}'
+  },
+  migrationsDir: '${MIGRATIONS_DIR}',
+  checksumTable: '${CHECKSUM_TABLE:-_dcl_migrations}',
+  mode: 'repeatable',
+  idempotencyCheck: {
+    enabled: true,
+    verbose: true
+  }
+};
+EOFCONFIG
+            else
+                # DDL config: versioned mode for schema changes
+                cat > "$CONFIG_PATH" << EOFCONFIG
 export default {
   type: 'mariadb',
   mariadb: {
@@ -93,9 +119,15 @@ export default {
     password: '${DB_PASSWORD:-}'
   },
   migrationsDir: '${MIGRATIONS_DIR}',
-  changelogTable: '_migrations'
+  changelogTable: '${CHANGELOG_TABLE:-_migrations}',
+  sanityCheck: {
+    enabled: ${SANITY_CHECK_ENABLED:-false},
+    autoRollback: ${SANITY_CHECK_AUTO_ROLLBACK:-true},
+    timeoutMs: ${SANITY_CHECK_TIMEOUT:-30000}
+  }
 };
 EOFCONFIG
+            fi
         fi
         
         echo -e "${GREEN}[OK] Config generated at $CONFIG_PATH${NC}"
@@ -121,7 +153,7 @@ main() {
         wait)
             wait_for_database
             ;;
-        up|down|status|validate|test|create|dcl|dcl:status|dcl:verify)
+        up|down|status|validate|test|create|create-dcl|baseline|dcl|dcl:status|dcl:verify|status-all|up-all|dcl-all|dcl:status-all|dcl:verify-all|test-instances)
             wait_for_database
             generate_config
             run_command "$command" "$@"
@@ -138,7 +170,7 @@ main() {
             ;;
         *)
             echo -e "${RED}[ERROR] Unknown command: $command${NC}"
-            echo "Available commands: up, down, status, validate, test, create, test-all, dcl, dcl:status, dcl:verify, wait, help, shell"
+            node /app/src/cli.js --help
             exit 1
             ;;
     esac

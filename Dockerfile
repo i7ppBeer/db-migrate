@@ -1,80 +1,36 @@
 # ============================================================
-# Multi-Database Migration Runner Dockerfile
-# Supports: MongoDB, MariaDB/MySQL
+# Database Migration Runner
+# Contents: src/ + node_modules + entrypoint.sh
 # ============================================================
 
-FROM node:20-alpine AS base
+FROM node:20-alpine
 
-# Install common dependencies
-RUN apk add --no-cache \
-    bash \
-    curl \
-    mysql-client \
-    mongodb-tools
+RUN apk add --no-cache bash curl mysql-client mongodb-tools
 
 WORKDIR /app
 
-# Copy package files
+# --- Dependencies ---
 COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 
-# ============================================================
-# Development stage
-# ============================================================
-FROM base AS development
-
-RUN npm install
-
-COPY . .
-
-ENV NODE_ENV=development
-
-CMD ["npm", "run", "dev"]
-
-# ============================================================
-# Production stage
-# ============================================================
-FROM base AS production
-
-RUN npm ci --omit=dev
-
+# --- Application ---
 COPY src/ ./src/
+COPY docker/entrypoint.sh /app/docker/entrypoint.sh
+RUN chmod +x /app/docker/entrypoint.sh
 
-# ⚠️ 遷移檔案會在建置時由 CI/CD 複製進來
-# COPY migrations/ ./migrations/
-
+# --- Security ---
 ENV NODE_ENV=production
-
+RUN mkdir -p /app/config /app/migrations /tmp \
+    && chown -R 1000:1000 /app/config /app/migrations /tmp
 USER 1000
 
-# Default command
-CMD ["node", "src/cli.js", "--help"]
+# --- Runtime ---
+ENV DB_TYPE=mongodb \
+    DB_HOST=localhost \
+    DB_PORT=27017 \
+    DB_NAME=migrations \
+    CONFIG_PATH=/app/config/config.js \
+    MIGRATIONS_DIR=/app/migrations
 
-# ============================================================
-# Migration Runner stage
-# For running migrations in CI/CD
-# ============================================================
-FROM production AS runner
-
-# Switch to root to copy and chmod entrypoint
-USER root
-
-# Copy entrypoint script
-COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-# Switch back to non-root
-USER 1000
-
-# Environment variables
-ENV DB_TYPE=mongodb
-ENV DB_HOST=localhost
-ENV DB_PORT=27017
-ENV DB_NAME=migrations
-ENV CONFIG_PATH=/app/config/config.js
-ENV MIGRATIONS_DIR=/app/migrations
-
-# Mount points
-VOLUME ["/app/config", "/app/migrations"]
-
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/app/docker/entrypoint.sh"]
 CMD ["up"]

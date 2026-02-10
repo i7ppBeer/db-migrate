@@ -54,7 +54,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: runner
     container_name: migrate-runner-mongodb
     depends_on:
       mongodb:
@@ -76,7 +75,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: runner
     container_name: migrate-runner-mariadb
     depends_on:
       mariadb:
@@ -100,7 +98,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: runner
     container_name: migrate-test-all
     depends_on:
       mongodb:
@@ -129,7 +126,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: runner
     container_name: migrate-cli
     working_dir: /app
     volumes:

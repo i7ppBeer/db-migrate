@@ -46,5 +46,5 @@ RUN echo "=== Bundled Migrations ===" && \
     echo "=========================="
 
 # 使用 entrypoint
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/app/docker/entrypoint.sh"]
 CMD ["up"]

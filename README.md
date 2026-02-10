@@ -164,7 +164,532 @@ export default {
 
 ---
 
-### 🔷 CLI 指令詳解
+### � Container 操作 CLI
+
+無需在本機安裝 Node.js，透過 Docker Compose 操作所有 CLI 指令。
+
+`docker-compose.yml` 已定義 `migrate` 服務（`profiles: [tools]`），`entrypoint` 為 `node src/cli.js`，掛載 `./databases:/app/databases`，可直接傳入子指令。
+
+#### 啟動環境
+
+```bash
+# 啟動資料庫
+docker compose up -d mongodb mariadb
+
+# 第一次使用需 build
+docker compose build migrate
+```
+
+#### 所有指令一覽
+
+以下所有指令格式：`docker compose run --rm migrate <command> [options] -c <config-path>`
+
+---
+
+##### `status` — 查看遷移狀態
+
+```bash
+docker compose run --rm migrate status -c /app/databases/mariadb/test-success/ddl/config.js
+```
+
+```
+[STATUS] Database: mariadb
+──────────────────────────────────────────────────
+
+✅ Applied (6):
+   20250101000001-create-users.sql - Mon Feb 09 2026 09:04:56 GMT+0000
+   20250101000002-seed-users.sql - Mon Feb 09 2026 09:04:56 GMT+0000
+   20250101000003-create-products.sql - Mon Feb 09 2026 09:04:57 GMT+0000
+   20250101000004-create-orders.sql - Mon Feb 09 2026 09:04:57 GMT+0000
+   20250101000005-add-user-profile.sql - Mon Feb 09 2026 09:04:57 GMT+0000
+   20250101000006-add-phone-with-sanity.sql - Mon Feb 09 2026 09:04:57 GMT+0000
+
+⏳ Pending (3):
+   R__010_stored_procedures.sql
+   R__011_dangerous_cleanup.sql
+   R__012_blocked_dangerous.sql
+```
+
+---
+
+##### `up` — 執行遷移
+
+```bash
+# 執行所有待處理遷移
+docker compose run --rm migrate up -c /app/databases/mariadb/test-success/ddl/config.js
+
+# Dry Run
+docker compose run --rm migrate up --dry-run -c /app/databases/mariadb/test-success/ddl/config.js
+
+# 啟用 Sanity Check
+docker compose run --rm migrate up --sanity-check -c /app/databases/mariadb/test-success/ddl/config.js
+```
+
+```
+[UP] Running migrations (mariadb)...
+
+✅ Applied 1 migration(s):
+   20250101000006-add-phone-with-sanity.sql
+```
+
+Dry Run 輸出：
+```
+[DRY RUN] Would apply these migrations:
+   R__010_stored_procedures.sql
+   R__011_dangerous_cleanup.sql
+   R__012_blocked_dangerous.sql
+```
+
+---
+
+##### `down` — 回滾遷移
+
+```bash
+# 回滾最後 1 筆
+docker compose run --rm migrate down -n 1 -c /app/databases/mariadb/test-success/ddl/config.js
+
+# 回滾最後 3 筆
+docker compose run --rm migrate down -n 3 -c /app/databases/mariadb/test-success/ddl/config.js
+```
+
+```
+[DOWN] Rolling back 1 migration(s) (mariadb)...
+
+⏪ Rolled back 1 migration(s):
+   20250101000006-add-phone-with-sanity.sql
+```
+
+---
+
+##### `create` — 建立 DDL 遷移檔
+
+```bash
+docker compose run --rm migrate create add-orders-table -c /app/databases/mariadb/test-success/ddl/config.js
+```
+
+```
+✅ Created: 20260210031512-add-orders-table.sql
+
+Remember to:
+1. Implement the UP section
+2. Implement the DOWN section
+3. Run validation: db-migrate validate -c <config>
+```
+
+---
+
+##### `create-dcl` — 建立 DCL 遷移檔
+
+```bash
+# 自動流水號
+docker compose run --rm migrate create-dcl readonly_users -c /app/databases/mariadb/test-success/dcl/config.js
+
+# 指定流水號
+docker compose run --rm migrate create-dcl app_service -n 004 -c /app/databases/mariadb/test-success/dcl/config.js
+```
+
+```
+✅ Created: R__readonly_users.sql
+
+Remember:
+⚠️  DCL scripts must be IDEMPOTENT (safe to run multiple times)
+1. Use IF NOT EXISTS / IF EXISTS patterns
+2. DCL runs whenever checksum changes (no versioning)
+3. Run verification: db-migrate dcl:verify -c <config>
+```
+
+---
+
+##### `validate` — 驗證遷移檔案
+
+```bash
+# 嚴格驗證
+docker compose run --rm migrate validate -c /app/databases/mariadb/test-success/ddl/config.js
+
+# 放行危險操作
+docker compose run --rm migrate validate --allow-dangerous -c /app/databases/mariadb/test-success/ddl/config.js
+
+# 放行特定操作
+docker compose run --rm migrate validate --allow TRUNCATE_TABLE,DROP_INDEX -c /app/databases/mariadb/test-success/ddl/config.js
+```
+
+通過範例：
+```
+[VALIDATE] Checking migrations (mariadb)...
+
+[OK] 20250101000001-create-users.sql
+[OK] 20250101000002-seed-users.sql
+[OK] 20250101000003-create-products.sql
+   ⚠️  ⚠️ ON DELETE CASCADE may cause cascading deletes
+[OK] 20250101000004-create-orders.sql
+[OK] 20250101000005-add-user-profile.sql
+[OK] 20250101000006-add-phone-with-sanity.sql
+[OK] R__010_stored_procedures.sql
+[OK] R__011_dangerous_cleanup.sql
+[ERROR] R__012_blocked_dangerous.sql
+   ⛔ [TRUNCATE_TABLE] 🟠 DATA LOSS: TRUNCATE TABLE will clear all data
+   ⛔ [DROP_INDEX] 🟠 PERFORMANCE: DROP INDEX may affect query performance
+   📊 forbidden:0 dangerous:2 warnings:1
+
+──────────────────────────────────────────────────
+Total: 9 file(s)
+Valid: 8
+Invalid: 1
+
+💡 放行提示:
+   🟠 危險操作放行: --allow-dangerous
+      或指定: --allow TRUNCATE_TABLE,DROP_INDEX
+```
+
+失敗範例（DDL 中混入 DCL 操作）：
+```
+[VALIDATE] Checking migrations (mariadb)...
+
+[ERROR] 20250101000002-dangerous-drop-database.sql
+   ❌ [DROP_DATABASE] 🔴 DATA LOSS: Drop database is forbidden
+[ERROR] 20250101000003-dangerous-dcl.sql
+   ❌ [CREATE_USER] 🔴 DCL: User management should be in DCL project (Repeatable)
+   ❌ [DROP_USER] 🔴 DCL: User management should be in DCL project (Repeatable)
+   ❌ [GRANT] 🔴 DCL: Permission management should be in DCL project (Repeatable)
+[ERROR] 20250101000005-orphan-drop.sql
+   ❌ Orphan drop: DOWN drops 'legacy_table' but UP doesn't create it
+
+──────────────────────────────────────────────────
+Total: 10 file(s)
+Valid: 1
+Invalid: 9
+
+💡 放行提示:
+   🟠 危險操作放行: --allow-dangerous
+   🔴 禁止操作放行: --allow-forbidden (需團隊審批)
+```
+
+---
+
+##### `baseline` — 標記既有遷移為已執行
+
+```bash
+# 標記全部（Dry Run）
+docker compose run --rm migrate baseline --all --dry-run -c /app/databases/mariadb/test-success/ddl/config.js
+
+# 正式標記
+docker compose run --rm migrate baseline --all -c /app/databases/mariadb/test-success/ddl/config.js
+
+# 標記到指定版本
+docker compose run --rm migrate baseline --up-to 20250101000003-create-products.sql -c /app/databases/mariadb/test-success/ddl/config.js
+```
+
+```
+[BASELINE] Marking existing migrations as applied (mariadb)...
+
+📋 Will mark 6 migration(s) as applied:
+   20250101000001-create-users.sql
+   20250101000002-seed-users.sql
+   20250101000003-create-products.sql
+   20250101000004-create-orders.sql
+   20250101000005-add-user-profile.sql
+   20250101000006-add-phone-with-sanity.sql
+
+   [DRY RUN] No changes made.
+```
+
+---
+
+##### `test` — Up-Down-Up 測試
+
+```bash
+docker compose run --rm migrate test -c /app/databases/mariadb/test-success/ddl/config.js
+```
+
+```
+🧪 Running Up-Down-Up Test (mariadb)...
+
+══════════════════════════════════════════════════
+
+📤 Stage 1: Running UP migrations...
+   ✅ Applied 6 migrations
+
+📥 Stage 2: Running DOWN migrations (rollback)...
+   ✅ Rolled back 6 migrations
+
+📤 Stage 3: Running UP migrations again...
+   ✅ Re-applied 6 migrations
+
+══════════════════════════════════════════════════
+
+✅ Up-Down-Up Test PASSED!
+```
+
+---
+
+##### `dcl` — 執行 DCL Repeatable 遷移
+
+```bash
+docker compose run --rm migrate dcl -c /app/databases/mariadb/test-success/dcl/config.js
+
+# Dry Run
+docker compose run --rm migrate dcl --dry-run -c /app/databases/mariadb/test-success/dcl/config.js
+```
+
+```
+[DCL] Running repeatable migrations (mariadb)...
+
+✅ Applied 2 DCL migration(s):
+   R__001_create_app_user.sql (checksum changed)
+   R__002_create_readonly_user.sql (checksum changed)
+```
+
+---
+
+##### `dcl:status` — 查看 DCL 狀態
+
+```bash
+docker compose run --rm migrate dcl:status -c /app/databases/mariadb/test-success/dcl/config.js
+```
+
+```
+[DCL STATUS] Database: mariadb
+──────────────────────────────────────────────────
+
+⏳ Pending (0):
+
+✅ Up-to-date (3):
+   R__001_create_app_user.sql
+      Applied: Tue Feb 10 2026 03:15:46 GMT+0000
+   R__002_create_readonly_user.sql
+      Applied: Tue Feb 10 2026 03:15:46 GMT+0000
+   R__003_admin_users.sql
+      Applied: Mon Feb 09 2026 09:06:24 GMT+0000
+```
+
+---
+
+##### `dcl:verify` — 驗證 DCL 冪等性
+
+```bash
+docker compose run --rm migrate dcl:verify -c /app/databases/mariadb/test-success/dcl/config.js
+```
+
+```
+[DCL VERIFY] Testing idempotency (mariadb)...
+
+══════════════════════════════════════════════════
+
+📄 R__001_create_app_user.sql
+   🔍 Testing idempotency for: R__001_create_app_user.sql
+   🔍 Execution 1...
+   🔍 Capturing state after execution 1...
+   🔍 Execution 2...
+   🔍 Capturing state after execution 2...
+   🔍 ✅ Idempotency verified - states are identical
+   ✅ IDEMPOTENT
+
+📄 R__002_create_readonly_user.sql
+   ✅ IDEMPOTENT
+
+📄 R__003_admin_users.sql
+   ✅ IDEMPOTENT
+
+══════════════════════════════════════════════════
+
+✅ All DCL scripts are idempotent!
+```
+
+---
+
+##### `status-all` — 多實例狀態
+
+```bash
+docker compose run --rm migrate status-all -c /app/databases/mariadb/multi-instance/ddl/config.js
+```
+
+```
+📊 Status for 2 database instance(s):
+
+════════════════════════════════════════════════════════════
+
+[primary-db] (mariadb)
+  ✅ Applied: 5
+  ⏳ Pending: 0
+
+[secondary-db] (mariadb)
+  ✅ Applied: 5
+  ⏳ Pending: 0
+
+════════════════════════════════════════════════════════════
+```
+
+---
+
+##### `up-all` — 多實例執行遷移
+
+```bash
+docker compose run --rm migrate up-all -c /app/databases/mariadb/multi-instance/ddl/config.js
+
+# Dry Run
+docker compose run --rm migrate up-all --dry-run -c /app/databases/mariadb/multi-instance/ddl/config.js
+```
+
+```
+🚀 Running migrations on 2 instance(s)...
+
+[primary-db] ✅ Applied 3 migration(s)
+[secondary-db] ✅ Applied 3 migration(s)
+```
+
+---
+
+##### `test-instances` — 多實例測試
+
+```bash
+docker compose run --rm migrate test-instances -c /app/databases/mariadb/multi-instance/ddl/config.js
+
+# 只驗證（跳過 Up-Down-Up）
+docker compose run --rm migrate test-instances --validate-only -c /app/databases/mariadb/multi-instance/ddl/config.js
+
+# 平行執行
+docker compose run --rm migrate test-instances --parallel -c /app/databases/mariadb/multi-instance/ddl/config.js
+```
+
+```
+🔗 Found 2 database instance(s):
+
+   • primary-db (mariadb)
+   • secondary-db (mariadb)
+
+══════════════════════════════════════════════════════════════════════
+                    📊 MIGRATION TEST REPORT
+══════════════════════════════════════════════════════════════════════
+  Database             Type       Test            Status     Duration
+  ──────────────────────────────────────────────────────────────────
+  primary-db           mariadb    up-down-up      ✅ PASS     1.23s
+  secondary-db         mariadb    up-down-up      ✅ PASS     1.15s
+  ──────────────────────────────────────────────────────────────────
+
+  SUMMARY:
+  Total Tests:    2
+  Passed:         2 ✅
+  Pass Rate:      100.0%
+
+  ╔════════════════════════════════════════════════════════════════╗
+  ║               ✅ ALL TESTS PASSED SUCCESSFULLY                 ║
+  ╚════════════════════════════════════════════════════════════════╝
+```
+
+---
+
+##### `test-all` — 掃描所有專案測試
+
+```bash
+docker compose run --rm migrate test-all
+
+# 指定報表輸出
+docker compose run --rm migrate test-all -o /app/reports
+```
+
+```
+══════════════════════════════════════════════════════════════════════
+                    📊 MIGRATION TEST REPORT
+══════════════════════════════════════════════════════════════════════
+  Database             Type       Test            Status     Duration
+  ──────────────────────────────────────────────────────────────────
+  test-success         mariadb    up-down-up      ✅ PASS     1.50s
+  test-success         mongodb    up-down-up      ✅ PASS     0.80s
+  ──────────────────────────────────────────────────────────────────
+
+  SUMMARY:
+  Total Tests:    2
+  Passed:         2 ✅
+  Pass Rate:      100.0%
+
+  ╔════════════════════════════════════════════════════════════════╗
+  ║               ✅ ALL TESTS PASSED SUCCESSFULLY                 ║
+  ╚════════════════════════════════════════════════════════════════╝
+```
+
+---
+
+##### `dcl-all` — 多實例 DCL 遷移
+
+```bash
+docker compose run --rm migrate dcl-all -c /app/databases/mariadb/multi-instance/dcl/config.js
+```
+
+```
+🔐 Running DCL migrations on 2 instance(s)...
+
+[primary-db] Running DCL migrations...
+   ✅ Applied 2 DCL migration(s)
+      - R__001_create_readonly_user.sql (new file)
+      - R__002_create_readwrite_user.sql (new file)
+
+[secondary-db] Running DCL migrations...
+   All DCL migrations are up-to-date.
+```
+
+---
+
+##### `dcl:status-all` — 多實例 DCL 狀態
+
+```bash
+docker compose run --rm migrate dcl:status-all -c /app/databases/mariadb/multi-instance/dcl/config.js
+```
+
+```
+📊 DCL Status for 2 instance(s):
+
+════════════════════════════════════════════════════════════
+
+[primary-db] (mariadb)
+────────────────────────────────────────
+  ⏳ Pending: 0
+  ✅ Up-to-date: 2
+
+[secondary-db] (mariadb)
+────────────────────────────────────────
+  ⏳ Pending: 0
+  ✅ Up-to-date: 2
+
+════════════════════════════════════════════════════════════
+```
+
+---
+
+##### `dcl:verify-all` — 多實例 DCL 冪等性驗證
+
+```bash
+docker compose run --rm migrate dcl:verify-all -c /app/databases/mariadb/multi-instance/dcl/config.js
+```
+
+```
+🔍 Verifying DCL idempotency on 2 instance(s)...
+
+════════════════════════════════════════════════════════════
+
+[primary-db] (mariadb)
+────────────────────────────────────────
+  📄 R__001_create_readonly_user.sql
+     ✅ IDEMPOTENT
+  📄 R__002_create_readwrite_user.sql
+     ✅ IDEMPOTENT
+
+[secondary-db] (mariadb)
+────────────────────────────────────────
+  📄 R__001_create_readonly_user.sql
+     ✅ IDEMPOTENT
+  📄 R__002_create_readwrite_user.sql
+     ✅ IDEMPOTENT
+
+════════════════════════════════════════════════════════════
+
+✅ All DCL scripts are idempotent on all instances!
+```
+
+> **路徑說明**: 容器內路徑固定以 `/app/databases/` 開頭。`config.js` 中的 `migrationsDir: './migrations'` 是相對路徑，不需要改。
+
+---
+
+### �🔷 CLI 指令詳解
 
 #### 1. 查看遷移狀態 (`status`)
 
@@ -229,7 +754,7 @@ node src/cli.js -c databases/mongodb/test-success/ddl/config.js down -n 3
 #### 4. 建立新遷移 (`create`)
 
 ```bash
-# 建立新遷移檔案
+# 建立新 DDL (versioned) 遷移檔案
 node src/cli.js -c <config-path> create <migration-name>
 
 # 範例
@@ -245,6 +770,46 @@ Remember to:
 1. Implement the UP section
 2. Implement the DOWN section
 3. Run validation: db-migrate validate -c <config>
+```
+
+#### 4b. 建立 DCL 遷移 (`create-dcl`)
+
+```bash
+# 建立新 DCL (repeatable) 遷移檔案，自動加上 R__ 前綴
+node src/cli.js -c <config-path> create-dcl <migration-name>
+
+# 指定流水號
+node src/cli.js -c <config-path> create-dcl <migration-name> -n 003
+
+# 範例
+node src/cli.js -c databases/mariadb/production-server/dcl/config.js create-dcl readonly_users
+node src/cli.js -c databases/mariadb/production-server/dcl/config.js create-dcl app_service_account -n 004
+```
+
+輸出：
+```
+✅ Created: R__003_readonly_users.sql
+```
+
+#### 4c. 標記既有遷移 (`baseline`)
+
+對已有資料的資料庫，將現有遷移標記為「已執行」而不實際執行 SQL：
+
+```bash
+# 標記所有遷移為已執行
+node src/cli.js -c <config-path> baseline --all
+
+# 標記到指定版本（含）
+node src/cli.js -c <config-path> baseline --up-to 20260101000003-create-orders.sql
+
+# 標記單一檔案
+node src/cli.js -c <config-path> baseline --file 20260101000001-create-users.sql
+
+# Dry Run - 查看會標記哪些，不實際執行
+node src/cli.js -c <config-path> baseline --all --dry-run
+
+# 範例
+node src/cli.js -c databases/mariadb/production-server/ddl/ecommerce/config.js baseline --all
 ```
 
 #### 5. 驗證遷移檔案 (`validate`)
@@ -470,7 +1035,7 @@ node src/cli.js -c <config-path> test-instances --parallel
 node src/cli.js -c <config-path> test-instances -o ./reports
 
 # 範例
-node src/cli.js -c databases/mongodb/multi-instance/config.js test-instances
+node src/cli.js -c databases/mongodb/multi-instance/ddl/config.js test-instances
 ```
 
 #### 8. 查看所有實例狀態 (`status-all`)
@@ -480,7 +1045,7 @@ node src/cli.js -c databases/mongodb/multi-instance/config.js test-instances
 node src/cli.js -c <config-path> status-all
 
 # 範例
-node src/cli.js -c databases/mongodb/multi-instance/config.js status-all
+node src/cli.js -c databases/mongodb/multi-instance/ddl/config.js status-all
 ```
 
 輸出範例：
@@ -515,7 +1080,7 @@ node src/cli.js -c <config-path> up-all
 node src/cli.js -c <config-path> up-all --dry-run
 
 # 範例
-node src/cli.js -c databases/mongodb/multi-instance/config.js up-all
+node src/cli.js -c databases/mongodb/multi-instance/ddl/config.js up-all
 ```
 
 #### 10. 測試所有資料庫 (`test-all`)
@@ -611,6 +1176,42 @@ node src/cli.js -c databases/mariadb/production-server/dcl/config.js dcl:verify
 ✅ All DCL scripts are idempotent!
 ```
 
+#### 14. 多實例 DCL 遷移 (`dcl-all`)
+
+```bash
+# 對所有實例執行 DCL repeatable 遷移
+node src/cli.js -c <config-path> dcl-all
+
+# Dry Run
+node src/cli.js -c <config-path> dcl-all --dry-run
+
+# 啟用驗證
+node src/cli.js -c <config-path> dcl-all --validate
+
+# 範例
+node src/cli.js -c databases/mariadb/multi-instance/dcl/config.js dcl-all
+```
+
+#### 15. 多實例 DCL 狀態 (`dcl:status-all`)
+
+```bash
+# 查看所有實例的 DCL 遷移狀態
+node src/cli.js -c <config-path> dcl:status-all
+
+# 範例
+node src/cli.js -c databases/mariadb/multi-instance/dcl/config.js dcl:status-all
+```
+
+#### 16. 多實例 DCL 冪等性驗證 (`dcl:verify-all`)
+
+```bash
+# 驗證所有實例的 DCL 腳本都是冪等的
+node src/cli.js -c <config-path> dcl:verify-all
+
+# 範例
+node src/cli.js -c databases/mariadb/multi-instance/dcl/config.js dcl:verify-all
+```
+
 ---
 
 ### 🔷 DDL vs DCL 目錄結構
@@ -618,28 +1219,53 @@ node src/cli.js -c databases/mariadb/production-server/dcl/config.js dcl:verify
 ```
 databases/
 ├── mariadb/
-│   └── production-server/
-│       ├── dcl/                          # DCL - Repeatable 模式 (Platform Team)
-│       │   ├── config.js
-│       │   └── migrations/
-│       │       ├── R__01_readonly_users.sql
-│       │       ├── R__02_readwrite_users.sql
-│       │       └── R__03_ddl_admin.sql
-│       └── ddl/                          # DDL - Versioned 模式 (Dev Team)
-│           ├── ecommerce/
-│           │   ├── config.js
-│           │   └── migrations/
-│           │       ├── 20260101000001-create-users.sql
-│           │       └── 20260101000002-create-products.sql
-│           ├── analytics/
-│           └── logging/
+│   ├── _templates/                       # 新專案模板
+│   │   ├── dcl/
+│   │   │   ├── config.js
+│   │   │   └── migrations/
+│   │   └── ddl/
+│   │       ├── config.js
+│   │       └── migrations/
+│   ├── multi-instance/                    # 多實例配置 (同 schema → 多 DB)
+│   │   ├── dcl/
+│   │   │   ├── config.js
+│   │   │   └── migrations/
+│   │   └── ddl/
+│   │       ├── config.js
+│   │       └── migrations/
+│   ├── production-server/                 # 生產環境 (多 DB 各自 schema)
+│   │   ├── dcl/                           # DCL - Repeatable 模式 (Platform Team)
+│   │   │   ├── config.js
+│   │   │   └── migrations/
+│   │   │       ├── R__01_readonly_users.sql
+│   │   │       ├── R__02_readwrite_users.sql
+│   │   │       └── R__03_ddl_admin.sql
+│   │   └── ddl/                           # DDL - Versioned 模式 (Dev Team)
+│   │       ├── ecommerce/
+│   │       │   ├── config.js
+│   │       │   └── migrations/
+│   │       │       ├── 20260101000001-create-users.sql
+│   │       │       └── 20260101000002-create-products.sql
+│   │       ├── analytics/
+│   │       │   ├── config.js
+│   │       │   └── migrations/
+│   │       │       ├── 20260101000001-create-events.sql
+│   │       │       └── 20260101000002-create-daily-stats.sql
+│   │       └── logging/
+│   │           ├── config.js
+│   │           └── migrations/
+│   │               ├── 20260101000001-create-app-logs.sql
+│   │               └── 20260101000002-create-audit-trail.sql
+│   ├── test-success/
+│   └── test-failure/
 └── mongodb/
+    ├── multi-instance/
+    │   ├── dcl/
+    │   └── ddl/
     └── production-server/
         ├── dcl/
         │   ├── config.js
         │   └── migrations/
-        │       ├── R__01_readonly_users.js
-        │       └── R__02_readwrite_users.js
         └── ddl/
             └── ecommerce/
                 ├── config.js
@@ -708,6 +1334,7 @@ node src/cli.js -c databases/mongodb/staging/config.js up
 db-migrate/
 ├── src/
 │   ├── cli.js                      # 統一 CLI 入口
+│   ├── check-db.js                  # 資料庫可用性檢查
 │   ├── core/
 │   │   ├── base-adapter.js         # 適配器基類
 │   │   ├── reporter.js             # 報表生成器
@@ -720,28 +1347,42 @@ db-migrate/
 │       └── mariadb-adapter.js      # MariaDB 適配器
 ├── databases/
 │   ├── mongodb/
+│   │   ├── _templates/             # 新專案模板 (dcl/ + ddl/)
 │   │   ├── test-success/           # MongoDB 成功案例
 │   │   ├── test-failure/           # MongoDB 失敗案例（驗證用）
-│   │   ├── multi-instance/         # 多實例配置範例
+│   │   ├── multi-instance/         # 多實例配置（dcl/ + ddl/）
 │   │   └── production-server/      # 生產伺服器範例
 │   │       ├── dcl/                # DCL Repeatable 遷移
 │   │       └── ddl/                # DDL Versioned 遷移
 │   └── mariadb/
+│       ├── _templates/             # 新專案模板 (dcl/ + ddl/)
 │       ├── test-success/           # MariaDB 成功案例
 │       ├── test-failure/           # MariaDB 失敗案例
-│       ├── multi-instance/         # 多實例配置範例
-│       └── production-server/      # 生產伺服器範例
+│       ├── multi-instance/         # 多實例配置（dcl/ + ddl/）
+│       └── production-server/      # 生產伺服器（3 DB: ecommerce/analytics/logging）
 │           ├── dcl/                # DCL Repeatable 遷移
-│           └── ddl/                # DDL Versioned 遷移
+│           └── ddl/                # DDL Versioned 遷移（每個 DB 獨立子目錄）
 ├── charts/
-│   └── db-migrate/              # Helm Chart
+│   └── db-migrate/                 # Helm Chart（含 ConfigMap 多 DB 模式）
+│       ├── templates/
+│       │   ├── configmap.yaml      # 每個 DB 一個 ConfigMap（DDL+DCL 合併）
+│       │   ├── migration-jobs.yaml # DDL/DCL Jobs（每 DB 各一組）
+│       │   └── ...
+│       ├── values.yaml             # 預設 values
+│       └── values-multi-db.yaml    # 多 DB 範例 values
 ├── docker/
-│   └── entrypoint.sh            # Docker 入口腳本
+│   └── entrypoint.sh               # Docker/K8s 入口腳本
 ├── scripts/
-│   ├── setup-k8s-dev.sh         # K8s 開發環境設定
-│   └── run-tests.sh             # 測試執行腳本
-├── Dockerfile                   # 多階段 Dockerfile
-└── docker-compose.yml           # 開發環境 Compose
+│   ├── gen-values.py               # 從專案目錄自動產生 Helm values.yaml
+│   ├── build-migration-image.sh    # 建置 Migration Docker 映像
+│   ├── ci-migration-test.sh        # CI 遷移測試腳本
+│   ├── full-migration-test.sh      # 完整遷移測試
+│   ├── local-test.sh               # 本地測試腳本
+│   ├── setup-k8s-dev.sh            # K8s 開發環境設定
+│   └── run-tests.sh                # 測試執行腳本
+├── Dockerfile                      # 多階段 Dockerfile
+├── Dockerfile.migrations           # Migration 映像 Dockerfile
+└── docker-compose.yml              # 開發環境 Compose
 ```
 
 ---
@@ -1028,20 +1669,16 @@ helm upgrade --install my-migration ./charts/db-migrate \
 #### MariaDB 部署
 
 ```bash
-# 基本部署
+# 基本部署（密碼必須使用 Secret）
+# Step 1: 建立 Secret
+kubectl create secret generic my-mariadb-secret \
+  --from-literal=mariadb-password=<your-password>
+
+# Step 2: 部署
 helm upgrade --install my-migration ./charts/db-migrate \
   --set mongodb.enabled=false \
   --set mariadb.enabled=true \
   --set mariadb.host=mariadb.default.svc.cluster.local \
-  --set mariadb.database=myapp \
-  --set mariadb.user=migrate \
-  --set mariadb.password=secret
-
-# 使用 existing Secret
-helm upgrade --install my-migration ./charts/db-migrate \
-  --set mongodb.enabled=false \
-  --set mariadb.enabled=true \
-  --set mariadb.host=mariadb \
   --set mariadb.database=myapp \
   --set mariadb.user=migrate \
   --set mariadb.existingSecret=my-mariadb-secret
@@ -1106,7 +1743,7 @@ helm upgrade --install migration-validate ./charts/db-migrate \
   --set migration.command=validate
 ```
 
-#### 使用 ConfigMap 載入遷移
+#### 使用 ConfigMap 載入遷移（單一 DB 模式）
 
 ```bash
 # 建立 ConfigMap
@@ -1119,6 +1756,85 @@ helm upgrade --install my-migration ./charts/db-migrate \
   --set mongodb.database=myapp \
   --set customMigrations.enabled=true \
   --set customMigrations.configMapName=my-migrations
+```
+
+#### 多資料庫 ConfigMap 模式（推薦）
+
+適合同時管理多個資料庫（如 ecommerce、analytics、logging），每個 DB 一個 ConfigMap，DDL+DCL 合併管理。
+
+**執行順序：**
+1. ConfigMap 建立 (hook-weight: `-10`)
+2. DDL Jobs 執行 (hook-weight: `-3`) — 先建 table 結構
+3. DCL Jobs 執行 (hook-weight: `-1`) — 再設定帳號權限
+
+```bash
+# Step 1: 為每個 DB 建立密碼 Secret
+kubectl create secret generic ecommerce-ddl-secret \
+  --from-literal=mariadb-password=<ecommerce-ddl-password>
+kubectl create secret generic analytics-ddl-secret \
+  --from-literal=mariadb-password=<analytics-ddl-password>
+kubectl create secret generic logging-ddl-secret \
+  --from-literal=mariadb-password=<logging-ddl-password>
+kubectl create secret generic dcl-root-secret \
+  --from-literal=mariadb-password=<root-password>
+
+# Step 2: 使用 values 檔案部署
+helm upgrade --install db-migration ./charts/db-migrate \
+  -f charts/db-migrate/values-multi-db.yaml
+```
+
+`values-multi-db.yaml` 結構：
+```yaml
+migrations:
+  enabled: true
+  databases:
+    - name: ecommerce
+      type: mariadb
+      host: mariadb.production.svc.cluster.local
+      port: 3306
+      ddl:
+        user: ecommerce_ddl_admin
+        existingSecret: ecommerce-ddl-secret
+        sanityCheck: { enabled: true, autoRollback: true, timeoutMs: 30000 }
+        files:
+          20260101000001-create-users.sql: |
+            -- +migrate Up
+            CREATE TABLE IF NOT EXISTS users ( ... );
+            -- +migrate Down
+            DROP TABLE IF EXISTS users;
+      dcl:
+        user: root
+        existingSecret: dcl-root-secret
+        files:
+          R__01_ecommerce_users.sql: |
+            CREATE USER IF NOT EXISTS ...;
+```
+
+> 完整範例見 [charts/db-migrate/values-multi-db.yaml](charts/db-migrate/values-multi-db.yaml)
+
+#### 使用 gen-values.py 自動產生 values
+
+從本地專案目錄掃描 DDL/DCL 遷移檔案，自動產生 Helm `values.yaml`：
+
+```bash
+# 查看掃描結果（不產生 YAML）
+python3 scripts/gen-values.py databases/mariadb/production-server --dry-run
+
+# 產生 values.yaml 到 stdout
+python3 scripts/gen-values.py databases/mariadb/production-server \
+  --host mariadb.prod.svc.cluster.local
+
+# 產生到檔案
+python3 scripts/gen-values.py databases/mariadb/production-server \
+  --host mariadb.prod.svc.cluster.local \
+  -o charts/db-migrate/values-production.yaml
+
+# 搭配 helm 部署
+python3 scripts/gen-values.py databases/mariadb/production-server \
+  --host mariadb.prod.svc.cluster.local \
+  --image-tag 2.1.0 \
+  -o /tmp/values.yaml \
+  && helm upgrade --install db-migration ./charts/db-migrate -f /tmp/values.yaml
 ```
 
 ---
@@ -1149,8 +1865,18 @@ node src/cli.js -c databases/mongodb/multi-instance/config.js test-instances -o 
 
 ## 🔗 相關文件
 
+- [CLI 使用指南](docs/CLI-USAGE-GUIDE.md)
 - [遷移管理指南](docs/MIGRATION-MANAGEMENT-GUIDE.md)
 - [AWS 風格發布公告](docs/MIGRATION-MANAGEMENT-GUIDE-AWS-STYLE.md)
+- [驗證規則參考](docs/VALIDATION-RULES-REFERENCE.md)
+- [MariaDB 使用指南](docs/USER-GUIDE-MARIADB.md)
+- [MongoDB 使用指南](docs/USER-GUIDE-MONGODB.md)
+- [既有資料庫導入指南](docs/EXISTING-DATABASE-ONBOARDING.md)
+- [本地測試指南](docs/LOCAL-TEST-GUIDE.md)
+- [Docker Compose 使用指南](docs/DOCKER-COMPOSE-USER-GUIDE.md)
+- [CI 遷移測試指南](docs/CI-MIGRATION-TEST-GUIDE.md)
+- [建置映像指南](docs/BUILD-IMAGE-GUIDE.md)
+- [Vault / Boundary 整合](docs/VAULT-BOUNDARY-GUIDE.md)
 - [Helm Chart Values 說明](charts/db-migrate/values.yaml)
 
 ---

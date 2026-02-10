@@ -1,0 +1,20 @@
+{{- if and .Values.dcl.enabled .Values.dcl.files }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "db-migrate.fullname" . }}-dcl
+  labels:
+    {{- include "db-migrate.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dcl
+  {{- if eq .Values.mode "job" }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+  {{- end }}
+data:
+  {{- range $filename, $content := .Values.dcl.files }}
+  {{ $filename | quote }}: |
+    {{- $content | nindent 4 }}
+  {{- end }}
+{{- end }}
