@@ -20,17 +20,13 @@ RUN chmod +x /app/docker/entrypoint.sh
 
 # --- Security ---
 ENV NODE_ENV=production
-RUN mkdir -p /app/config /app/migrations /tmp \
-    && chown -R 1000:1000 /app/config /app/migrations /tmp
-USER 1000
+RUN mkdir -p /app/reports /tmp && chmod 755 /app/reports /tmp
 
 # --- Runtime ---
 ENV DB_TYPE=mongodb \
     DB_HOST=localhost \
     DB_PORT=27017 \
-    DB_NAME=migrations \
-    CONFIG_PATH=/app/config/config.js \
-    MIGRATIONS_DIR=/app/migrations
+    DB_NAME=migrations
 
 ENTRYPOINT ["/app/docker/entrypoint.sh"]
 CMD ["up"]

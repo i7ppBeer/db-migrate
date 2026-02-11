@@ -104,8 +104,6 @@ spec:
             {{- end }}
             - name: MIGRATION_MODE
               value: "dcl"
-            - name: MIGRATIONS_DIR
-              value: "/app/migrations"
             - name: CHECKSUM_TABLE
               value: {{ .Values.dcl.checksumTable | quote }}
           {{- with .Values.containerSecurityContext }}

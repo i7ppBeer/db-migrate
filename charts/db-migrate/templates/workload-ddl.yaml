@@ -125,8 +125,6 @@ spec:
             {{- end }}
             - name: MIGRATION_MODE
               value: "ddl"
-            - name: MIGRATIONS_DIR
-              value: "/app/migrations"
             - name: CHANGELOG_TABLE
               value: {{ .Values.ddl.changelogTable | quote }}
             - name: CHANGELOG_COLLECTION
