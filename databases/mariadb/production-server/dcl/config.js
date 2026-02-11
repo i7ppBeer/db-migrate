@@ -14,7 +14,7 @@ export default {
   host: process.env.MARIADB_HOST || 'localhost',
   port: parseInt(process.env.MARIADB_PORT || '3306'),
   user: process.env.MARIADB_USER || 'root',
-  password: process.env.MARIADB_PASSWORD || 'rootpassword',
+  password: process.env.MARIADB_PASSWORD || 'rootpass',
   database: 'mysql', // DCL operates on mysql system database
   
   // DCL migrations directory (Repeatable mode)

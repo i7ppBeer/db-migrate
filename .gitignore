@@ -25,3 +25,4 @@ k8s/secrets/*.yaml
 test-results/
 .nyc_output/
 
+reports/

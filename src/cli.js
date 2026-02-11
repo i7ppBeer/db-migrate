@@ -575,6 +575,311 @@ program
     }
   });
 
+// ─────────────────────────────────────────────────────────────────
+// validate-all: Validate all DDL and DCL in a directory
+// ─────────────────────────────────────────────────────────────────
+
+program
+  .command('validate-all')
+  .description('Validate all DDL and DCL migrations in a directory (e.g., production-server)')
+  .argument('<dir>', 'Directory path (e.g., databases/mariadb/production-server)')
+  .option('--allow-dangerous', 'Allow dangerous operations (🟠 level)')
+  .option('--allow-forbidden', 'Allow forbidden operations (🔴 level) - requires team approval')
+  .option('--allow <codes>', 'Allow specific operation codes (comma-separated)', (val) => val.split(','))
+  .option('--ddl-only', 'Validate DDL migrations only')
+  .option('--dcl-only', 'Validate DCL migrations only')
+  .action(async (dirPath, cmdOptions, cmd) => {
+    const options = { ...cmd.parent.opts(), ...cmdOptions };
+    
+    try {
+      const absDir = path.resolve(dirPath);
+      
+      console.log(chalk.blue(`\n[VALIDATE-ALL] Scanning directory: ${dirPath}`));
+      console.log(chalk.gray('═'.repeat(60)));
+      
+      // Build validation options
+      const validateOptions = {
+        allowDangerous: options.allowDangerous,
+        allowForbidden: options.allowForbidden,
+        allowedCodes: options.allow || []
+      };
+      
+      // Show active allowances
+      if (options.allowDangerous) {
+        console.log(chalk.yellow(`   🟠 --allow-dangerous: Dangerous operations will be allowed`));
+      }
+      if (options.allowForbidden) {
+        console.log(chalk.red(`   🔴 --allow-forbidden: Forbidden operations will be allowed (REQUIRES APPROVAL)`));
+      }
+      if (options.allow && options.allow.length > 0) {
+        console.log(chalk.cyan(`   📋 --allow: ${options.allow.join(', ')}`));
+      }
+      
+      // Find all config files
+      const configs = [];
+      
+      // Scan for DDL configs (databases in ddl/ subdirectories)
+      if (!options.dclOnly) {
+        const ddlDir = path.join(absDir, 'ddl');
+        try {
+          const ddlExists = await fs.stat(ddlDir);
+          if (ddlExists.isDirectory()) {
+            const ddlSubdirs = await fs.readdir(ddlDir);
+            for (const subdir of ddlSubdirs) {
+              const configPath = path.join(ddlDir, subdir, 'config.js');
+              try {
+                await fs.stat(configPath);
+                configs.push({
+                  type: 'DDL',
+                  label: `DDL/${subdir}`,
+                  path: configPath
+                });
+              } catch (e) {
+                // config.js not found, skip
+              }
+            }
+          }
+        } catch (e) {
+          // ddl/ directory not found
+        }
+      }
+      
+      // Scan for DCL config
+      if (!options.ddlOnly) {
+        const dclConfigPath = path.join(absDir, 'dcl', 'config.js');
+        try {
+          await fs.stat(dclConfigPath);
+          configs.push({
+            type: 'DCL',
+            label: 'DCL',
+            path: dclConfigPath
+          });
+        } catch (e) {
+          // dcl/config.js not found
+        }
+      }
+      
+      if (configs.length === 0) {
+        console.log(chalk.yellow('\n⚠️  No config files found in the specified directory.'));
+        console.log(chalk.gray('   Expected structure: <dir>/ddl/*/config.js or <dir>/dcl/config.js'));
+        process.exitCode = 1;
+        return;
+      }
+      
+      console.log(chalk.cyan(`\n📋 Found ${configs.length} config(s):`));
+      for (const cfg of configs) {
+        console.log(chalk.gray(`   - ${cfg.label}`));
+      }
+      console.log('');
+      
+      let totalPassed = 0;
+      let totalFailed = 0;
+      const results = [];
+      
+      // Validate each config
+      for (const cfg of configs) {
+        console.log(chalk.blue(`\n${'─'.repeat(60)}`));
+        console.log(chalk.bold.cyan(`📦 ${cfg.label}`));
+        console.log(chalk.gray(`   Config: ${cfg.path}`));
+        console.log(chalk.blue('─'.repeat(60)));
+        
+        let adapter;
+        try {
+          // Load config
+          const config = await loadConfig(cfg.path);
+          
+          // Resolve migrations directory
+          if (config.migrationsDir && !path.isAbsolute(config.migrationsDir)) {
+            const configDir = path.dirname(path.resolve(cfg.path));
+            config.migrationsDir = path.resolve(configDir, config.migrationsDir);
+          }
+          
+          adapter = await createAdapter(config);
+          
+          if (cfg.type === 'DDL') {
+            // Validate DDL migrations
+            console.log(chalk.blue(`\n[VALIDATE] Checking migrations (${adapter.dbType})...\n`));
+            
+            const result = await adapter.validate(validateOptions);
+            
+            for (const fileResult of result.results) {
+              if (fileResult.valid) {
+                console.log(chalk.green(`[OK] ${fileResult.file}`));
+                totalPassed++;
+              } else {
+                console.log(chalk.red(`[ERROR] ${fileResult.file}`));
+                totalFailed++;
+              }
+              
+              // Show forbidden operations
+              if (fileResult.forbiddenOps && fileResult.forbiddenOps.length > 0) {
+                for (const op of fileResult.forbiddenOps) {
+                  console.log(chalk.red(`   ❌ [${op.code}] ${op.message}`));
+                }
+              }
+              
+              // Show dangerous operations
+              if (fileResult.dangerousOps && fileResult.dangerousOps.length > 0) {
+                for (const op of fileResult.dangerousOps) {
+                  console.log(chalk.magenta(`   ⛔ [${op.code}] ${op.message}`));
+                }
+              }
+              
+              // Show summary for this file
+              if (fileResult.summary && (fileResult.summary.forbidden > 0 || fileResult.summary.dangerous > 0)) {
+                const s = fileResult.summary;
+                console.log(chalk.gray(`   📊 forbidden:${s.forbidden} dangerous:${s.dangerous} warnings:${s.warnings}`));
+              }
+            }
+            
+            const passed = result.results.filter(r => r.valid).length;
+            const failed = result.results.filter(r => !r.valid).length;
+            console.log(chalk.gray(`\nTotal: ${result.results.length} | Valid: ${passed} | Invalid: ${failed}`));
+            
+            results.push({
+              label: cfg.label,
+              type: 'DDL',
+              valid: result.valid,
+              total: result.results.length,
+              passed,
+              failed
+            });
+            
+          } else if (cfg.type === 'DCL') {
+            // Verify DCL idempotency
+            console.log(chalk.blue(`\n[DCL VERIFY] Checking idempotency (${adapter.dbType})...\n`));
+            
+            // Connect to database for DCL verification
+            await adapter.connect();
+            
+            const configDir = path.dirname(path.resolve(cfg.path));
+            const migrationsDir = config.migrationsDir && !path.isAbsolute(config.migrationsDir)
+              ? path.resolve(configDir, config.migrationsDir)
+              : config.migrationsDir;
+            
+            const runner = new RepeatableRunner({
+              checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+            });
+            
+            const checker = new DCLIdempotentChecker({
+              verbose: false  // Disable verbose output for validate-all
+            });
+            
+            const context = {
+              dbType: adapter.dbType,
+              connection: adapter.connection,
+              db: adapter.db,
+              client: adapter.client,
+              migrationsDir
+            };
+            
+            const files = await runner.getRepeatableFiles(migrationsDir);
+            let allPassed = true;
+            let passedCount = 0;
+            let failedCount = 0;
+            
+            for (const file of files) {
+              console.log(chalk.blue(`📄 ${file.fileName}`));
+              
+              const executeScript = async () => {
+                if (adapter.dbType === 'mariadb') {
+                  await adapter.connection.query(file.content);
+                } else if (adapter.dbType === 'mongodb') {
+                  const module = await import(`file://${file.filePath}`);
+                  if (typeof module.up === 'function') {
+                    await module.up(adapter.db, adapter.client);
+                  }
+                }
+              };
+              
+              const result = await checker.verify(context, executeScript, {
+                database: config.database || config.mongodb?.databaseName,
+                scriptName: file.fileName
+              });
+              
+              if (result.success) {
+                console.log(chalk.green(`   ✅ IDEMPOTENT`));
+                passedCount++;
+                totalPassed++;
+              } else {
+                console.log(chalk.red(`   ❌ NOT IDEMPOTENT: ${result.error}`));
+                allPassed = false;
+                failedCount++;
+                totalFailed++;
+              }
+            }
+            
+            console.log(chalk.gray(`\nTotal: ${files.length} | Passed: ${passedCount} | Failed: ${failedCount}`));
+            
+            results.push({
+              label: cfg.label,
+              type: 'DCL',
+              valid: allPassed,
+              total: files.length,
+              passed: passedCount,
+              failed: failedCount
+            });
+          }
+          
+        } catch (error) {
+          console.error(chalk.red(`\n[ERROR] ${error.message}`));
+          totalFailed++;
+          
+          results.push({
+            label: cfg.label,
+            type: cfg.type,
+            valid: false,
+            error: error.message
+          });
+        } finally {
+          if (adapter) {
+            try {
+              await adapter.disconnect();
+            } catch (e) {
+              // Ignore disconnect errors
+            }
+          }
+        }
+      }
+      
+      // Final summary
+      console.log(chalk.blue(`\n${'═'.repeat(60)}`));
+      console.log(chalk.bold.white('📊 SUMMARY'));
+      console.log(chalk.blue('═'.repeat(60)));
+      
+      for (const res of results) {
+        const icon = res.valid ? '✅' : '❌';
+        const color = res.valid ? chalk.green : chalk.red;
+        
+        if (res.error) {
+          console.log(color(`${icon} ${res.label} (${res.type}): ERROR - ${res.error}`));
+        } else {
+          console.log(color(`${icon} ${res.label} (${res.type}): ${res.passed}/${res.total} passed`));
+        }
+      }
+      
+      console.log(chalk.blue('─'.repeat(60)));
+      console.log(chalk.cyan(`Total Configs: ${configs.length}`));
+      console.log(chalk.green(`Total Passed: ${totalPassed} file(s)`));
+      console.log(chalk.red(`Total Failed: ${totalFailed} file(s)`));
+      
+      const allValid = results.every(r => r.valid);
+      
+      if (allValid) {
+        console.log(chalk.green.bold('\n🎉 All validations passed!'));
+        process.exitCode = 0;
+      } else {
+        console.log(chalk.red.bold('\n❌ Some validations failed!'));
+        process.exitCode = 1;
+      }
+      
+    } catch (error) {
+      console.error(chalk.red(`\n[ERROR] ${error.message}`));
+      if (error.stack) console.error(chalk.gray(error.stack));
+      process.exitCode = 1;
+    }
+  });
+
 program
   .command('test-instances')
   .description('Run tests on all database instances defined in config')
@@ -823,94 +1128,194 @@ program
   .command('test-all')
   .description('Run all tests and generate report')
   .option('-o, --output <dir>', 'Output directory for reports', './reports')
+  .option('--pattern <pattern>', 'Glob pattern to match config files (e.g., "databases/mariadb/{{ namespace }}/**/config.js")')
+  .option('--console-only', 'Only output to console, do not save report files')
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     const reporter = new Reporter();
     reporter.start();
     
-    // Find all database configs
-    const dbDirs = ['databases/mongodb', 'databases/mariadb'];
+    let configFiles = [];
     
-    for (const dbDir of dbDirs) {
-      try {
-        const fullPath = path.resolve(process.cwd(), dbDir);
-        const entries = await fs.readdir(fullPath, { withFileTypes: true });
+    if (options.pattern) {
+      // Use pattern to find config files
+      console.log(chalk.blue(`\n🔍 Searching for configs matching pattern: ${options.pattern}\n`));
+      
+      // Helper function to recursively find config.js files
+      const findConfigFiles = async (dir, pattern) => {
+        const results = [];
+        const baseDir = path.resolve(process.cwd());
         
-        for (const entry of entries) {
-          if (!entry.isDirectory() || entry.name.startsWith('_')) continue;
-          
-          const configPath = path.join(fullPath, entry.name, 'config.js');
-          
-          try {
-            await fs.access(configPath);
-          } catch {
-            continue; // No config file
-          }
-          
-          const dbType = dbDir.includes('mongodb') ? 'mongodb' : 'mariadb';
-          let adapter;
-          
-          try {
-            const config = await loadConfig(configPath);
-            if (config.migrationsDir && !path.isAbsolute(config.migrationsDir)) {
-              config.migrationsDir = path.resolve(path.dirname(configPath), config.migrationsDir);
-            }
-            config.type = dbType;
-            
-            adapter = createAdapter(config);
-            await adapter.connect();
-            
-            // Run validation
-            console.log(chalk.blue(`\n[VALIDATE] ${entry.name} (${dbType})...`));
-            const validateStart = Date.now();
-            const validateResult = await adapter.validate();
-            reporter.addResult({
-              database: entry.name,
-              dbType,
-              testType: 'validate',
-              success: validateResult.valid,
-              duration: Date.now() - validateStart,
-              error: validateResult.valid ? null : 'Validation failed'
-            });
-            
-            // Run Up-Down-Up test
-            console.log(chalk.blue(`\n[TEST] ${entry.name} (${dbType}) Up-Down-Up...`));
-            const testResult = await adapter.runUpDownUpTest();
-            reporter.addResult({
-              database: entry.name,
-              dbType,
-              testType: 'up-down-up',
-              success: testResult.success,
-              duration: testResult.duration,
-              error: testResult.error || null
-            });
-            
-          } catch (error) {
-            reporter.addResult({
-              database: entry.name,
-              dbType,
-              testType: 'connection',
-              success: false,
-              duration: 0,
-              error: error.message
-            });
-          } finally {
-            if (adapter) await adapter.disconnect();
-          }
+        // Parse pattern to extract directory and file matching
+        const patternParts = pattern.split('/');
+        let searchDir = baseDir;
+        let patternIndex = 0;
+        
+        // Build the search directory from non-wildcard parts
+        // Exclude the last part if it's config.js (filename, not directory)
+        const maxIndex = patternParts[patternParts.length - 1] === 'config.js' 
+          ? patternParts.length - 1 
+          : patternParts.length;
+        
+        while (patternIndex < maxIndex && !patternParts[patternIndex].includes('*')) {
+          searchDir = path.join(searchDir, patternParts[patternIndex]);
+          patternIndex++;
         }
+        
+        // Recursively search from the search directory
+        const searchRecursive = async (currentDir, depth = 0) => {
+          if (depth > 10) return; // Prevent infinite recursion
+          
+          try {
+            const entries = await fs.readdir(currentDir, { withFileTypes: true });
+            
+            for (const entry of entries) {
+              if (entry.name.startsWith('_')) continue; // Skip template directories
+              
+              const fullPath = path.join(currentDir, entry.name);
+              const relativePath = path.relative(baseDir, fullPath);
+              
+              if (entry.isDirectory()) {
+                await searchRecursive(fullPath, depth + 1);
+              } else if (entry.name === 'config.js') {
+                // Check if this config.js matches the pattern
+                const configRelativePath = path.relative(baseDir, fullPath);
+                
+                if (options.pattern.includes('*')) {
+                  // Wildcard matching (supports both * and **)
+                  // Use placeholder to avoid double replacement
+                  const patternRegex = options.pattern
+                    .replace(/\*\*/g, '___DOUBLESTAR___')
+                    .replace(/\*/g, '[^/]*')
+                    .replace(/___DOUBLESTAR___/g, '.*')
+                    .replace(/\//g, '\\/');
+                  
+                  if (new RegExp(`^${patternRegex}$`).test(configRelativePath)) {
+                    results.push(fullPath);
+                  }
+                } else {
+                  // Exact match
+                  if (configRelativePath === options.pattern) {
+                    results.push(fullPath);
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            // Directory not accessible, skip
+          }
+        };
+        
+        await searchRecursive(searchDir);
+        return results;
+      };
+      
+      configFiles = await findConfigFiles(process.cwd(), options.pattern);
+      
+      if (configFiles.length === 0) {
+        console.log(chalk.yellow('⚠️  No config files found matching the pattern.'));
+        process.exit(1);
+      }
+      
+      console.log(chalk.cyan(`Found ${configFiles.length} config file(s):`));
+      for (const cf of configFiles) {
+        console.log(chalk.gray(`   - ${path.relative(process.cwd(), cf)}`));
+      }
+      console.log('');
+      
+    } else {
+      // Original logic: Find all database configs
+      const dbDirs = ['databases/mongodb', 'databases/mariadb'];
+      
+      for (const dbDir of dbDirs) {
+        try {
+          const fullPath = path.resolve(process.cwd(), dbDir);
+          const entries = await fs.readdir(fullPath, { withFileTypes: true });
+          
+          for (const entry of entries) {
+            if (!entry.isDirectory() || entry.name.startsWith('_')) continue;
+            
+            const configPath = path.join(fullPath, entry.name, 'config.js');
+            
+            try {
+              await fs.access(configPath);
+              configFiles.push(configPath);
+            } catch {
+              continue; // No config file
+            }
+          }
+        } catch (error) {
+          // Directory doesn't exist, skip
+        }
+      }
+    }
+    
+    // Run tests for each config file
+    for (const configPath of configFiles) {
+      const relativePath = path.relative(process.cwd(), configPath);
+      const dbType = configPath.includes('mongodb') ? 'mongodb' : 'mariadb';
+      const dbName = path.basename(path.dirname(configPath));
+      let adapter;
+      
+      try {
+        const config = await loadConfig(configPath);
+        if (config.migrationsDir && !path.isAbsolute(config.migrationsDir)) {
+          config.migrationsDir = path.resolve(path.dirname(configPath), config.migrationsDir);
+        }
+        config.type = dbType;
+        
+        adapter = createAdapter(config);
+        await adapter.connect();
+        
+        // Run validation
+        console.log(chalk.blue(`\n[VALIDATE] ${relativePath} (${dbType})...`));
+        const validateStart = Date.now();
+        const validateResult = await adapter.validate();
+        reporter.addResult({
+          database: relativePath,
+          dbType,
+          testType: 'validate',
+          success: validateResult.valid,
+          duration: Date.now() - validateStart,
+          error: validateResult.valid ? null : 'Validation failed'
+        });
+        
+        // Run Up-Down-Up test
+        console.log(chalk.blue(`\n[TEST] ${relativePath} (${dbType}) Up-Down-Up...`));
+        const testResult = await adapter.runUpDownUpTest();
+        reporter.addResult({
+          database: relativePath,
+          dbType,
+          testType: 'up-down-up',
+          success: testResult.success,
+          duration: testResult.duration,
+          error: testResult.error || null
+        });
+        
       } catch (error) {
-        // Directory doesn't exist, skip
+        reporter.addResult({
+          database: relativePath,
+          dbType,
+          testType: 'connection',
+          success: false,
+          duration: 0,
+          error: error.message
+        });
+      } finally {
+        if (adapter) await adapter.disconnect();
       }
     }
     
     reporter.end();
     reporter.printConsoleReport();
     
-    // Save reports
-    const files = await reporter.saveReport(options.output, 'all');
-    console.log(chalk.gray(`\n📁 Reports saved to:`));
-    for (const f of files) {
-      console.log(`   ${f}`);
+    // Save reports (unless --console-only is specified)
+    if (!options.consoleOnly) {
+      const files = await reporter.saveReport(options.output, 'all');
+      console.log(chalk.gray(`\n📁 Reports saved to:`));
+      for (const f of files) {
+        console.log(`   ${f}`);
+      }
     }
     
     // Exit with error if any tests failed
