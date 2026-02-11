@@ -186,6 +186,15 @@ docker compose build migrate
 docker compose run --rm migrate <command> [options] -c /app/databases/<db-type>/<project>/config.js
 ```
 
+> **📝 關於範例說明**：  
+> 本文檔實際可用的目錄名稱：
+> - `production-server` - 多資料庫範例（包含 analytics, ecommerce, logging）
+> - `test-success` - 成功測試範例
+> - `test-failure` - 失敗測試範例（驗證用）
+> - `multi-instance` - 多實例範例
+> 
+> 所有範例皆可直接複製執行，無需替換任何占位符！
+
 ---
 
 #### 基礎指令
