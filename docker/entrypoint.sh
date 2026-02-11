@@ -52,9 +52,17 @@ wait_for_database() {
     exit 1
 }
 
-# Check if -c parameter is provided
+# Check if -c parameter is provided (skip for commands that don't need it)
 check_config_parameter() {
+    local cmd="$1"
+    shift
     local args=("$@")
+    
+    # Commands that don't require -c parameter
+    if [[ "$cmd" == "test-all" || "$cmd" == "validate-all" ]]; then
+        return 0
+    fi
+    
     local has_config=false
     
     for ((i=0; i<${#args[@]}; i++)); do
@@ -93,13 +101,15 @@ main() {
         wait)
             wait_for_database
             ;;
+        validate-all|test-all)
+            # These commands handle database connections per-config file
+            # No need to wait for a specific database at startup
+            echo -e "\n${BLUE}[INFO] Running $command (database connections handled per-config)${NC}"
+            run_command "$command" "$@"
+            ;;
         up|down|status|validate|test|create|create-dcl|baseline|dcl|dcl:status|dcl:verify|status-all|up-all|dcl-all|dcl:status-all|dcl:verify-all|test-instances)
             wait_for_database
             run_command "$command" "$@"
-            ;;
-        test-all)
-            wait_for_database
-            run_command "test-all" "$@"
             ;;
         help|--help|-h)
             node /app/src/cli.js --help

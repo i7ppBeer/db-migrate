@@ -121,6 +121,7 @@ services:
   #   docker compose run --rm migrate dcl -c /app/databases/mariadb/my-project/dcl/config.js
   #   docker compose run --rm migrate up -c /app/databases/mariadb/my-project/ddl/config.js
   #   docker compose run --rm migrate validate -c /app/databases/mariadb/my-project/ddl/config.js
+  #   docker compose run --rm migrate validate-all /app/databases/mariadb/production-server
   # ──────────────────────────────────────────────────────────
   migrate:
     build:
@@ -143,7 +144,6 @@ services:
       - MONGODB_PORT=27017
     networks:
       - migrate-network
-    entrypoint: ["node", "src/cli.js"]
     profiles:
       - tools
 

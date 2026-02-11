@@ -1255,6 +1255,10 @@ program
       const relativePath = path.relative(process.cwd(), configPath);
       const dbType = configPath.includes('mongodb') ? 'mongodb' : 'mariadb';
       const dbName = path.basename(path.dirname(configPath));
+      
+      // Detect if this is a DCL or DDL config
+      const isDCL = configPath.includes('/dcl/');
+      
       let adapter;
       
       try {
@@ -1267,30 +1271,115 @@ program
         adapter = createAdapter(config);
         await adapter.connect();
         
-        // Run validation
-        console.log(chalk.blue(`\n[VALIDATE] ${relativePath} (${dbType})...`));
-        const validateStart = Date.now();
-        const validateResult = await adapter.validate();
-        reporter.addResult({
-          database: relativePath,
-          dbType,
-          testType: 'validate',
-          success: validateResult.valid,
-          duration: Date.now() - validateStart,
-          error: validateResult.valid ? null : 'Validation failed'
-        });
-        
-        // Run Up-Down-Up test
-        console.log(chalk.blue(`\n[TEST] ${relativePath} (${dbType}) Up-Down-Up...`));
-        const testResult = await adapter.runUpDownUpTest();
-        reporter.addResult({
-          database: relativePath,
-          dbType,
-          testType: 'up-down-up',
-          success: testResult.success,
-          duration: testResult.duration,
-          error: testResult.error || null
-        });
+        if (isDCL) {
+          // ═══════════════════════════════════════════════════════
+          // DCL: Validate + Run 3 times (Idempotency Check)
+          // ═══════════════════════════════════════════════════════
+          
+          console.log(chalk.blue(`\n[VALIDATE] ${relativePath} (${dbType})...`));
+          const validateStart = Date.now();
+          
+          // DCL validation via RepeatableRunner
+          const { RepeatableRunner } = await import('./core/repeatable-runner.js');
+          const runner = new RepeatableRunner({
+            checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+          });
+          
+          const context = {
+            dbType: adapter.dbType,
+            connection: adapter.connection,
+            db: adapter.db,
+            client: adapter.client,
+            migrationsDir: config.migrationsDir
+          };
+          
+          let validateSuccess = true;
+          let validateError = null;
+          
+          try {
+            const files = await runner.getRepeatableFiles(config.migrationsDir);
+            if (files.length === 0) {
+              console.log(chalk.yellow(`   ⚠️  No DCL migrations found`));
+            } else {
+              console.log(chalk.gray(`   ✅ ${files.length} DCL migration(s) found`));
+            }
+          } catch (error) {
+            validateSuccess = false;
+            validateError = error.message;
+            console.log(chalk.red(`   ❌ Validation failed: ${error.message}`));
+          }
+          
+          reporter.addResult({
+            database: relativePath,
+            dbType,
+            testType: 'validate',
+            success: validateSuccess,
+            duration: Date.now() - validateStart,
+            error: validateError
+          });
+          
+          if (!validateSuccess) {
+            continue; // Skip test if validation fails
+          }
+          
+          // Run DCL 3 times to verify idempotency
+          console.log(chalk.blue(`\n[TEST] ${relativePath} (${dbType}) Idempotency (3 runs)...`));
+          const testStart = Date.now();
+          
+          let testSuccess = true;
+          let testError = null;
+          
+          try {
+            for (let i = 1; i <= 3; i++) {
+              console.log(chalk.gray(`   Run ${i}/3...`));
+              await runner.run(context);
+            }
+            console.log(chalk.green(`   ✅ Idempotency verified`));
+          } catch (error) {
+            testSuccess = false;
+            testError = error.message;
+            console.log(chalk.red(`   ❌ Idempotency failed: ${error.message}`));
+          }
+          
+          reporter.addResult({
+            database: relativePath,
+            dbType,
+            testType: 'dcl-idempotency',
+            success: testSuccess,
+            duration: Date.now() - testStart,
+            error: testError
+          });
+          
+        } else {
+          // ═══════════════════════════════════════════════════════
+          // DDL: Validate + Up-Down-Up Test
+          // ═══════════════════════════════════════════════════════
+          
+          // Run validation
+          console.log(chalk.blue(`\n[VALIDATE] ${relativePath} (${dbType})...`));
+          const validateStart = Date.now();
+          const validateResult = await adapter.validate();
+          reporter.addResult({
+            database: relativePath,
+            dbType,
+            testType: 'validate',
+            success: validateResult.valid,
+            duration: Date.now() - validateStart,
+            error: validateResult.valid ? null : 'Validation failed'
+          });
+          
+          // Run Up-Down-Up test
+          console.log(chalk.blue(`\n[TEST] ${relativePath} (${dbType}) Up-Down-Up...`));
+          const testResult = await adapter.runUpDownUpTest();
+          reporter.addResult({
+            database: relativePath,
+            dbType,
+            testType: 'up-down-up',
+            success: testResult.success,
+            duration: testResult.duration,
+            error: testResult.error || null
+          });
+        }
         
       } catch (error) {
         reporter.addResult({
