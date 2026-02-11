@@ -323,11 +323,39 @@ docker compose run --rm migrate test-instances --parallel -c /app/databases/mari
 ```
 
 **測試所有專案** (`test-all`):
+
+`test-all` 命令自動區分 DCL 和 DDL 配置，使用不同的測試策略:
+- **DCL 配置**: 驗證 + 執行 3 次（驗證冪等性）
+- **DDL 配置**: 驗證 + 執行 Up-Down-Up 測試（驗證回滾）
+
 ```bash
+# 測試工作區所有專案
 docker compose run --rm migrate test-all -o /app/reports
 
-# 指定 pattern
-docker compose run --rm migrate test-all --pattern "databases/**/test-success/**/config.js" -o /app/reports
+# 測試特定命名空間（例如 {{ namespace }}）
+docker compose run --rm migrate test-all \
+  --pattern "databases/mariadb/{{ namespace }}/**/config.js" \
+  -o /app/reports
+
+# 僅測試 DDL 配置（排除 DCL）
+docker compose run --rm migrate test-all \
+  --pattern "databases/**/ddl/**/config.js" \
+  -o /app/reports
+
+# 僅測試 DCL 配置（驗證冪等性）
+docker compose run --rm migrate test-all \
+  --pattern "databases/mariadb/{{ namespace }}/dcl/config.js" \
+  -o /app/reports
+
+# 測試特定資料庫類型
+docker compose run --rm migrate test-all \
+  --pattern "databases/mongodb/**/config.js" \
+  -o /app/reports
+
+# 僅輸出到控制台（不保存報告文件）
+docker compose run --rm migrate test-all \
+  --pattern "databases/mariadb/{{ namespace }}/ddl/**/config.js" \
+  --console-only
 ```
 
 **多實例 DCL** (`dcl-all` / `dcl:status-all` / `dcl:verify-all`):

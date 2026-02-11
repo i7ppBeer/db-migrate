@@ -323,18 +323,28 @@ docker compose run --rm migrate test-instances --parallel -c /app/databases/mari
 ```
 
 **Test All Projects** (`test-all`):
+
+The `test-all` command automatically handles DCL and DDL migrations differently:
+- **DCL configs**: Validates + runs 3 times to verify idempotency
+- **DDL configs**: Validates + runs Up-Down-Up test to verify rollback
+
 ```bash
 # Test all projects in workspace
 docker compose run --rm migrate test-all -o /app/reports
 
 # Test specific namespace (e.g., {{ namespace }})
 docker compose run --rm migrate test-all \
-  --pattern "databases/mariadb/{{ namespace }}/ddl/**/config.js" \
+  --pattern "databases/mariadb/{{ namespace }}/**/config.js" \
   -o /app/reports
 
-# Test all DDL configs (exclude DCL)
+# Test only DDL configs (exclude DCL)
 docker compose run --rm migrate test-all \
-  --pattern "databases/**/ddl/config.js" \
+  --pattern "databases/**/ddl/**/config.js" \
+  -o /app/reports
+
+# Test only DCL config (idempotency verification)
+docker compose run --rm migrate test-all \
+  --pattern "databases/mariadb/{{ namespace }}/dcl/config.js" \
   -o /app/reports
 
 # Test specific database type
@@ -986,11 +996,17 @@ node src/cli.js test-all \
 
 ### Pattern Matching Examples
 
-The `test-all` command supports glob patterns to selectively test databases:
+The `test-all` command supports glob patterns to selectively test databases. It automatically detects DCL vs DDL configs and applies appropriate testing:
 
 ```bash
-# Test all DDL configs in {{ namespace }}
+# Test all configs in {{ namespace }} (both DCL and DDL)
+node src/cli.js test-all --pattern "databases/mariadb/{{ namespace }}/**/config.js"
+
+# Test only DDL configs in {{ namespace }}
 node src/cli.js test-all --pattern "databases/mariadb/{{ namespace }}/ddl/**/config.js"
+
+# Test only DCL config (runs 3x for idempotency)
+node src/cli.js test-all --pattern "databases/mariadb/{{ namespace }}/dcl/config.js"
 
 # Test only analytics database
 node src/cli.js test-all --pattern "databases/mariadb/{{ namespace }}/ddl/analytics/config.js"
@@ -998,16 +1014,24 @@ node src/cli.js test-all --pattern "databases/mariadb/{{ namespace }}/ddl/analyt
 # Test all MongoDB databases
 node src/cli.js test-all --pattern "databases/mongodb/**/ddl/config.js"
 
-# Test all DDL configs (exclude DCL)
+# Test all DDL configs across all databases
 node src/cli.js test-all --pattern "databases/**/ddl/**/config.js"
 
 # Test specific projects
-node src/cli.js test-all --pattern "databases/**/test-success/ddl/config.js"
+node src/cli.js test-all --pattern "databases/**/test-success/*/config.js"
 ```
 
+**Testing Behavior**:
+- **DCL configs** (`/dcl/config.js`):
+  1. Validate migrations exist
+  2. Run migrations 3 times to verify idempotency
+- **DDL configs** (`/ddl/**/config.js`): 
+  1. Validate migrations (no dangerous operations)
+  2. Run Up-Down-Up test to verify rollback
+
 **Pattern Syntax**:
-- `**` - Matches any number of directories
-- `*` - Matches any characters except `/`
+- `**` - Matches any number of directories (recursive)
+- `*` - Matches any characters except `/` (single level)
 - Paths are relative to workspace root
 
 **Output Options**:
