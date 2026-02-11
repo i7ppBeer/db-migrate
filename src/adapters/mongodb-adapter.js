@@ -656,6 +656,32 @@ export async function down(db, client) {
     // === 4. Check for forbidden operations ===
     for (const category of Object.keys(rules.forbidden)) {
       for (const rule of rules.forbidden[category]) {
+        // Smart allowance: dropDatabase in down() when up() creates database
+        if (rule.code === 'DROP_DATABASE' || rule.code === 'DROP_DATABASE_CMD') {
+          const hasDropDBInDown = /dropDatabase/i.test(normalizedDownBody);
+          const hasDropDBInUp = /dropDatabase/i.test(normalizedUpBody);
+          const hasDBInitInUp = /createCollection|_db_metadata/i.test(normalizedUpBody);
+          
+          // Allow dropDatabase only in down() when up() initializes database
+          if (hasDropDBInDown && !hasDropDBInUp && hasDBInitInUp) {
+            warnings.push({
+              type: 'allowed-drop-database',
+              message: `✅ [ALLOWED] dropDatabase in down() because up() initializes database`
+            });
+            continue;
+          }
+          
+          // Forbid dropDatabase in up() (dangerous!)
+          if (hasDropDBInUp) {
+            forbiddenOps.push({
+              type: `forbidden-${category}`,
+              code: rule.code,
+              message: rule.message + ' (in up() function)'
+            });
+            continue;
+          }
+        }
+        
         // Use normalized content for pattern matching
         if (rule.pattern.test(normalizedContent)) {
           const isAllowed = options.allowForbidden || 

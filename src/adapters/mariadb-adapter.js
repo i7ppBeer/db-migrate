@@ -183,14 +183,38 @@ export class MariaDBAdapter extends BaseAdapter {
     try {
       // Support both flat config and nested config.mariadb
       const dbConfig = this.config.mariadb || this.config;
-      this.connection = await mysql.createConnection({
+      const dbName = dbConfig.database;
+      
+      // 🔧 First connect without specifying database to avoid "unknown database" error
+      const tempConnection = await mysql.createConnection({
         host: dbConfig.host || 'localhost',
         port: dbConfig.port || 3306,
         user: dbConfig.user || 'root',
         password: dbConfig.password || '',
-        database: dbConfig.database,
         multipleStatements: true
       });
+      
+      // 🛡️ Auto-create database if it doesn't exist (for development convenience)
+      if (dbName) {
+        await tempConnection.execute(
+          `CREATE DATABASE IF NOT EXISTS \`${dbName}\` 
+           DEFAULT CHARACTER SET utf8mb4 
+           DEFAULT COLLATE utf8mb4_unicode_ci`
+        );
+        await tempConnection.end();
+        
+        // Now connect to the specified database
+        this.connection = await mysql.createConnection({
+          host: dbConfig.host || 'localhost',
+          port: dbConfig.port || 3306,
+          user: dbConfig.user || 'root',
+          password: dbConfig.password || '',
+          database: dbName,
+          multipleStatements: true
+        });
+      } else {
+        this.connection = tempConnection;
+      }
 
       // Ensure changelog table exists
       await this.ensureChangelogTable();
@@ -845,6 +869,11 @@ export class MariaDBAdapter extends BaseAdapter {
     const createdTables = this.extractCreatedTables(upSQL);
     const droppedTablesInDown = this.extractDroppedTables(downSQL);
     const droppedTablesInUp = this.extractDroppedTables(upSQL);
+    
+    // === 1b. Extract created and dropped databases ===
+    const hasCreateDatabaseInUp = /CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?/i.test(normalizedUpSQL);
+    const hasDropDatabaseInDown = /DROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?/i.test(normalizedDownSQL);
+    const hasDropDatabaseInUp = /DROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?/i.test(normalizedUpSQL);
 
     // === 2. Check for orphan drops in DOWN section ===
     for (const dropped of droppedTablesInDown) {
@@ -882,6 +911,27 @@ export class MariaDBAdapter extends BaseAdapter {
             message: `✅ [ALLOWED] DROP TABLE in down() because up() creates table`
           });
           continue;
+        }
+        
+        // Smart allowance: CREATE DATABASE in UP section is allowed
+        if (rule.code === 'DROP_DATABASE' || rule.code === 'DROP_SCHEMA') {
+          // Allow DROP DATABASE/SCHEMA only in DOWN section when UP creates it
+          if (hasCreateDatabaseInUp && hasDropDatabaseInDown && !hasDropDatabaseInUp) {
+            warnings.push({
+              type: 'allowed-drop-database',
+              message: `✅ [ALLOWED] DROP DATABASE in down() because up() creates database`
+            });
+            continue;
+          }
+          // Forbid DROP DATABASE in UP section (dangerous!)
+          if (hasDropDatabaseInUp) {
+            forbiddenOps.push({
+              type: `forbidden-${category}`,
+              code: rule.code,
+              message: rule.message + ' (in UP section)'
+            });
+            continue;
+          }
         }
 
         // Use normalized content for pattern matching
