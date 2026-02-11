@@ -186,6 +186,11 @@ docker compose build migrate
 docker compose run --rm migrate <command> [options] -c /app/databases/<db-type>/<project>/config.js
 ```
 
+> **📝 Note about Examples**:  
+> Examples below use `{{ namespace }}` as a placeholder. Replace it with actual directory names:
+> - `{{ namespace }}` → `production-server` (multi-DB example in this repo)
+> - Or use `test-success`, `test-failure`, `multi-instance` for testing
+
 ---
 
 #### Basic Commands
@@ -221,11 +226,11 @@ docker compose run --rm migrate down -n 3 -c /app/databases/mariadb/test-success
 # Create DDL migration
 docker compose run --rm migrate create add-orders-table -c /app/databases/mariadb/test-success/ddl/config.js
 
-# Create DCL migration
-docker compose run --rm migrate create-dcl readonly_users -c /app/databases/mariadb/{{ namespace }}/dcl/config.js
+# Create DCL migration (replace {{ namespace }} with production-server, etc.)
+docker compose run --rm migrate create-dcl readonly_users -c /app/databases/mariadb/production-server/dcl/config.js
 
 # Specify sequence number
-docker compose run --rm migrate create-dcl app_service -n 004 -c /app/databases/mariadb/{{ namespace }}/dcl/config.js
+docker compose run --rm migrate create-dcl app_service -n 004 -c /app/databases/mariadb/production-server/dcl/config.js
 ```
 
 **Validate Migrations** (`validate`):
@@ -243,13 +248,14 @@ docker compose run --rm migrate validate --allow TRUNCATE_TABLE,DROP_INDEX -c /a
 **Batch Validation** (`validate-all`):
 ```bash
 # Validate entire directory's DDL + DCL
-docker compose run --rm migrate validate-all /app/databases/mariadb/{{ namespace }}
+# Replace {{ namespace }} with actual directory: production-server, test-success, etc.
+docker compose run --rm migrate validate-all /app/databases/mariadb/production-server
 
 # Validate DDL only (no database connection required)
-docker compose run --rm migrate validate-all --ddl-only /app/databases/mariadb/{{ namespace }}
+docker compose run --rm migrate validate-all --ddl-only /app/databases/mariadb/production-server
 
 # Validate DCL only (database connection required)
-docker compose run --rm migrate validate-all --dcl-only /app/databases/mariadb/{{ namespace }}
+docker compose run --rm migrate validate-all --dcl-only /app/databases/mariadb/production-server
 ```
 
 **Baseline Existing Migrations** (`baseline`):
@@ -275,20 +281,21 @@ docker compose run --rm migrate test -c /app/databases/mariadb/test-success/ddl/
 
 **Run DCL Migrations** (`dcl`):
 ```bash
-docker compose run --rm migrate dcl -c /app/databases/mariadb/{{ namespace }}/dcl/config.js
+# Replace {{ namespace }} with actual directory name
+docker compose run --rm migrate dcl -c /app/databases/mariadb/production-server/dcl/config.js
 
 # Dry Run
-docker compose run --rm migrate dcl --dry-run -c /app/databases/mariadb/{{ namespace }}/dcl/config.js
+docker compose run --rm migrate dcl --dry-run -c /app/databases/mariadb/production-server/dcl/config.js
 ```
 
 **Check DCL Status** (`dcl:status`):
 ```bash
-docker compose run --rm migrate dcl:status -c /app/databases/mariadb/{{ namespace }}/dcl/config.js
+docker compose run --rm migrate dcl:status -c /app/databases/mariadb/production-server/dcl/config.js
 ```
 
 **Verify DCL Idempotency** (`dcl:verify`):
 ```bash
-docker compose run --rm migrate dcl:verify -c /app/databases/mariadb/{{ namespace }}/dcl/config.js
+docker compose run --rm migrate dcl:verify -c /app/databases/mariadb/production-server/dcl/config.js
 ```
 
 ---
@@ -332,9 +339,9 @@ The `test-all` command automatically handles DCL and DDL migrations differently:
 # Test all projects in workspace
 docker compose run --rm migrate test-all -o /app/reports
 
-# Test specific namespace (e.g., {{ namespace }})
+# Test specific namespace (replace {{ namespace }} with production-server, etc.)
 docker compose run --rm migrate test-all \
-  --pattern "databases/mariadb/{{ namespace }}/**/config.js" \
+  --pattern "databases/mariadb/production-server/**/config.js" \
   -o /app/reports
 
 # Test only DDL configs (exclude DCL)
@@ -344,7 +351,7 @@ docker compose run --rm migrate test-all \
 
 # Test only DCL config (idempotency verification)
 docker compose run --rm migrate test-all \
-  --pattern "databases/mariadb/{{ namespace }}/dcl/config.js" \
+  --pattern "databases/mariadb/production-server/dcl/config.js" \
   -o /app/reports
 
 # Test specific database type
@@ -354,7 +361,7 @@ docker compose run --rm migrate test-all \
 
 # Console output only (do not save report files)
 docker compose run --rm migrate test-all \
-  --pattern "databases/mariadb/{{ namespace }}/ddl/**/config.js" \
+  --pattern "databases/mariadb/production-server/ddl/**/config.js" \
   --console-only
 ```
 
@@ -401,17 +408,17 @@ node src/cli.js up -c databases/mariadb/test-success/ddl/config.js
 node src/cli.js validate -c databases/mariadb/test-success/ddl/config.js
 
 # Batch validate
-node src/cli.js validate-all databases/mariadb/{{ namespace }}
+node src/cli.js validate-all databases/mariadb/production-server
 
 # Run DCL
-node src/cli.js dcl -c databases/mariadb/{{ namespace }}/dcl/config.js
+node src/cli.js dcl -c databases/mariadb/production-server/dcl/config.js
 
 # Up-Down-Up test
 node src/cli.js test -c databases/mariadb/test-success/ddl/config.js
 
-# Test all databases in {{ namespace }}
+# Test all databases in production-server
 node src/cli.js test-all \
-  --pattern "databases/mariadb/{{ namespace }}/ddl/**/config.js" \
+  --pattern "databases/mariadb/production-server/ddl/**/config.js" \
   -o ./reports
 
 # Console output only (do not save files)
@@ -533,7 +540,7 @@ databases/
 │   │   └── ddl/
 │   │       ├── config.js
 │   │       └── migrations/
-│   ├── {{ namespace }}/                   # Production environment (multiple DBs with different schemas)
+│   ├── production-server/                 # Production example (multiple DBs with different schemas)
 │   │   ├── dcl/                           # DCL - Repeatable mode (Platform Team)
 │   │   │   ├── config.js
 │   │   │   └── migrations/
@@ -565,7 +572,7 @@ databases/
     ├── multi-instance/
     │   ├── dcl/
     │   └── ddl/
-    └── {{ namespace }}/
+    └── production-server/                 # Production example
         ├── dcl/
         │   ├── config.js
         │   └── migrations/
@@ -581,6 +588,7 @@ databases/
 **Description**:
 - **DDL (Data Definition Language)**: Schema changes, uses Versioned mode (timestamp)
 - **DCL (Data Control Language)**: Permission management, uses Repeatable mode (Checksum)
+- **production-server**: Example directory demonstrating multi-database management
 - **{{ namespace }}**: Demonstrates multi-database management, each database has independent directory
 - **First migration**: Recommended to be `20260101000000-create-database.sql` (CREATE DATABASE)
 
@@ -613,27 +621,29 @@ docker compose run --rm migrate up -c /app/databases/mongodb/test-success/ddl/co
 docker compose run --rm migrate test -c /app/databases/mongodb/test-success/ddl/config.js
 ```
 
-#### {{ namespace }} Workflow
+#### Production Server Workflow
+
+Example using `production-server` directory (contains 3 databases: analytics, ecommerce, logging):
 
 ```bash
 # 1. Run DCL first (create users and permissions)
-docker compose run --rm migrate dcl -c /app/databases/mariadb/{{ namespace }}/dcl/config.js
+docker compose run --rm migrate dcl -c /app/databases/mariadb/production-server/dcl/config.js
 
 # 2. Batch validate all DDL
-docker compose run --rm migrate validate-all --ddl-only /app/databases/mariadb/{{ namespace }}
+docker compose run --rm migrate validate-all --ddl-only /app/databases/mariadb/production-server
 
 # 3. Run each database's DDL
-docker compose run --rm migrate up -c /app/databases/mariadb/{{ namespace }}/ddl/analytics/config.js
-docker compose run --rm migrate up -c /app/databases/mariadb/{{ namespace }}/ddl/ecommerce/config.js
-docker compose run --rm migrate up -c /app/databases/mariadb/{{ namespace }}/ddl/logging/config.js
+docker compose run --rm migrate up -c /app/databases/mariadb/production-server/ddl/analytics/config.js
+docker compose run --rm migrate up -c /app/databases/mariadb/production-server/ddl/ecommerce/config.js
+docker compose run --rm migrate up -c /app/databases/mariadb/production-server/ddl/logging/config.js
 
 # 4. Comprehensive testing (all databases)
 docker compose run --rm migrate test-all \
-  --pattern "databases/mariadb/{{ namespace }}/ddl/**/config.js" \
+  --pattern "databases/mariadb/production-server/ddl/**/config.js" \
   -o /app/reports
 
 # 5. Verify DCL idempotency
-docker compose run --rm migrate dcl:verify -c /app/databases/mariadb/{{ namespace }}/dcl/config.js
+docker compose run --rm migrate dcl:verify -c /app/databases/mariadb/production-server/dcl/config.js
 
 # 6. View test report
 # Open reports/test-report-*.html in browser
@@ -648,12 +658,12 @@ docker compose run --rm migrate validate -c /app/databases/mongodb/test-success/
 # Run complete test
 docker compose run --rm migrate test -c /app/databases/mongodb/test-success/ddl/config.js || exit 1
 
-# Batch validate {{ namespace }}
-docker compose run --rm migrate validate-all /app/databases/mariadb/{{ namespace }} || exit 1
+# Batch validate production-server
+docker compose run --rm migrate validate-all /app/databases/mariadb/production-server || exit 1
 
-# Test all databases in {{ namespace }} (Up-Down-Up)
+# Test all databases in production-server (Up-Down-Up)
 docker compose run --rm migrate test-all \
-  --pattern "databases/mariadb/{{ namespace }}/ddl/**/config.js" \
+  --pattern "databases/mariadb/production-server/ddl/**/config.js" \
   -o /app/reports || exit 1
 
 # Run migrations during deployment
@@ -671,15 +681,15 @@ stages:
 validate-migrations:
   stage: validate
   script:
-    # Validate all {{ namespace }} DDL
-    - docker compose run --rm migrate validate-all /app/databases/mariadb/{{ namespace }}
+    # Validate all production-server DDL
+    - docker compose run --rm migrate validate-all /app/databases/mariadb/production-server
   
 test-migrations:
   stage: test
   script:
-    # Run comprehensive tests on {{ namespace }}
+    # Run comprehensive tests on production-server
     - docker compose run --rm migrate test-all 
-        --pattern "databases/mariadb/{{ namespace }}/ddl/**/config.js"
+        --pattern "databases/mariadb/production-server/ddl/**/config.js"
         -o /app/reports
   artifacts:
     paths:
@@ -690,11 +700,11 @@ deploy-production:
   stage: deploy
   script:
     # Run DCL first
-    - docker compose run --rm migrate dcl -c /app/databases/mariadb/{{ namespace }}/dcl/config.js
+    - docker compose run --rm migrate dcl -c /app/databases/mariadb/production-server/dcl/config.js
     # Run each database DDL
-    - docker compose run --rm migrate up -c /app/databases/mariadb/{{ namespace }}/ddl/analytics/config.js
-    - docker compose run --rm migrate up -c /app/databases/mariadb/{{ namespace }}/ddl/ecommerce/config.js
-    - docker compose run --rm migrate up -c /app/databases/mariadb/{{ namespace }}/ddl/logging/config.js
+    - docker compose run --rm migrate up -c /app/databases/mariadb/production-server/ddl/analytics/config.js
+    - docker compose run --rm migrate up -c /app/databases/mariadb/production-server/ddl/ecommerce/config.js
+    - docker compose run --rm migrate up -c /app/databases/mariadb/production-server/ddl/logging/config.js
   when: manual
   only:
     - main
@@ -738,7 +748,7 @@ db-migrate/
 │   │   ├── test-success/           # MongoDB success cases
 │   │   ├── test-failure/           # MongoDB failure cases (for validation)
 │   │   ├── multi-instance/         # Multi-instance config (dcl/ + ddl/)
-│   │   └── {{ namespace }}/        # Production server example
+│   │   └── production-server/      # Production server example
 │   │       ├── dcl/                # DCL Repeatable migrations
 │   │       └── ddl/                # DDL Versioned migrations
 │   └── mariadb/
@@ -746,7 +756,7 @@ db-migrate/
 │       ├── test-success/           # MariaDB success cases
 │       ├── test-failure/           # MariaDB failure cases
 │       ├── multi-instance/         # Multi-instance config (dcl/ + ddl/)
-│       └── {{ namespace }}/        # Production server (3 DBs: ecommerce/analytics/logging)
+│       └── production-server/      # Production server (3 DBs: ecommerce/analytics/logging)
 │           ├── dcl/                # DCL Repeatable migrations
 │           └── ddl/                # DDL Versioned migrations (each DB has independent subdirectory)
 ├── charts/
@@ -985,12 +995,12 @@ node src/cli.js test-all -o ./reports
 
 # Test specific namespace with pattern
 node src/cli.js test-all \
-  --pattern "databases/mariadb/{{ namespace }}/ddl/**/config.js" \
+  --pattern "databases/mariadb/production-server/ddl/**/config.js" \
   -o ./reports
 
 # Console output only (no file saving)
 node src/cli.js test-all \
-  --pattern "databases/mariadb/{{ namespace }}/ddl/**/config.js" \
+  --pattern "databases/mariadb/production-server/ddl/**/config.js" \
   --console-only
 ```
 
@@ -999,17 +1009,17 @@ node src/cli.js test-all \
 The `test-all` command supports glob patterns to selectively test databases. It automatically detects DCL vs DDL configs and applies appropriate testing:
 
 ```bash
-# Test all configs in {{ namespace }} (both DCL and DDL)
-node src/cli.js test-all --pattern "databases/mariadb/{{ namespace }}/**/config.js"
+# Test all configs in production-server (both DCL and DDL)
+node src/cli.js test-all --pattern "databases/mariadb/production-server/**/config.js"
 
-# Test only DDL configs in {{ namespace }}
-node src/cli.js test-all --pattern "databases/mariadb/{{ namespace }}/ddl/**/config.js"
+# Test only DDL configs in production-server
+node src/cli.js test-all --pattern "databases/mariadb/production-server/ddl/**/config.js"
 
 # Test only DCL config (runs 3x for idempotency)
-node src/cli.js test-all --pattern "databases/mariadb/{{ namespace }}/dcl/config.js"
+node src/cli.js test-all --pattern "databases/mariadb/production-server/dcl/config.js"
 
 # Test only analytics database
-node src/cli.js test-all --pattern "databases/mariadb/{{ namespace }}/ddl/analytics/config.js"
+node src/cli.js test-all --pattern "databases/mariadb/production-server/ddl/analytics/config.js"
 
 # Test all MongoDB databases
 node src/cli.js test-all --pattern "databases/mongodb/**/ddl/config.js"
@@ -1186,22 +1196,22 @@ helm install db-migrate ./charts/db-migrate \
 
 #### Multi-Database ConfigMap Mode (Recommended)
 
-For complex scenarios like {{ namespace }} with multiple databases (ecommerce/analytics/logging), use auto-generation script:
+For complex scenarios like production-server with multiple databases (ecommerce/analytics/logging), use auto-generation script:
 
 #### Use gen-values.py to Auto-Generate values
 
 ```bash
 # Preview generated values
-python3 scripts/gen-values.py databases/mariadb/{{ namespace }} --dry-run
+python3 scripts/gen-values.py databases/mariadb/production-server --dry-run
 
 # Generate values.yaml file
-python3 scripts/gen-values.py databases/mariadb/{{ namespace }} \
-  --output values-{{ namespace }}.yaml \
+python3 scripts/gen-values.py databases/mariadb/production-server \
+  --output values-production-server.yaml \
   --namespace default \
   --mariadb-host mariadb-svc
 
 # Deploy using generated values
-helm install db-migrate ./charts/db-migrate -f values-{{ namespace }}.yaml
+helm install db-migrate ./charts/db-migrate -f values-production-server.yaml
 ```
 
 ---
