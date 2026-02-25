@@ -1049,18 +1049,18 @@ node src/cli.js test-all --pattern "databases/**/test-success/*/config.js"
 When your config files are stored outside the workspace (e.g. a mounted NFS/external volume), use `--base-dir` to set the search root. The `--pattern` is then treated as a path **relative to that directory**.
 
 ```bash
-# Configs at: /mnt/configs/rdsma-demo-1/dcl/config.js
-#              /mnt/configs/rdsma-demo-1/ddl/aaa/config.js
-#              /mnt/configs/rdsma-demo-1/ddl/bbb/config.js
+# Configs at: /mnt/configs/project/dcl/config.js
+#              /mnt/configs/project/ddl/aaa/config.js
+#              /mnt/configs/project/ddl/bbb/config.js
 
 # Use --base-dir to point to the root, --pattern is relative
 node src/cli.js test-all \
   --base-dir /mnt/configs \
-  --pattern "rdsma-demo-1/**/config.js"
+  --pattern "project/**/config.js"
 
 # Without --base-dir, pattern must be relative to cwd
 node src/cli.js test-all \
-  --pattern "databases/mariadb/rdsma-demo-1/**/config.js"
+  --pattern "databases/mariadb/project/**/config.js"
 ```
 
 | Scenario | `--base-dir` | `--pattern` |

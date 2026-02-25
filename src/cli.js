@@ -1128,7 +1128,7 @@ program
   .command('test-all')
   .description('Run all tests and generate report')
   .option('-o, --output <dir>', 'Output directory for reports', './reports')
-  .option('--pattern <pattern>', 'Glob pattern to match config files, relative to --base-dir or cwd (e.g., "rdsma-demo-1/**/config.js")')
+  .option('--pattern <pattern>', 'Glob pattern to match config files, relative to --base-dir or cwd (e.g., "project/**/config.js")')
   .option('--base-dir <dir>', 'Base directory for pattern search (default: current working directory)')
   .option('--console-only', 'Only output to console, do not save report files')
   .action(async (cmdOptions, cmd) => {
