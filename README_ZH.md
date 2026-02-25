@@ -930,7 +930,65 @@ node src/cli.js -c databases/mariadb/test-success/ddl/config.js test
 
 # 執行所有測試並生成報表
 node src/cli.js test-all -o ./reports
+
+# 使用 --pattern 只測試特定目錄
+node src/cli.js test-all --pattern "databases/mariadb/production-server/**/config.js"
 ```
+
+### Pattern 比對說明
+
+`test-all` 支援 glob pattern 選擇性測試資料庫。會自動辨識 DCL / DDL 配置並套用對應的測試策略：
+
+```bash
+# 測試 production-server 下所有設定（DCL + DDL）
+node src/cli.js test-all --pattern "databases/mariadb/production-server/**/config.js"
+
+# 只測試 DDL 設定
+node src/cli.js test-all --pattern "databases/mariadb/production-server/ddl/**/config.js"
+
+# 只測試 DCL 設定（會執行 3 次冪等性驗證）
+node src/cli.js test-all --pattern "databases/mariadb/production-server/dcl/config.js"
+
+# 測試所有 MongoDB 資料庫
+node src/cli.js test-all --pattern "databases/mongodb/**/ddl/config.js"
+```
+
+**`--base-dir` 選項**：
+
+當 config 檔案存放在 workspace 以外的位置（例如掛載的外部 volume、NFS），使用 `--base-dir` 指定搜尋根目錄，`--pattern` 則填入**相對於該目錄**的路徑。
+
+```bash
+# 情境：config 在外部路徑
+#   /s/rdsma-demo-1/dcl/config.js
+#   /s/rdsma-demo-1/ddl/aaa/config.js
+#   /s/rdsma-demo-1/ddl/bbb/config.js
+
+# 使用 --base-dir 指定根目錄，--pattern 填相對路徑
+node src/cli.js test-all \
+  --base-dir /s \
+  --pattern "rdsma-demo-1/**/config.js"
+
+# 不使用 --base-dir，pattern 須相對於 cwd
+node src/cli.js test-all \
+  --pattern "databases/mariadb/rdsma-demo-1/**/config.js"
+```
+
+| 情境 | `--base-dir` | `--pattern` |
+|---|---|---|
+| config 在 workspace 內 | _(省略)_ | `databases/mariadb/demo/**/config.js` |
+| config 在外部 volume | `/s` | `rdsma-demo-1/**/config.js` |
+| 只有一層子目錄 | `/s` | `rdsma-demo-1/*/config.js` |
+| 有多層巢狀子目錄 | `/s` | `rdsma-demo-1/**/config.js` |
+
+> **`*` vs `**` 的差異**：
+> - `*` 只匹配**一層**目錄（如 `dcl/config.js`）
+> - `**` 匹配**零層或多層**目錄（如 `ddl/aaa/config.js`、`ddl/bbb/config.js`）
+> - 有巢狀子資料庫時請使用 `**`
+
+**Pattern 語法**：
+- `**` — 匹配任意層數目錄（遞迴）
+- `*` — 匹配單層任意字元（不含 `/`）
+- 路徑相對於 `--base-dir`（未指定則相對於 cwd）
 
 ### 使用測試腳本
 

@@ -1128,7 +1128,8 @@ program
   .command('test-all')
   .description('Run all tests and generate report')
   .option('-o, --output <dir>', 'Output directory for reports', './reports')
-  .option('--pattern <pattern>', 'Glob pattern to match config files (e.g., "databases/mariadb/{{ namespace }}/**/config.js")')
+  .option('--pattern <pattern>', 'Glob pattern to match config files, relative to --base-dir or cwd (e.g., "rdsma-demo-1/**/config.js")')
+  .option('--base-dir <dir>', 'Base directory for pattern search (default: current working directory)')
   .option('--console-only', 'Only output to console, do not save report files')
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
@@ -1139,12 +1140,19 @@ program
     
     if (options.pattern) {
       // Use pattern to find config files
+      const effectiveBaseDir = options.baseDir
+        ? path.resolve(options.baseDir)
+        : process.cwd();
+
+      if (options.baseDir) {
+        console.log(chalk.blue(`\n📁 Base directory: ${effectiveBaseDir}`));
+      }
       console.log(chalk.blue(`\n🔍 Searching for configs matching pattern: ${options.pattern}\n`));
       
       // Helper function to recursively find config.js files
       const findConfigFiles = async (dir, pattern) => {
         const results = [];
-        const baseDir = path.resolve(process.cwd());
+        const baseDir = path.resolve(dir);
         
         // Parse pattern to extract directory and file matching
         const patternParts = pattern.split('/');
@@ -1210,7 +1218,7 @@ program
         return results;
       };
       
-      configFiles = await findConfigFiles(process.cwd(), options.pattern);
+      configFiles = await findConfigFiles(effectiveBaseDir, options.pattern);
       
       if (configFiles.length === 0) {
         console.log(chalk.yellow('⚠️  No config files found matching the pattern.'));
@@ -1219,7 +1227,7 @@ program
       
       console.log(chalk.cyan(`Found ${configFiles.length} config file(s):`));
       for (const cf of configFiles) {
-        console.log(chalk.gray(`   - ${path.relative(process.cwd(), cf)}`));
+        console.log(chalk.gray(`   - ${path.relative(effectiveBaseDir, cf)}`));
       }
       console.log('');
       

@@ -1042,7 +1042,35 @@ node src/cli.js test-all --pattern "databases/**/test-success/*/config.js"
 **Pattern Syntax**:
 - `**` - Matches any number of directories (recursive)
 - `*` - Matches any characters except `/` (single level)
-- Paths are relative to workspace root
+- Paths are relative to `--base-dir` (or workspace root if not set)
+
+**`--base-dir` Option**:
+
+When your config files are stored outside the workspace (e.g. a mounted NFS/external volume), use `--base-dir` to set the search root. The `--pattern` is then treated as a path **relative to that directory**.
+
+```bash
+# Configs at: /mnt/configs/rdsma-demo-1/dcl/config.js
+#              /mnt/configs/rdsma-demo-1/ddl/aaa/config.js
+#              /mnt/configs/rdsma-demo-1/ddl/bbb/config.js
+
+# Use --base-dir to point to the root, --pattern is relative
+node src/cli.js test-all \
+  --base-dir /mnt/configs \
+  --pattern "rdsma-demo-1/**/config.js"
+
+# Without --base-dir, pattern must be relative to cwd
+node src/cli.js test-all \
+  --pattern "databases/mariadb/rdsma-demo-1/**/config.js"
+```
+
+| Scenario | `--base-dir` | `--pattern` |
+|---|---|---|
+| Configs inside workspace | _(omit)_ | `databases/mariadb/demo/**/config.js` |
+| Configs on external volume | `/mnt/configs` | `demo/**/config.js` |
+| Namespace = single depth | `/mnt/configs` | `demo/*/config.js` |
+| Namespace = nested depth | `/mnt/configs` | `demo/**/config.js` |
+
+> **`*` vs `**`**: Use `*` when configs are exactly one level deep (`dcl/config.js`). Use `**` when configs may be nested at any depth (`ddl/aaa/config.js`, `ddl/bbb/config.js`).
 
 **Output Options**:
 - Default: Console output + JSON/HTML files in `./reports/`
