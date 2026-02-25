@@ -1,3 +1,5 @@
+-- @allow: ALTER_TABLE_MODIFY,MODIFY_COLUMN
+-- Reviewed by: Data Team — extending VARCHAR(100)→(200) is safe (no truncation risk, data widening only)
 -- +migrate Up
 -- Extend event_type column from VARCHAR(100) to VARCHAR(200)
 -- to support longer namespaced event names (e.g., "checkout.payment.credit_card.failed")
