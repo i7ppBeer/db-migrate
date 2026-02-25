@@ -233,6 +233,18 @@ export class MariaDBAdapter extends BaseAdapter {
   }
 
   async ensureChangelogTable() {
+    const dbConfig = this.config.mariadb || this.config;
+    const dbName = dbConfig.database;
+
+    // Re-create the database if it was dropped by a DOWN migration
+    // (e.g., 20260101000000-create-database.sql does DROP DATABASE in its DOWN section)
+    if (dbName) {
+      await this.connection.execute(
+        `CREATE DATABASE IF NOT EXISTS \`${dbName}\` DEFAULT CHARACTER SET utf8mb4 DEFAULT COLLATE utf8mb4_unicode_ci`
+      );
+      await this.connection.execute(`USE \`${dbName}\``);
+    }
+
     await this.connection.execute(`
       CREATE TABLE IF NOT EXISTS ${this.changelogTable} (
         id VARCHAR(255) PRIMARY KEY,
@@ -243,6 +255,9 @@ export class MariaDBAdapter extends BaseAdapter {
 
   async status() {
     try {
+      // Ensure DB + changelog table exist (may have been dropped by a DOWN migration)
+      await this.ensureChangelogTable();
+
       // Get applied migrations from changelog
       const [rows] = await this.connection.execute(
         `SELECT id, applied_at FROM ${this.changelogTable} ORDER BY applied_at`
@@ -712,15 +727,32 @@ export class MariaDBAdapter extends BaseAdapter {
           const downSQL = this.extractSection(content, 'Down');
           
           if (downSQL) {
-            // Use query() for multi-statement support
-            await this.connection.query(downSQL);
-            
-            // Remove from changelog
+            // Remove from changelog BEFORE executing DOWN SQL.
+            // This prevents "table/database doesn't exist" errors when
+            // the DOWN migration drops the very database that contains
+            // the changelog table (e.g., DROP DATABASE in down section).
             const id = migration.fileName.replace('.sql', '');
             await this.connection.execute(
               `DELETE FROM ${this.changelogTable} WHERE id = ?`,
               [id]
             );
+
+            try {
+              // Use query() for multi-statement support
+              await this.connection.query(downSQL);
+            } catch (downError) {
+              // DOWN SQL failed — restore the changelog entry so state stays consistent
+              try {
+                await this.connection.execute(
+                  `INSERT IGNORE INTO ${this.changelogTable} (id) VALUES (?)`,
+                  [id]
+                );
+              } catch {
+                // If restore also fails (e.g. DB was dropped), ignore —
+                // the database is gone so the migration is effectively rolled back
+              }
+              throw downError;
+            }
             
             result.rolledBack.push(migration.fileName);
           }

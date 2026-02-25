@@ -116,9 +116,14 @@ export class BaseAdapter {
       }
       console.log(`   ✅ Applied ${results.stages.up1.count} migrations`);
 
-      // Stage 2: DOWN (rollback all)
+      // Get the total number of applied migrations after Stage 1
+      // (may be more than up1.count if some were already applied from a previous run)
+      const statusAfterUp1 = await this.status();
+      const totalApplied = statusAfterUp1.applied.length;
+
+      // Stage 2: DOWN (rollback all currently applied migrations)
       console.log('\n📥 Stage 2: Running DOWN migrations (rollback)...');
-      const downResult = await this.down(results.stages.up1.count);
+      const downResult = await this.down(totalApplied);
       results.stages.down = {
         success: downResult.errors.length === 0,
         count: downResult.rolledBack.length,
@@ -146,11 +151,11 @@ export class BaseAdapter {
       }
       console.log(`   ✅ Re-applied ${results.stages.up2.count} migrations`);
 
-      // Verify counts match
-      if (results.stages.up1.count !== results.stages.up2.count) {
+      // Verify Stage 3 re-applied as many as Stage 2 rolled back
+      if (results.stages.down.count !== results.stages.up2.count) {
         throw new Error(
-          `Migration count mismatch: Stage 1 applied ${results.stages.up1.count}, ` +
-          `Stage 3 applied ${results.stages.up2.count}`
+          `Migration count mismatch: Stage 2 rolled back ${results.stages.down.count}, ` +
+          `Stage 3 re-applied ${results.stages.up2.count}`
         );
       }
 
@@ -161,7 +166,8 @@ export class BaseAdapter {
       // Attempt cleanup on failure to restore to a known state
       try {
         console.warn('\n⚠️  Test failed, attempting cleanup...');
-        await this.down(results.stages.up1.count || 0);
+        const cleanupStatus = await this.status();
+        await this.down(cleanupStatus.applied.length || 0);
         console.warn('   Cleanup completed.');
       } catch (cleanupError) {
         console.error(`   ❌ Cleanup also failed: ${cleanupError.message}`);
