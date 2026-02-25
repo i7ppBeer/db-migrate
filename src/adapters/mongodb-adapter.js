@@ -581,6 +581,46 @@ export async function down(db, client) {
   }
 
   /**
+   * Parse per-file allow annotations from JS comments at the top of the file.
+   * Supports:
+   *   // @allow-dangerous: true
+   *   // @allow: CODE1,CODE2
+   *   // @allow-forbidden: true
+   * Stops parsing at first non-comment, non-blank line.
+   * @param {string} content - File content
+   * @param {string} fileName - File name
+   * @returns {Object} annotations
+   */
+  parseFileAnnotations(content, fileName) {
+    const annotations = {
+      allowDangerous: false,
+      allowForbidden: false,
+      allowedCodes: []
+    };
+    for (const line of content.split('\n')) {
+      const t = line.trim();
+      if (t === '' || t.startsWith('/*') || t.startsWith('*')) continue;
+      if (!t.startsWith('//')) break;
+      const dangerousMatch = t.match(/\/\/\s*@allow-dangerous\s*:\s*(.+)/i);
+      if (dangerousMatch) {
+        const v = dangerousMatch[1].trim().toLowerCase();
+        annotations.allowDangerous = ['true', 'yes', '1'].includes(v);
+      }
+      const forbiddenMatch = t.match(/\/\/\s*@allow-forbidden\s*:\s*(.+)/i);
+      if (forbiddenMatch) {
+        const v = forbiddenMatch[1].trim().toLowerCase();
+        annotations.allowForbidden = ['true', 'yes', '1'].includes(v);
+      }
+      const allowMatch = t.match(/\/\/\s*@allow\s*:\s*(.+)/i);
+      if (allowMatch) {
+        const codes = allowMatch[1].split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
+        annotations.allowedCodes.push(...codes);
+      }
+    }
+    return annotations;
+  }
+
+  /**
    * Validate migration content
    * @param {string} content - Migration file content
    * @param {string} fileName - File name
@@ -590,6 +630,17 @@ export async function down(db, client) {
    * @param {string[]} options.allowedCodes - Specific codes to allow
    */
   validateContent(content, fileName, options = {}) {
+    // === Parse per-file annotations (// @allow-dangerous: true / // @allow: CODE1,CODE2) ===
+    const fileAnnotations = this.parseFileAnnotations(content, fileName);
+    // Merge: per-file annotations can escalate permissions, but cannot downgrade CLI flags
+    const effectiveOptions = {
+      ...options,
+      allowDangerous: options.allowDangerous || fileAnnotations.allowDangerous,
+      allowForbidden: options.allowForbidden || fileAnnotations.allowForbidden,
+      allowedCodes: [...(options.allowedCodes || []), ...(fileAnnotations.allowedCodes || [])]
+    };
+    options = effectiveOptions;
+
     const errors = [];
     const warnings = [];
     const dangerousOps = [];
@@ -724,8 +775,12 @@ export async function down(db, client) {
           }
         }
 
-        // Use normalized content for pattern matching
-        if (rule.pattern.test(normalizedContent)) {
+        // Use UP section for pattern matching (DOWN rollback ops are expected to be destructive).
+        // Find where down() starts and only scan content before it.
+        const downStart = content.search(/\bexport\s+async\s+function\s+down\b|\bexport\s+const\s+down\s*=|\basync\s+down\s*\(/);
+        const upOnlyContent = downStart > 0 ? content.slice(0, downStart) : content;
+        const dangerousCheckTarget = this.normalizeJS(upOnlyContent);
+        if (rule.pattern.test(dangerousCheckTarget)) {
           const isAllowed = options.allowDangerous || 
             (options.allowedCodes && options.allowedCodes.includes(rule.code));
           
@@ -807,8 +862,9 @@ export async function down(db, client) {
 
   extractDroppedCollections(code) {
     const collections = [];
-    // Match: collection('name').drop() or .collection("name").drop
-    const regex = /collection\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.\s*drop/g;
+    // Match: collection('name').drop() — but NOT dropIndex(), dropIndexes(), etc.
+    // Uses \( \) to ensure we only match .drop() with empty parens.
+    const regex = /collection\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.\s*drop\s*\(\s*\)/g;
     let match;
     while ((match = regex.exec(code)) !== null) {
       collections.push(match[1]);

@@ -19,15 +19,15 @@ export default {
     {
       name: 'primary-db',
       mongodb: {
-        uri: process.env.MONGODB_URI || 'mongodb://localhost:27017',
-        database: 'test_multi_primary'
+        url: process.env.MONGODB_URL || process.env.MONGODB_URI || 'mongodb://localhost:27017',
+        databaseName: 'test_multi_primary'
       }
     },
     {
       name: 'secondary-db',
       mongodb: {
-        uri: process.env.MONGODB_URI || 'mongodb://localhost:27017',
-        database: 'test_multi_secondary'
+        url: process.env.MONGODB_URL || process.env.MONGODB_URI || 'mongodb://localhost:27017',
+        databaseName: 'test_multi_secondary'
       }
     }
   ]

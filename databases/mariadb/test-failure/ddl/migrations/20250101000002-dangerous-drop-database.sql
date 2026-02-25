@@ -3,7 +3,7 @@
 
 -- +migrate Up
 
-CREATE TABLE temp_table (
+CREATE TABLE IF NOT EXISTS temp_table (
     id INT PRIMARY KEY
 );
 

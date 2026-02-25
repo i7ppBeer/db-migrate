@@ -4,8 +4,8 @@
 export default {
   type: 'mongodb',
   mongodb: {
-    uri: process.env.MONGODB_URI || 'mongodb://localhost:27017',
-    database: process.env.MONGODB_DB || 'admin'
+    url: process.env.MONGODB_URL || process.env.MONGODB_URI || 'mongodb://localhost:27017',
+    databaseName: process.env.MONGODB_DATABASE || process.env.MONGODB_DB || 'admin'
   },
   migrationsDir: './migrations',
   checksumCollection: '_dcl_migrations',

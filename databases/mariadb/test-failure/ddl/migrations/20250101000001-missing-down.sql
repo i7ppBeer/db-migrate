@@ -3,7 +3,7 @@
 
 -- +migrate Up
 
-CREATE TABLE test_no_rollback (
+CREATE TABLE IF NOT EXISTS test_no_rollback (
     id INT PRIMARY KEY AUTO_INCREMENT,
     name VARCHAR(100) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
