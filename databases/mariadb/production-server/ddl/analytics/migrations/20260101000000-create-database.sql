@@ -14,8 +14,6 @@ CREATE DATABASE IF NOT EXISTS analytics
   DEFAULT CHARACTER SET utf8mb4
   DEFAULT COLLATE utf8mb4_unicode_ci;
 
-USE analytics;
-
 -- +migrate Down
 -- ============================================================
 -- Drop analytics database

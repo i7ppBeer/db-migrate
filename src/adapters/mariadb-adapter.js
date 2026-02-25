@@ -245,8 +245,10 @@ export class MariaDBAdapter extends BaseAdapter {
       await this.connection.execute(`USE \`${dbName}\``);
     }
 
+    // Use fully qualified table name so this works regardless of connection context
+    const qualifiedTable = dbName ? `\`${dbName}\`.${this.changelogTable}` : this.changelogTable;
     await this.connection.execute(`
-      CREATE TABLE IF NOT EXISTS ${this.changelogTable} (
+      CREATE TABLE IF NOT EXISTS ${qualifiedTable} (
         id VARCHAR(255) PRIMARY KEY,
         applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
@@ -376,6 +378,9 @@ export class MariaDBAdapter extends BaseAdapter {
         pendingMigrations = [onlyFile];
       }
       
+      const dbConfig = this.config.mariadb || this.config;
+      const dbName = dbConfig.database;
+
       for (const file of pendingMigrations) {
         try {
           const filePath = path.join(this.config.migrationsDir, file);
@@ -385,8 +390,13 @@ export class MariaDBAdapter extends BaseAdapter {
           const upSQL = this.extractSection(content, 'Up');
           
           if (upSQL) {
+            // Prepend USE <db> directly into the SQL so the correct database
+            // context is guaranteed within the same multi-statement execution.
+            // This means migration files don't need to include "USE <db>" themselves.
+            const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
+
             // Use query() for multi-statement support
-            await this.connection.query(upSQL);
+            await this.connection.query(wrappedUpSQL);
             
             // Record in changelog
             const id = file.replace('.sql', '');
@@ -738,8 +748,15 @@ export class MariaDBAdapter extends BaseAdapter {
             );
 
             try {
+              // Prepend USE <db> so the correct database context is set
+              // within the same multi-statement execution.
+              const dbConfigDown = this.config.mariadb || this.config;
+              const wrappedDownSQL = dbConfigDown.database
+                ? `USE \`${dbConfigDown.database}\`;\n${downSQL}`
+                : downSQL;
+
               // Use query() for multi-statement support
-              await this.connection.query(downSQL);
+              await this.connection.query(wrappedDownSQL);
             } catch (downError) {
               // DOWN SQL failed — restore the changelog entry so state stays consistent
               try {
