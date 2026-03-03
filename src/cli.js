@@ -300,7 +300,12 @@ program
       
       // Get already applied migrations
       const status = await adapter.status();
-      const appliedSet = new Set(status.applied.map(m => m.id || m.name || m));
+      const appliedSet = new Set(status.applied.map(m => {
+        if (m.fileName) return m.fileName.replace('.sql', '').replace('.js', '');
+        if (m.id) return m.id;
+        if (m.name) return m.name;
+        return m;
+      }));
       
       // Determine which files to mark
       let filesToMark = [];
