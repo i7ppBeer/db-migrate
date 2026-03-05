@@ -20,6 +20,7 @@
 - **Auto Database Creation**: MariaDB adapter auto-creates database before connection (dual guarantee)
 - **Up-Down-Up Testing**: Ensure migrations can rollback and re-apply correctly
 - **DCL Idempotency Verification**: Auto-verify DCL scripts produce same results on multiple executions
+- **DCL Auto-Generated Passwords**: Placeholder `CHANGE_ME_ON_FIRST_LOGIN` is replaced at runtime with a cryptographically secure 16-character password — original files are never modified, password never touches disk or logs
 - **Sanity Check**: Built-in Pre-Check / Post-Check / Auto-Rollback mechanism
 - **Report Generation**: Support JSON and HTML formats
 - **Containerized**: Docker and Kubernetes (Helm) deployment support
@@ -296,6 +297,53 @@ docker compose run --rm migrate dcl:status -c /app/databases/mariadb/production-
 **Verify DCL Idempotency** (`dcl:verify`):
 ```bash
 docker compose run --rm migrate dcl:verify -c /app/databases/mariadb/production-server/dcl/config.js
+```
+
+---
+
+#### DCL Auto-Generated Passwords
+
+DCL template files (`R__*.sql` / `R__*.js`) may contain the literal placeholder `CHANGE_ME_ON_FIRST_LOGIN`.
+When the runner encounters this placeholder it **automatically generates a secure password at runtime** — no manual editing required.
+
+**How it works:**
+
+| | Detail |
+|---|---|
+| File on disk | Always unchanged — still contains `CHANGE_ME_ON_FIRST_LOGIN` |
+| Checksum | Computed from the original file (rotation does **not** trigger re-run) |
+| Substitution | In-memory only, immediately before the SQL/JS is sent to the DB |
+| Password output | Printed once to stdout — **save it immediately** |
+
+**Password rules:** 16 characters · a-z · A-Z · 0-9 · 1-2 special chars (`-` or `~`)  
+Special chars are safe across MySQL/MariaDB CLI, `mongosh`, MongoDB URI, Bash, and ProxySQL.
+
+**Example output when running `dcl`:**
+
+```
+==============================================================
+  [DCL] Auto-generated password for: R__00_default_users.sql
+  Password : 6U3uELfN6alX0~CJ
+  ⚠️  Save this password now — it will NOT be shown again.
+==============================================================
+```
+
+**MariaDB** (`R__00_default_users.sql`):
+```sql
+-- The placeholder below is replaced in-memory at execution time
+CREATE USER IF NOT EXISTS 'app_default'@'%'
+  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'
+  PASSWORD EXPIRE;
+```
+
+**MongoDB** (`R__00_default_users.js`):
+```javascript
+// The placeholder below is replaced in-memory at execution time
+await adminDb.command({
+  createUser: 'app_default',
+  pwd: 'CHANGE_ME_ON_FIRST_LOGIN',
+  roles: [{ role: 'read', db: targetDb }],
+});
 ```
 
 ---

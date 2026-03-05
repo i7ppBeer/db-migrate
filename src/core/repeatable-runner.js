@@ -21,6 +21,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
+import os from 'os';
 
 export class RepeatableRunner {
   constructor(config) {
@@ -129,6 +130,86 @@ export class RepeatableRunner {
     }
 
     return annotations;
+  }
+
+  /**
+   * Generate a cryptographically random 16-character password.
+   *
+   * Character set: a-z  A-Z  0-9  plus special chars  - ~
+   * These two special chars are safe across ALL of:
+   *   - MySQL / MariaDB CLI   (mysql -p'...')
+   *   - mongosh CLI           (--password '...')
+   *   - MongoDB URI           mongodb://user:PWD@host  (no percent-encode needed)
+   *   - Bash single & double quotes
+   *   - ProxySQL config files
+   *
+   * Guarantees per password: ≥2 lower, ≥2 upper, ≥2 digit, 1-2 special.
+   *
+   * @returns {string} 16-character password
+   */
+  generateSecurePassword() {
+    const lower   = 'abcdefghijklmnopqrstuvwxyz';
+    const upper   = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const digits  = '0123456789';
+    const special = '-~';
+
+    const pick = (charset, n) => {
+      const bytes = crypto.randomBytes(n);
+      return Array.from(bytes).map(b => charset[b % charset.length]);
+    };
+
+    // Guaranteed slots: 2 lower + 2 upper + 2 digit + 1 special = 7
+    const required = [
+      ...pick(lower,   2),
+      ...pick(upper,   2),
+      ...pick(digits,  2),
+      ...pick(special, 1),
+    ];
+    // 50% chance of a second special char → 1 or 2 specials total
+    if (crypto.randomInt(2)) required.push(...pick(special, 1));
+
+    // Pad remaining slots with alphanumeric only
+    const alphaNum  = lower + upper + digits;
+    const remaining = 16 - required.length;
+    const all = [...required, ...pick(alphaNum, remaining)];
+
+    // Fisher-Yates shuffle using crypto random
+    for (let i = all.length - 1; i > 0; i--) {
+      const j = crypto.randomInt(i + 1);
+      [all[i], all[j]] = [all[j], all[i]];
+    }
+    return all.join('');
+  }
+
+  /**
+   * Replace every occurrence of the literal placeholder CHANGE_ME_ON_FIRST_LOGIN
+   * in SQL/JS content with an auto-generated secure password.
+   *
+   * Rules:
+   *   - Original file on disk is NEVER modified.
+   *   - Checksum must be computed BEFORE calling this (from the raw on-disk content).
+   *   - Generated password is printed once to stdout — operator must record it.
+   *
+   * @param {string} content  - Raw file content (may contain placeholder)
+   * @param {string} fileName - File name used in log output
+   * @returns {{ resolved: string, generated: boolean, password: string|null }}
+   */
+  resolvePlaceholderPasswords(content, fileName) {
+    const PLACEHOLDER = 'CHANGE_ME_ON_FIRST_LOGIN';
+    if (!content.includes(PLACEHOLDER)) {
+      return { resolved: content, generated: false, password: null };
+    }
+
+    const password = this.generateSecurePassword();
+    const resolved = content.replaceAll(PLACEHOLDER, password);
+
+    console.log('\n' + '='.repeat(62));
+    console.log(`  [DCL] Auto-generated password for: ${fileName}`);
+    console.log(`  Password : ${password}`);
+    console.log(`  ⚠️  Save this password now — it will NOT be shown again.`);
+    console.log('='.repeat(62) + '\n');
+
+    return { resolved, generated: true, password };
   }
 
   /**
@@ -367,8 +448,12 @@ export class RepeatableRunner {
       }
 
       try {
+        // Resolve CHANGE_ME_ON_FIRST_LOGIN → auto-generated password (in-memory only).
+        // Checksum was already computed from the original on-disk content above.
+        const { resolved: resolvedContent } = this.resolvePlaceholderPasswords(file.content, file.fileName);
+
         // Process DELIMITER for stored procedures support
-        const sqlChunks = this.processDelimiterSQL(file.content);
+        const sqlChunks = this.processDelimiterSQL(resolvedContent);
         
         for (const chunk of sqlChunks) {
           if (chunk.sql.trim()) {
@@ -443,14 +528,29 @@ export class RepeatableRunner {
       }
 
       try {
-        // Import and execute the JS module
-        const module = await import(`file://${file.filePath}?t=${Date.now()}`);
-        
-        if (typeof module.up !== 'function') {
+        // Resolve CHANGE_ME_ON_FIRST_LOGIN → auto-generated password (in-memory only).
+        // For JS files a temp file is written so the module can be dynamically imported.
+        const { resolved: resolvedContent, generated } = this.resolvePlaceholderPasswords(file.content, file.fileName);
+
+        let moduleToRun;
+        let tempFilePath = null;
+        if (generated) {
+          // Write resolved JS to a temp file, import it, then clean up
+          tempFilePath = path.join(os.tmpdir(), `dcl-${crypto.randomBytes(8).toString('hex')}-${file.fileName}`);
+          await fs.writeFile(tempFilePath, resolvedContent, 'utf-8');
+          moduleToRun = await import(`file://${tempFilePath}`);
+        } else {
+          moduleToRun = await import(`file://${file.filePath}?t=${Date.now()}`);
+        }
+
+        if (typeof moduleToRun.up !== 'function') {
           throw new Error('Migration must export an "up" function');
         }
 
-        await module.up(db, client);
+        await moduleToRun.up(db, client);
+
+        // Best-effort cleanup of temp file
+        if (tempFilePath) await fs.unlink(tempFilePath).catch(() => {});
         
         // Update checksum
         await this.updateChecksumMongoDB(db, file.fileName, file.checksum);
