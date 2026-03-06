@@ -9,26 +9,23 @@
  */
 export default {
   type: 'mongodb',
-  
-  // 所有 instance 共用的 migrations
-  migrationsDir: './migrations',
   changelogCollection: '_migrations',
-  
+
   // 多個 database instances
   instances: [
     {
       name: 'primary-db',
       mongodb: {
         url: process.env.MONGODB_URL || process.env.MONGODB_URI || 'mongodb://localhost:27017',
-        databaseName: 'test_multi_primary'
-      }
+        databaseName: 'test_multi_primary',
+      },
     },
     {
       name: 'secondary-db',
       mongodb: {
         url: process.env.MONGODB_URL || process.env.MONGODB_URI || 'mongodb://localhost:27017',
-        databaseName: 'test_multi_secondary'
-      }
-    }
-  ]
+        databaseName: 'test_multi_secondary',
+      },
+    },
+  ],
 };

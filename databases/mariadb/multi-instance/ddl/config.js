@@ -9,18 +9,8 @@
  */
 export default {
   type: 'mariadb',
-  
-  // 所有 instance 共用的 migrations
-  migrationsDir: './migrations',
   changelogTable: '_migrations',
-  
-  // Sanity Check 設定
-  sanityCheck: {
-    enabled: true,
-    autoRollback: true,
-    verbose: true
-  },
-  
+
   // 多個 database instances
   instances: [
     {
@@ -30,8 +20,8 @@ export default {
         port: parseInt(process.env.MARIADB_PORT || '3306', 10),
         database: 'test_multi_primary',
         user: process.env.MARIADB_USER || 'root',
-        password: process.env.MARIADB_PASSWORD || 'rootpass'
-      }
+        password: process.env.MARIADB_PASSWORD || 'rootpass',
+      },
     },
     {
       name: 'secondary-db',
@@ -40,8 +30,8 @@ export default {
         port: parseInt(process.env.MARIADB_PORT || '3306', 10),
         database: 'test_multi_secondary',
         user: process.env.MARIADB_USER || 'root',
-        password: process.env.MARIADB_PASSWORD || 'rootpass'
-      }
-    }
-  ]
+        password: process.env.MARIADB_PASSWORD || 'rootpass',
+      },
+    },
+  ],
 };

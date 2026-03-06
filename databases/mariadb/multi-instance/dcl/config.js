@@ -10,18 +10,9 @@
  */
 export default {
   type: 'mariadb',
-  
-  // 所有 instance 共用的 DCL migrations
-  migrationsDir: './migrations',
-  checksumTable: '_dcl_migrations',
   mode: 'repeatable',
-  
-  // 冪等性檢查設定
-  idempotencyCheck: {
-    enabled: true,
-    verbose: true
-  },
-  
+  checksumTable: '_dcl_migrations',
+
   // 多個 database instances
   instances: [
     {
@@ -31,8 +22,8 @@ export default {
         port: parseInt(process.env.MARIADB_PORT || '3306', 10),
         database: 'mysql',
         user: process.env.MARIADB_USER || 'root',
-        password: process.env.MARIADB_PASSWORD || 'rootpass'
-      }
+        password: process.env.MARIADB_PASSWORD || 'rootpass',
+      },
     },
     {
       name: 'secondary-db',
@@ -41,8 +32,8 @@ export default {
         port: parseInt(process.env.MARIADB_PORT || '3306', 10),
         database: 'mysql',
         user: process.env.MARIADB_USER || 'root',
-        password: process.env.MARIADB_PASSWORD || 'rootpass'
-      }
-    }
-  ]
+        password: process.env.MARIADB_PASSWORD || 'rootpass',
+      },
+    },
+  ],
 };

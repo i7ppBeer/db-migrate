@@ -15,26 +15,7 @@
 
 export default {
   type: 'mariadb',
-  host: process.env.MARIADB_HOST || 'localhost',
-  port: parseInt(process.env.MARIADB_PORT || '3306'),
   user: process.env.ANALYTICS_DDL_USER || 'analytics_ddl_admin',
   password: process.env.ANALYTICS_DDL_PASSWORD || 'analytics_ddl_secure_pass_222',
   database: 'analytics',
-  
-  // DDL migrations directory (Versioned mode)
-  migrationsDir: './migrations',
-  
-  // Changelog table for tracking versioned migrations
-  changelogTable: 'schema_migrations',
-  
-  // Migration mode: 'versioned' for DDL (default)
-  mode: 'versioned',
-  
-  // Sanity check configuration
-  sanityCheck: {
-    enabled: true,
-    autoRollback: true,
-    timeoutMs: 30000,
-    verbose: true
-  }
 };

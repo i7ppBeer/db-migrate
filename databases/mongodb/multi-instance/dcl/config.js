@@ -10,33 +10,24 @@
  */
 export default {
   type: 'mongodb',
-  
-  // 所有 instance 共用的 DCL migrations
-  migrationsDir: './migrations',
-  checksumCollection: '_dcl_migrations',
   mode: 'repeatable',
-  
-  // 冪等性檢查設定
-  idempotencyCheck: {
-    enabled: true,
-    verbose: true
-  },
-  
+  checksumCollection: '_dcl_migrations',
+
   // 多個 database instances
   instances: [
     {
       name: 'primary-db',
       mongodb: {
         url: process.env.MONGODB_URL || process.env.MONGODB_URI || 'mongodb://localhost:27017',
-        databaseName: 'admin'
-      }
+        databaseName: 'admin',
+      },
     },
     {
       name: 'secondary-db',
       mongodb: {
         url: process.env.MONGODB_URL || process.env.MONGODB_URI || 'mongodb://localhost:27017',
-        databaseName: 'admin'
-      }
-    }
-  ]
+        databaseName: 'admin',
+      },
+    },
+  ],
 };

@@ -391,6 +391,43 @@ export class RepeatableRunner {
   }
 
   /**
+   * Pre-check whether accounts that will be created by this file already exist.
+   *
+   * Looks for `CREATE USER … CHANGE_ME_ON_FIRST_LOGIN` patterns, extracts
+   * the usernames, and queries `mysql.user` directly.  This is called BEFORE
+   * executing the migration SQL so that the result is not polluted by stale
+   * `SHOW WARNINGS` state left over from earlier queries on the same connection
+   * (mysql2 multi-statement mode does not reset the warning buffer when a
+   * subsequent query produces zero warnings).
+   *
+   * @param {Object} connection     - mysql2 pool connection
+   * @param {string} originalContent - Raw (un-resolved) SQL content
+   * @returns {Promise<boolean>} true when at least one target account already exists
+   */
+  async preCheckAccountsExistMariaDB(connection, originalContent) {
+    const PLACEHOLDER = 'CHANGE_ME_ON_FIRST_LOGIN';
+    const usernames = [];
+    for (const line of originalContent.split('\n')) {
+      const upper = line.toUpperCase();
+      if (
+        (upper.includes('CREATE USER') || upper.includes('ALTER USER')) &&
+        line.includes(PLACEHOLDER)
+      ) {
+        const m = line.match(/['"`]([^'"`@\s]+)['"`]\s*@/);
+        if (m) usernames.push(m[1]);
+      }
+    }
+    if (usernames.length === 0) return false;
+
+    const placeholders = usernames.map(() => '?').join(', ');
+    const [[{ cnt }]] = await connection.query(
+      `SELECT COUNT(*) AS cnt FROM mysql.user WHERE User IN (${placeholders})`,
+      usernames
+    );
+    return Number(cnt) > 0;
+  }
+
+  /**
    * Get stored checksums from database (MongoDB)
    * @param {Object} db - MongoDB database
    * @returns {Promise<Map<string, {checksum: string, appliedAt: Date}>>}
@@ -539,37 +576,29 @@ export class RepeatableRunner {
         // Checksum was already computed from the original on-disk content above.
         const { resolved: resolvedContent, generated, passwords } = this.resolvePlaceholderPasswords(file.content, file.fileName);
 
+        // Pre-check account existence BEFORE running SQL.
+        // This avoids relying on SHOW WARNINGS, which does not reset its buffer
+        // when a subsequent query produces zero warnings (mysql2 multi-statement
+        // mode quirk), causing false-positive "already-exists" detection on the
+        // very first run when the connection has residual Notes from earlier ops.
+        let alreadyExists = false;
+        if (generated) {
+          alreadyExists = await this.preCheckAccountsExistMariaDB(connection, file.content);
+        }
+
         // Process DELIMITER for stored procedures support
         const sqlChunks = this.processDelimiterSQL(resolvedContent);
 
-        let totalWarnings = 0;
         for (const chunk of sqlChunks) {
           if (chunk.sql.trim()) {
-            // Execute each chunk. warningCount is unreliable for multi-statement
-            // queries in mysql2; we rely on SHOW WARNINGS instead (see below).
-            const [queryResult] = await connection.query(chunk.sql);
-            if (Array.isArray(queryResult)) {
-              for (const r of queryResult) {
-                totalWarnings += r?.warningCount ?? 0;
-              }
-            } else {
-              totalWarnings += queryResult?.warningCount ?? 0;
-            }
+            await connection.query(chunk.sql);
           }
         }
 
-        // SHOW WARNINGS captures Notes (e.g. 1973: user already exists) that
-        // mysql2 does NOT expose via warningCount on multi-statement results.
+        // Persist generated credentials; `alreadyExists` was determined above
+        // via a direct mysql.user query so it is immune to stale SHOW WARNINGS.
         if (generated) {
-          const [warnings] = await connection.query('SHOW WARNINGS');
-          if (Array.isArray(warnings) && warnings.length > 0) {
-            totalWarnings += warnings.length;
-          }
-        }
-
-        // Persist generated credentials; mark if account already existed (warning)
-        if (generated) {
-          await this.saveGeneratedPasswords(file.content, passwords, totalWarnings > 0);
+          await this.saveGeneratedPasswords(file.content, passwords, alreadyExists);
         }
 
         // Update checksum
@@ -578,8 +607,7 @@ export class RepeatableRunner {
         result.applied.push({
           fileName: file.fileName,
           reason: stored ? 'checksum changed' : 'new file',
-          annotations: file.annotations,
-          warnings: totalWarnings
+          annotations: file.annotations
         });
       } catch (error) {
         result.errors.push(`${file.fileName}: ${error.message}`);

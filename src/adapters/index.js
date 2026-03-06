@@ -103,27 +103,68 @@ function detectDatabaseType(config) {
 }
 
 /**
- * Load config from file path
- * @param {string} configPath 
+ * Load config from file path.
+ * If the exported config has a `type` field, the corresponding defaults
+ * (src/config-defaults/<type>-<dcl|ddl>.js) are loaded and shallow-merged
+ * with 1-level deep merge for nested objects, so config files only need to
+ * export the values that differ from the defaults.
+ *
+ * @param {string} configPath
  * @returns {Promise<Object>}
  */
 export async function loadConfig(configPath) {
   try {
-    const absolutePath = configPath.startsWith('/') 
-      ? configPath 
+    const absolutePath = configPath.startsWith('/')
+      ? configPath
       : `${process.cwd()}/${configPath}`;
-    
+
     // Resolve to real path and validate it doesn't escape expected boundaries
-    const { resolve } = await import('path');
+    const { resolve, dirname } = await import('path');
+    const { fileURLToPath } = await import('url');
     const resolvedPath = resolve(absolutePath);
-    
+
     // Block null bytes (path traversal attack vector)
     if (resolvedPath.includes('\0')) {
       throw new Error('Config path contains invalid characters');
     }
-    
+
     const configModule = await import(`file://${resolvedPath}`);
-    return configModule.default;
+    const userConfig = configModule.default;
+
+    // Merge with defaults when type is declared
+    if (userConfig && userConfig.type) {
+      const isRepeatable = userConfig.mode === 'repeatable';
+      const dbType = userConfig.type.toLowerCase();
+      const variant = isRepeatable ? 'dcl' : 'ddl';
+
+      // Locate defaults file relative to this source file
+      const __filename = fileURLToPath(import.meta.url);
+      const __dirname = dirname(__filename);
+      const defaultsPath = resolve(__dirname, `../config-defaults/${dbType}-${variant}.js`);
+
+      let defaults = {};
+      try {
+        const defaultsModule = await import(`file://${defaultsPath}`);
+        defaults = defaultsModule.default;
+      } catch {
+        // Unknown type/variant combination — skip merge
+      }
+
+      // Shallow merge: defaults first, user config overrides
+      const merged = { ...defaults, ...userConfig };
+
+      // 1-level deep merge for well-known nested objects
+      const DEEP_MERGE_KEYS = ['mongodb', 'mariadb', 'sanityCheck', 'idempotencyCheck'];
+      for (const key of DEEP_MERGE_KEYS) {
+        if (defaults[key] || userConfig[key]) {
+          merged[key] = { ...(defaults[key] || {}), ...(userConfig[key] || {}) };
+        }
+      }
+
+      return merged;
+    }
+
+    return userConfig;
   } catch (error) {
     throw new Error(`Failed to load config from ${configPath}: ${error.message}`);
   }

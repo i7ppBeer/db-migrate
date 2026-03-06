@@ -75,36 +75,69 @@ node src/cli.js -c databases/mariadb/test-success/ddl/config.js up
 
 ## 📖 Usage Guide
 
+### Config Defaults & Delta Pattern
+
+`loadConfig()` automatically loads a built-in defaults file (from `src/config-defaults/`) based on `type` + `mode`, then **deep-merges the user config on top**. This means your `config.js` only needs to export the fields that differ from the defaults — the rest are inherited.
+
+| `type` | `mode` | Defaults file |
+|--------|--------|---------------|
+| `mariadb` | `versioned` (DDL) | `src/config-defaults/mariadb-ddl.js` |
+| `mariadb` | `repeatable` (DCL) | `src/config-defaults/mariadb-dcl.js` |
+| `mongodb` | `versioned` (DDL) | `src/config-defaults/mongodb-ddl.js` |
+| `mongodb` | `repeatable` (DCL) | `src/config-defaults/mongodb-dcl.js` |
+
+Environment variable defaults (from the built-in defaults files):
+
+| Variable | Default | Used by |
+|---|---|---|
+| `MARIADB_HOST` | `localhost` | MariaDB host |
+| `MARIADB_PORT` | `3306` | MariaDB port |
+| `MARIADB_USER` | `root` | MariaDB user |
+| `MARIADB_PASSWORD` | `rootpass` | MariaDB password |
+| `MONGODB_URL` / `MONGODB_URI` | `mongodb://localhost:27017` | MongoDB connection URL |
+
 ### Basic Configuration Format
 
-**MongoDB Config** (`config.js`):
+**MongoDB DDL Config** (`config.js`) — delta only:
+```javascript
+// Only override what differs from src/config-defaults/mongodb-ddl.js
+export default {
+  type: 'mongodb',
+  mongodb: { databaseName: process.env.MONGO_DB || 'myapp' }
+};
+```
+
+**MongoDB DCL Config** (`config.js`) — delta only:
 ```javascript
 export default {
   type: 'mongodb',
-  mongodb: {
-    url: process.env.MONGO_URL || 'mongodb://localhost:27017',
-    databaseName: process.env.MONGO_DB || 'myapp'
-  },
-  migrationsDir: './migrations',
-  changelogCollection: 'changelog'
+  mode: 'repeatable',
+  mongodb: { databaseName: 'admin' },   // DCL default is already 'admin'; override if needed
+  checksumCollection: '_dcl_migrations'
 };
 ```
 
-**MariaDB/MySQL Config** (`config.js`):
+**MariaDB DDL Config** (`config.js`) — delta only:
 ```javascript
+// host/port/user/password come from env vars (MARIADB_HOST etc.) or defaults
 export default {
   type: 'mariadb',
-  mariadb: {
-    host: process.env.MARIADB_HOST || 'localhost',
-    port: parseInt(process.env.MARIADB_PORT || '3306', 10),
-    database: process.env.MARIADB_DB || 'myapp',
-    user: process.env.MARIADB_USER || 'root',
-    password: process.env.MARIADB_PASSWORD || 'password'
-  },
-  migrationsDir: './migrations',
+  database: process.env.MARIADB_DB || 'myapp',
   changelogTable: '_migrations'
 };
 ```
+
+**MariaDB DCL Config** (`config.js`) — delta only:
+```javascript
+export default {
+  type: 'mariadb',
+  mode: 'repeatable',
+  database: 'mysql',                  // DCL default; override if using a different DB
+  checksumTable: '_dcl_migrations'
+};
+```
+
+> **Deep merge**: Top-level keys (`sanityCheck`, `idempotencyCheck`, `mongodb`, `mariadb`) are merged one level deep, so you only need to specify the nested fields you want to override.
 
 **Multi-Instance Config - MongoDB** (`config.js`):
 ```javascript
@@ -338,7 +371,7 @@ app_readwrite=9kP2mQrX7sZa1-NW
   📝 [DCL] Credentials saved to /tmp/secret: app_readonly, app_readwrite
 ```
 
-**Already-existing accounts are skipped** (MariaDB `SHOW WARNINGS` detects Note 1973 / MongoDB `return { passwordSet: false }`):
+**Already-existing accounts are skipped** (MariaDB pre-checks `mysql.user` before executing SQL / MongoDB `return { passwordSet: false }`):
 ```
 [DCL] Auto-generated password for: R__004_secret_users.sql
   ⚠️  [DCL] Account already existed — password NOT changed. Skipped /tmp/secret: app_readonly, app_readwrite
@@ -844,10 +877,15 @@ db-migrate/
 │   │   ├── sanity-checker.js       # Sanity Check framework
 │   │   ├── repeatable-runner.js    # DCL Repeatable migration executor
 │   │   └── dcl-idempotent-checker.js # DCL idempotency verifier
-│   └── adapters/
-│       ├── index.js                # Adapter factory
-│       ├── mongodb-adapter.js      # MongoDB adapter
-│       └── mariadb-adapter.js      # MariaDB adapter
+│   ├── adapters/
+│   │   ├── index.js                # Adapter factory + loadConfig auto-merge
+│   │   ├── mongodb-adapter.js      # MongoDB adapter
+│   │   └── mariadb-adapter.js      # MariaDB adapter
+│   └── config-defaults/            # Built-in defaults per db/mode
+│       ├── mariadb-dcl.js          # MariaDB DCL defaults (host/port/user/checksumTable/…)
+│       ├── mariadb-ddl.js          # MariaDB DDL defaults (host/port/user/sanityCheck/…)
+│       ├── mongodb-dcl.js          # MongoDB DCL defaults (url/checksumCollection/…)
+│       └── mongodb-ddl.js          # MongoDB DDL defaults (url/changelogCollection/…)
 ├── databases/
 │   ├── mongodb/
 │   │   ├── _templates/             # New project template (dcl/ + ddl/)

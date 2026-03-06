@@ -10,25 +10,9 @@
  */
 
 export default {
+  type: 'mongodb',
   mongodb: {
     url: process.env.MONGODB_URL || 'mongodb://ecommerce_app:ecommerce_app_secure_pass_123@localhost:27017',
-    databaseName: process.env.MONGODB_DATABASE || 'ecommerce'
+    databaseName: process.env.MONGODB_DATABASE || 'ecommerce',
   },
-  
-  // DDL migrations directory (Versioned mode)
-  migrationsDir: './migrations',
-  
-  // Collection for tracking versioned migrations
-  changelogCollection: 'changelog',
-  
-  // Migration mode: 'versioned' for DDL (default)
-  mode: 'versioned',
-  
-  // Sanity check configuration
-  sanityCheck: {
-    enabled: true,
-    autoRollback: true,
-    timeoutMs: 30000,
-    verbose: true
-  }
 };

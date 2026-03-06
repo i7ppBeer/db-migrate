@@ -37,7 +37,16 @@ docker compose run --rm migrate status -c /app/databases/mariadb/test-success/dd
 # 1. 複製範本
 cp -r databases/mariadb/_templates/dcl databases/mariadb/my-project/dcl
 
-# 2. 修改 config.js 中的資料庫設定
+# 2. 修改 config.js — 只需填寫與預設值不同的欄位 (delta)
+#    預設值已包含 host/port/user/password (從環境變數讀取)
+#    只需指定 database、checksumTable 等專案特定設定:
+#
+#    export default {
+#      type: 'mariadb',
+#      mode: 'repeatable',
+#      database: 'mysql',
+#      checksumTable: '_dcl_migrations',
+#    };
 
 # 3. 修改 migrations/*.sql 中的帳號和權限
 
@@ -75,7 +84,14 @@ docker compose run --rm migrate dcl -c /app/databases/mariadb/my-project/dcl/con
 # 1. 複製範本
 cp -r databases/mariadb/_templates/ddl databases/mariadb/my-project/ddl
 
-# 2. 修改 config.js
+# 2. 修改 config.js — 只需填寫 delta (與預設值不同的欄位)
+#    host/port/user/password 從 MARIADB_HOST / MARIADB_USER 等環境變數讀取
+#    只需指定 database (必填)、changelogTable 等:
+#
+#    export default {
+#      type: 'mariadb',
+#      database: process.env.MARIADB_DB || 'myapp',
+#    };
 
 # 3. 建立新 migration
 docker compose run --rm migrate create create-users -c /app/databases/mariadb/my-project/ddl/config.js
@@ -157,7 +173,16 @@ docker compose run --rm migrate up -c /app/databases/mariadb/my-project/ddl/conf
 # 1. 複製範本
 cp -r databases/mongodb/_templates/dcl databases/mongodb/my-project/dcl
 
-# 2. 修改 config.js 和 migrations/*.js
+# 2. 修改 config.js — 只需填寫 delta
+#    MongoDB URL 從 MONGODB_URL 環境變數讀取
+#    只需指定 databaseName 等專案特定設定:
+#
+#    export default {
+#      type: 'mongodb',
+#      mode: 'repeatable',
+#      mongodb: { databaseName: 'admin' },
+#    };
+#    修改 migrations/*.js 中的帳號設定
 
 # 3. 驗證冪等性
 docker compose run --rm migrate dcl:verify -c /app/databases/mongodb/my-project/dcl/config.js
@@ -172,7 +197,13 @@ docker compose run --rm migrate dcl -c /app/databases/mongodb/my-project/dcl/con
 # 1. 複製範本
 cp -r databases/mongodb/_templates/ddl databases/mongodb/my-project/ddl
 
-# 2. 建立新 migration
+# 2. 修改 config.js — 只需填寫 delta
+#    export default {
+#      type: 'mongodb',
+#      mongodb: { databaseName: process.env.MONGO_DB || 'myapp' },
+#    };
+
+# 3. 建立新 migration
 docker compose run --rm migrate create create-users -c /app/databases/mongodb/my-project/ddl/config.js
 
 # 3. 執行

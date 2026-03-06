@@ -216,9 +216,12 @@ export class MariaDBAdapter extends BaseAdapter {
         this.connection = tempConnection;
       }
 
-      // Ensure changelog table exists
-      await this.ensureChangelogTable();
-      
+      // Ensure changelog table exists (DDL/versioned mode only;
+      // DCL/repeatable mode uses checksumTable, not changelogTable)
+      if (this.config.mode !== 'repeatable') {
+        await this.ensureChangelogTable();
+      }
+
       return this.connection;
     } catch (error) {
       throw new Error(`MariaDB connection failed: ${error.message}`);
