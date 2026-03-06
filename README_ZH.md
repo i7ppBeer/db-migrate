@@ -20,6 +20,7 @@
 - **資料庫自動創建**: MariaDB adapter 會在連接前自動創建資料庫（雙重保障）
 - **Up-Down-Up 測試**: 確保遷移可以正確回滾和重新應用
 - **DCL 冪等性驗證**: 自動驗證 DCL 腳本執行多次結果相同
+- **DCL 自動生成密碼**: 每個 `CHANGE_ME_ON_FIRST_LOGIN` 佔位符在執行時各自替換為獨立的高強度 16 字元密碼——原始檔案永不修改；憑證僅寫入 `/tmp/secret`，不顯示於 console。MongoDB 新帳號還會自動注入含有效期的 `customData`。
 - **Sanity Check**: 內建 Pre-Check / Post-Check / Auto-Rollback 機制
 - **報表生成**: 支援 JSON、HTML 格式
 - **容器化**: Docker 和 Kubernetes (Helm) 部署支援
@@ -299,6 +300,109 @@ docker compose run --rm migrate dcl:status -c /app/databases/mariadb/production-
 ```bash
 docker compose run --rm migrate dcl:verify -c /app/databases/mariadb/production-server/dcl/config.js
 ```
+
+---
+
+#### DCL 自動生成密碼
+
+DCL 範本檔案（`R__*.sql` / `R__*.js`）可使用 `CHANGE_ME_ON_FIRST_LOGIN` 作為密碼佔位符。
+Runner 執行時會**自動為每個佔位符獨立生成一組高強度密碼**——同一檔案中的多個帳號各自得到不同密碼。
+
+**運作方式：**
+
+| | 說明 |
+|---|---|
+| 磁碟上的檔案 | 永遠不變，仍保留 `CHANGE_ME_ON_FIRST_LOGIN` |
+| Checksum | 從原始檔案計算（密碼輪換**不會**觸發重新執行） |
+| 替換時機 | 僅在記憶體中，SQL/JS 送到資料庫前的瞬間 |
+| 每個佔位符 | 各自獨立生成密碼（occurrence 0 → 帳號 0，occurrence 1 → 帳號 1…） |
+| Console 顯示 | **不顯示密碼**，只印出簡短提示 |
+| 磁碟記錄 | 追加至 `/tmp/secret`（格式：`username=password`，一行一筆） |
+
+**密碼規則：** 16 字元 · a-z · A-Z · 0-9 · 1-2 個特殊字元（`-` 或 `~`）  
+特殊字元在 MySQL/MariaDB CLI、`mongosh`、MongoDB URI、Bash、ProxySQL 均安全使用。
+
+**`/tmp/secret` 格式**（依宣告順序對應帳號）：
+```
+app_readonly=6U3uELfN6alX0~CJ
+app_readwrite=9kP2mQrX7sZa1-NW
+```
+
+> `/tmp/secret` 為 append-only，請依照安全政策自行管理或輪換。  
+> Kubernetes / Docker 環境請掛載安全 volume 到 `/tmp`，或在 Pod 結束前將 `/tmp/secret` 複製出來。
+
+**執行 `dcl` 的 console 輸出範例：**
+
+```
+[DCL] Auto-generated password for: R__004_secret_users.sql
+  📝 [DCL] Credentials saved to /tmp/secret: app_readonly, app_readwrite
+```
+
+**帳號已存在時自動略過**（MariaDB 偵測 `SHOW WARNINGS` Note 1973 / MongoDB `return { passwordSet: false }`）：
+```
+[DCL] Auto-generated password for: R__004_secret_users.sql
+  ⚠️  [DCL] Account already existed — password NOT changed. Skipped /tmp/secret: app_readonly, app_readwrite
+```
+
+| 情境 | `/tmp/secret` | Console |
+|---|---|---|
+| 新帳號 | **寫入** | `📝 Credentials saved` |
+| 帳號已存在（`CREATE USER IF NOT EXISTS`） | **不寫入** | `⚠️ Account already existed — Skipped` |
+| 強制輪換（`ALTER USER`） | **永遠寫入** | `📝 Credentials saved` |
+
+**MariaDB — 多帳號，各自獨立密碼**（`R__004_secret_users.sql`）：
+```sql
+-- 每個 CHANGE_ME_ON_FIRST_LOGIN 在執行時替換為不同密碼
+CREATE USER IF NOT EXISTS 'app_readonly'@'%'
+  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';
+CREATE USER IF NOT EXISTS 'app_readwrite'@'%'
+  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';
+GRANT SELECT ON mydb.* TO 'app_readonly'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON mydb.* TO 'app_readwrite'@'%';
+FLUSH PRIVILEGES;
+```
+
+**MariaDB — 強制輪換密碼**（`R__005_rotate_passwords.sql`）：
+```sql
+-- ALTER USER 不觸發 Note 1973，因此每次執行都會寫入新密碼
+ALTER USER 'app_readonly'@'%'  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';
+ALTER USER 'app_readwrite'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';
+FLUSH PRIVILEGES;
+```
+
+**MongoDB — 每個使用者物件各自帶一個佔位符**（`R__003_secret_users.js`）：
+```javascript
+// users 陣列中每個 entry 各自有 CHANGE_ME_ON_FIRST_LOGIN
+// Runner 在執行模組前獨立替換每一個
+const users = [
+  { username: 'app_readonly',  password: 'CHANGE_ME_ON_FIRST_LOGIN', roles: [...] },
+  { username: 'app_readwrite', password: 'CHANGE_ME_ON_FIRST_LOGIN', roles: [...] },
+];
+
+for (const u of users) {
+  const exists = (await adminDb.command({ usersInfo: u.username })).users.length > 0;
+  if (!exists) {
+    await adminDb.command({ createUser: u.username, pwd: u.password, roles: u.roles });
+    createdUsernames.push(u.username);
+  } else {
+    await adminDb.command({ updateUser: u.username, roles: u.roles });
+  }
+}
+return { passwordSet: createdUsernames.length > 0, createdUsernames, allUsernames };
+```
+
+**MongoDB `customData` 注入：**  
+MongoDB DCL migration 回傳 `{ passwordSet: true }` 時，Runner 會自動對每個新建帳號呼叫 `updateUser` 注入 `customData`：
+
+```json
+{
+  "expiresAt": "<現在 + DCL_PASSWORD_EXPIRY_DAYS 天>",
+  "passwordLastModified": "<現在>",
+  "description": "Auto-created user, requires password change before expiry."
+}
+```
+
+透過環境變數 `DCL_PASSWORD_EXPIRY_DAYS`（預設 `7`）控制有效期天數。
 
 ---
 

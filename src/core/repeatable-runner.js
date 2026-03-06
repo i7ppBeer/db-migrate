@@ -182,34 +182,121 @@ export class RepeatableRunner {
   }
 
   /**
-   * Replace every occurrence of the literal placeholder CHANGE_ME_ON_FIRST_LOGIN
-   * in SQL/JS content with an auto-generated secure password.
+   * Replace every occurrence of CHANGE_ME_ON_FIRST_LOGIN with an independently
+   * generated secure password — one unique password per occurrence.
    *
    * Rules:
    *   - Original file on disk is NEVER modified.
    *   - Checksum must be computed BEFORE calling this (from the raw on-disk content).
-   *   - Generated password is printed once to stdout — operator must record it.
+   *   - Passwords are NOT printed to stdout; they are saved to /tmp/secret.
    *
    * @param {string} content  - Raw file content (may contain placeholder)
    * @param {string} fileName - File name used in log output
-   * @returns {{ resolved: string, generated: boolean, password: string|null }}
+   * @returns {{ resolved: string, generated: boolean, passwords: string[]|null }}
    */
   resolvePlaceholderPasswords(content, fileName) {
     const PLACEHOLDER = 'CHANGE_ME_ON_FIRST_LOGIN';
     if (!content.includes(PLACEHOLDER)) {
-      return { resolved: content, generated: false, password: null };
+      return { resolved: content, generated: false, passwords: null };
     }
 
-    const password = this.generateSecurePassword();
-    const resolved = content.replaceAll(PLACEHOLDER, password);
+    const passwords = [];
+    const resolved = content.replace(/CHANGE_ME_ON_FIRST_LOGIN/g, () => {
+      const pw = this.generateSecurePassword();
+      passwords.push(pw);
+      return pw;
+    });
 
-    console.log('\n' + '='.repeat(62));
     console.log(`  [DCL] Auto-generated password for: ${fileName}`);
-    console.log(`  Password : ${password}`);
-    console.log(`  ⚠️  Save this password now — it will NOT be shown again.`);
-    console.log('='.repeat(62) + '\n');
 
-    return { resolved, generated: true, password };
+    return { resolved, generated: true, passwords };
+  }
+
+  /**
+   * Parse CREATE USER / ALTER USER lines that contained CHANGE_ME_ON_FIRST_LOGIN
+   * and append `username=password` entries to /tmp/secret.
+   *
+   * Each username is paired with its positionally-matching password:
+   *   usernames[0] → passwords[0], usernames[1] → passwords[1], …
+   *
+   * @param {string}          originalContent  - Raw (un-resolved) SQL or JS
+   * @param {string|string[]} passwords        - Generated password(s) in occurrence order
+   * @param {boolean}         alreadyExists    - True when account already existed
+   * @param {string[]}        [explicitNames]  - Usernames from up() return value (overrides regex)
+   */
+  async saveGeneratedPasswords(originalContent, passwords, alreadyExists = false, explicitNames = null) {
+    const PLACEHOLDER = 'CHANGE_ME_ON_FIRST_LOGIN';
+    const pwArray = Array.isArray(passwords) ? passwords : [passwords];
+    let usernames = [];
+
+    if (explicitNames && explicitNames.length > 0) {
+      // Trust what the migration explicitly reported
+      usernames = explicitNames;
+    } else {
+      const isJS = originalContent.includes('export async function up');
+      for (const line of originalContent.split('\n')) {
+        if (isJS) {
+          // JS pattern: const username = 'app_xxx';
+          const m = line.match(/const\s+username\s*=\s*['"]([^'"]+)['"]/);
+          if (m) usernames.push(m[1]);
+        } else {
+          const upper = line.toUpperCase();
+          if (
+            (upper.includes('CREATE USER') || upper.includes('ALTER USER')) &&
+            line.includes(PLACEHOLDER)
+          ) {
+            // SQL pattern: 'username'@host
+            const m = line.match(/['"`]([^'"`@\s]+)['"`]\s*@/);
+            if (m) usernames.push(m[1]);
+          }
+        }
+      }
+    }
+
+    if (usernames.length === 0) return;
+
+    // Account already existed → password was NOT changed, skip writing to /tmp/secret
+    if (alreadyExists) {
+      console.log(`  ⚠️  [DCL] Account already existed — password NOT changed. Skipped /tmp/secret: ${usernames.join(', ')}`);
+      return;
+    }
+
+    // Pair usernames[i] → pwArray[i]; fall back to last password if arrays diverge
+    const lines = usernames.map((u, i) => `${u}=${pwArray[i] ?? pwArray[pwArray.length - 1]}`).join('\n') + '\n';
+    await fs.appendFile('/tmp/secret', lines, 'utf-8');
+    console.log(`  📝 [DCL] Credentials saved to /tmp/secret: ${usernames.join(', ')}`);
+  }
+
+  /**
+   * Inject customData into newly-created MongoDB users.
+   *
+   * customData fields:
+   *   expiresAt             - now + DCL_PASSWORD_EXPIRY_DAYS (default 7)
+   *   passwordLastModified  - now
+   *   description           - human-readable note
+   *
+   * @param {Object}   client    - MongoClient
+   * @param {string[]} usernames - list of usernames in the admin db
+   */
+  async injectCustomDataMongoDB(client, usernames) {
+    const expiryDays = parseInt(process.env.DCL_PASSWORD_EXPIRY_DAYS ?? '7', 10);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + expiryDays * 24 * 60 * 60 * 1000);
+    const customData = {
+      expiresAt,
+      passwordLastModified: now,
+      description: 'Auto-created user, requires password change before expiry.'
+    };
+
+    const adminDb = client.db('admin');
+    for (const username of usernames) {
+      try {
+        await adminDb.command({ updateUser: username, customData });
+        console.log(`  📋 [DCL] customData injected: ${username} (expires ${expiresAt.toISOString().slice(0, 10)})`);
+      } catch (err) {
+        console.warn(`  ⚠️  [DCL] customData inject failed for ${username}: ${err.message}`);
+      }
+    }
   }
 
   /**
@@ -450,25 +537,49 @@ export class RepeatableRunner {
       try {
         // Resolve CHANGE_ME_ON_FIRST_LOGIN → auto-generated password (in-memory only).
         // Checksum was already computed from the original on-disk content above.
-        const { resolved: resolvedContent } = this.resolvePlaceholderPasswords(file.content, file.fileName);
+        const { resolved: resolvedContent, generated, passwords } = this.resolvePlaceholderPasswords(file.content, file.fileName);
 
         // Process DELIMITER for stored procedures support
         const sqlChunks = this.processDelimiterSQL(resolvedContent);
-        
+
+        let totalWarnings = 0;
         for (const chunk of sqlChunks) {
           if (chunk.sql.trim()) {
-            // Execute each chunk
-            await connection.query(chunk.sql);
+            // Execute each chunk. warningCount is unreliable for multi-statement
+            // queries in mysql2; we rely on SHOW WARNINGS instead (see below).
+            const [queryResult] = await connection.query(chunk.sql);
+            if (Array.isArray(queryResult)) {
+              for (const r of queryResult) {
+                totalWarnings += r?.warningCount ?? 0;
+              }
+            } else {
+              totalWarnings += queryResult?.warningCount ?? 0;
+            }
           }
         }
-        
+
+        // SHOW WARNINGS captures Notes (e.g. 1973: user already exists) that
+        // mysql2 does NOT expose via warningCount on multi-statement results.
+        if (generated) {
+          const [warnings] = await connection.query('SHOW WARNINGS');
+          if (Array.isArray(warnings) && warnings.length > 0) {
+            totalWarnings += warnings.length;
+          }
+        }
+
+        // Persist generated credentials; mark if account already existed (warning)
+        if (generated) {
+          await this.saveGeneratedPasswords(file.content, passwords, totalWarnings > 0);
+        }
+
         // Update checksum
         await this.updateChecksumMariaDB(connection, file.fileName, file.checksum);
-        
+
         result.applied.push({
           fileName: file.fileName,
           reason: stored ? 'checksum changed' : 'new file',
-          annotations: file.annotations
+          annotations: file.annotations,
+          warnings: totalWarnings
         });
       } catch (error) {
         result.errors.push(`${file.fileName}: ${error.message}`);
@@ -530,13 +641,15 @@ export class RepeatableRunner {
       try {
         // Resolve CHANGE_ME_ON_FIRST_LOGIN → auto-generated password (in-memory only).
         // For JS files a temp file is written so the module can be dynamically imported.
-        const { resolved: resolvedContent, generated } = this.resolvePlaceholderPasswords(file.content, file.fileName);
+        const { resolved: resolvedContent, generated, passwords } = this.resolvePlaceholderPasswords(file.content, file.fileName);
 
         let moduleToRun;
         let tempFilePath = null;
         if (generated) {
-          // Write resolved JS to a temp file, import it, then clean up
-          tempFilePath = path.join(os.tmpdir(), `dcl-${crypto.randomBytes(8).toString('hex')}-${file.fileName}`);
+          // Write resolved JS to a temp file using .mjs extension so Node.js
+          // treats it as ESM regardless of the /tmp directory having no package.json.
+          const baseName = file.fileName.replace(/\.js$/, '.mjs');
+          tempFilePath = path.join(os.tmpdir(), `dcl-${crypto.randomBytes(8).toString('hex')}-${baseName}`);
           await fs.writeFile(tempFilePath, resolvedContent, 'utf-8');
           moduleToRun = await import(`file://${tempFilePath}`);
         } else {
@@ -547,14 +660,45 @@ export class RepeatableRunner {
           throw new Error('Migration must export an "up" function');
         }
 
-        await moduleToRun.up(db, client);
+        const upResult = await moduleToRun.up(db, client);
 
         // Best-effort cleanup of temp file
         if (tempFilePath) await fs.unlink(tempFilePath).catch(() => {});
-        
+
+        // passwordSet: true  → new account
+        // passwordSet: false → already existed
+        // undefined          → template does not support return value (treat as unknown)
+        const alreadyExists = upResult?.passwordSet === false;
+        const isNewAccount  = upResult?.passwordSet === true;
+        // Migration may explicitly report which usernames were created / managed
+        const createdUsernames = upResult?.createdUsernames ?? null;
+        const allUsernames     = upResult?.allUsernames ?? createdUsernames;
+
+        // Persist credentials only for new accounts; pass allUsernames for warning log
+        if (generated) {
+          const namesForLog = isNewAccount ? createdUsernames : allUsernames;
+          await this.saveGeneratedPasswords(file.content, passwords, alreadyExists, namesForLog);
+        }
+
+        // Inject customData (expiresAt, passwordLastModified) for new accounts
+        if (isNewAccount) {
+          // Prefer explicitly returned createdUsernames; fall back to regex parse
+          let injectTargets = createdUsernames;
+          if (!injectTargets) {
+            injectTargets = [];
+            for (const line of file.content.split('\n')) {
+              const m = line.match(/const\s+username\s*=\s*['"]([^'"]+)['"]/);
+              if (m) injectTargets.push(m[1]);
+            }
+          }
+          if (injectTargets.length > 0) {
+            await this.injectCustomDataMongoDB(client, injectTargets);
+          }
+        }
+
         // Update checksum
         await this.updateChecksumMongoDB(db, file.fileName, file.checksum);
-        
+
         result.applied.push({
           fileName: file.fileName,
           reason: stored ? 'checksum changed' : 'new file',

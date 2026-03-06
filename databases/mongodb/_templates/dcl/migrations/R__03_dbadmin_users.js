@@ -41,13 +41,15 @@ export async function up(db, client) {
         roles: roles
       });
       console.log(`[DCL] Created ${username}`);
+      return { passwordSet: true };
     } else {
-      // 使用者已存在，更新角色 (冪等)
+      // 使用者已存在，更新角色 (冪等)，密碼不動
       await adminDb.command({
         updateUser: username,
         roles: roles
       });
       console.log(`[DCL] Updated ${username} roles`);
+      return { passwordSet: false };
     }
   } catch (error) {
     console.error(`[DCL] Error managing ${username}:`, error.message);
