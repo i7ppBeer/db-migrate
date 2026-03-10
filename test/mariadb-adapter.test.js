@@ -196,6 +196,50 @@ DROP TABLE users;
     });
   });
 
+  describe('status() in DCL mode', () => {
+    it('should return empty DDL result when mode is repeatable', async () => {
+      const dclAdapter = new MariaDBAdapter({
+        ...mockConfig,
+        mode: 'repeatable'
+      });
+      // ensureChangelogTable calls connection.execute — spy to confirm it's NOT called
+      const executeSpy = vi.fn();
+      dclAdapter.connection = { execute: executeSpy };
+
+      const result = await dclAdapter.status();
+
+      expect(result).toEqual({ pending: [], applied: [], total: 0 });
+      // execute should NOT have been called (no DDL changelog query)
+      expect(executeSpy).not.toHaveBeenCalled();
+    });
+
+    it('should NOT return early when mode is ddl (default)', async () => {
+      // DDL mode: status() proceeds normally and queries changelog table
+      const ddlAdapter = new MariaDBAdapter({ ...mockConfig });
+      // mode is undefined (not 'repeatable') → should NOT short-circuit
+      const executeSpy = vi.fn().mockResolvedValue([[]]);
+      ddlAdapter.connection = { execute: executeSpy };
+      // migrationsDir must be readable — mock fs.readdir by pointing to a real empty path
+      ddlAdapter.config.migrationsDir = '/tmp';
+
+      // Will throw because /tmp has no .sql files, but execute WAS called
+      try { await ddlAdapter.status(); } catch {}
+      expect(executeSpy).toHaveBeenCalled();
+    });
+
+    it('should treat mode=repeatable as DCL regardless of other config', async () => {
+      const dclAdapter = new MariaDBAdapter({
+        mode: 'repeatable',
+        checksumTable: 'dcl_repeatable_migrations',
+        mariadb: { host: 'localhost', port: 3306, user: 'root', password: '', database: 'mydb' }
+      });
+      const result = await dclAdapter.status();
+      expect(result.pending).toEqual([]);
+      expect(result.applied).toEqual([]);
+      expect(result.total).toBe(0);
+    });
+  });
+
   describe('upWithSanityCheck', () => {
     it('should execute migration with sanity checks using sanity checker', async () => {
       // Test the adapter's ability to use sanity checker

@@ -525,4 +525,41 @@ describe('MongoDBAdapter', () => {
       expect(result.summary.hasCriticalPerformanceIssues).toBe(true);
     });
   });
+
+  describe('status() in DCL mode', () => {
+    it('should return empty DDL result when mode is repeatable', async () => {
+      const dclAdapter = new MongoDBAdapter({
+        ...mockConfig,
+        mode: 'repeatable'
+      });
+      const result = await dclAdapter.status();
+      expect(result).toEqual({ pending: [], applied: [], total: 0 });
+    });
+
+    it('should NOT return early when mode is not repeatable (DDL mode)', async () => {
+      // Default mockConfig has no mode field → DDL path → calls migrate-mongo status
+      const { default: migrateMongo } = await import('migrate-mongo');
+      migrateMongo.status.mockResolvedValueOnce([]);
+
+      const ddlAdapter = new MongoDBAdapter({ ...mockConfig });
+      ddlAdapter.db = {};
+      const result = await ddlAdapter.status();
+
+      expect(migrateMongo.status).toHaveBeenCalled();
+      expect(result.pending).toEqual([]);
+      expect(result.applied).toEqual([]);
+    });
+
+    it('should treat mode=repeatable as DCL regardless of other config', async () => {
+      const dclAdapter = new MongoDBAdapter({
+        mode: 'repeatable',
+        checksumCollection: 'dcl_repeatable_migrations',
+        mongodb: { url: 'mongodb://localhost:27017', databaseName: 'mydb', options: {} }
+      });
+      const result = await dclAdapter.status();
+      expect(result.pending).toEqual([]);
+      expect(result.applied).toEqual([]);
+      expect(result.total).toBe(0);
+    });
+  });
 });
