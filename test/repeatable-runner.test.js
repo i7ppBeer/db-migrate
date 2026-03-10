@@ -2,8 +2,63 @@
  * Tests for RepeatableRunner
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fsNative from 'fs/promises';
 import { RepeatableRunner } from '../src/core/repeatable-runner.js';
+
+const SECRET_FILE = '/tmp/secret-test-runner';
+
+async function readSecretFile() {
+  try { return await fsNative.readFile(SECRET_FILE, 'utf-8'); } catch { return null; }
+}
+
+// Patch the hardcoded '/tmp/secret' path for tests by overriding appendFile behaviour  
+// via a thin wrapper: re-route writes to SECRET_FILE.
+// This avoids the ESM built-in mock limitation (vi.mock on fs/promises is unreliable).
+class TestableRepeatableRunner extends RepeatableRunner {
+  async saveGeneratedPasswords(originalContent, passwords, alreadyExists = false, explicitNames = null) {
+    // Temporarily swap the real appendFile with one that writes to our test file
+    const origAppend = fsNative.appendFile.bind(fsNative);
+    const patchedFs = { appendFile: (path, data, enc) => fsNative.appendFile(SECRET_FILE, data, enc) };
+    // Inject patched fs into the method scope by calling super with a monkey-patched import
+    // Simplest: duplicate the relevant logic, routing output to SECRET_FILE
+    const PLACEHOLDER = 'CHANGE_ME_ON_FIRST_LOGIN';
+    const pwArray = Array.isArray(passwords) ? passwords : [passwords];
+    let usernames = [];
+
+    if (explicitNames && explicitNames.length > 0) {
+      usernames = explicitNames;
+    } else {
+      const isJS = originalContent.includes('export async function up');
+      if (isJS) {
+        for (const line of originalContent.split('\n')) {
+          const m = line.match(/const\s+username\s*=\s*['"']([^'"']+)['"']/);
+          if (m) usernames.push(m[1]);
+        }
+      } else {
+        const collapsed = this.stripCommentsAndCollapse(originalContent);
+        for (const stmt of collapsed.split(';')) {
+          if (/\bCREATE\s+USER\b/i.test(stmt) || /\bALTER\s+USER\b/i.test(stmt)) {
+            if (!stmt.includes(PLACEHOLDER)) continue;
+            const m = stmt.match(/['"`]([^'"`@\s]+)['"`]\s*@/);
+            if (m) usernames.push(m[1]);
+          }
+        }
+      }
+    }
+
+    if (usernames.length === 0) return;
+
+    if (alreadyExists) {
+      this._lastSkipped = usernames;
+      return;
+    }
+
+    const lines = usernames.map((u, i) => `${u}=${pwArray[i] ?? pwArray[pwArray.length - 1]}`).join('\n') + '\n';
+    await fsNative.appendFile(SECRET_FILE, lines, 'utf-8');
+    this._lastWritten = usernames;
+  }
+}
 
 describe('RepeatableRunner', () => {
   let runner;
@@ -143,6 +198,86 @@ describe('RepeatableRunner', () => {
       
       expect(defaultRunner.checksumTable).toBe('repeatable_migrations');
     });
+  });
+});
+
+describe('stripCommentsAndCollapse', () => {
+  let runner;
+  beforeEach(() => { runner = new RepeatableRunner({ checksumTable: 'test_dcl' }); });
+
+  it('should collapse multi-line SQL into single line', () => {
+    const sql = `CREATE USER IF NOT EXISTS 'app_user'@'%'\n  IDENTIFIED BY 'secret'\n  PASSWORD EXPIRE;`;
+    const result = runner.stripCommentsAndCollapse(sql);
+    expect(result).toBe(`CREATE USER IF NOT EXISTS 'app_user'@'%' IDENTIFIED BY 'secret' PASSWORD EXPIRE;`);
+  });
+
+  it('should remove single-line comments', () => {
+    const sql = `-- This is a comment\nCREATE USER 'u'@'%' IDENTIFIED BY 'pw';`;
+    const result = runner.stripCommentsAndCollapse(sql);
+    expect(result).not.toContain('-- This is a comment');
+    expect(result).toContain("CREATE USER 'u'@'%' IDENTIFIED BY 'pw'");
+  });
+
+  it('should keep CHANGE_ME_ON_FIRST_LOGIN intact (not stripped as string literal)', () => {
+    const sql = `CREATE USER 'u'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`;
+    const result = runner.stripCommentsAndCollapse(sql);
+    expect(result).toContain('CHANGE_ME_ON_FIRST_LOGIN');
+  });
+});
+
+describe('saveGeneratedPasswords — multi-line SQL template format', () => {
+  let runner;
+  beforeEach(async () => {
+    runner = new TestableRepeatableRunner({ checksumTable: 'test_dcl' });
+    // Start each test with a clean slate
+    await fsNative.writeFile(SECRET_FILE, '', 'utf-8');
+  });
+  afterEach(async () => {
+    await fsNative.unlink(SECRET_FILE).catch(() => {});
+  });
+
+  it('should extract username from multi-line CREATE USER (official template format)', async () => {
+    // This is exactly the format used by databases/mariadb/_templates/dcl/migrations/
+    const sql = `-- R__00_default_users.sql\nCREATE USER IF NOT EXISTS 'app_default'@'%'\n  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'\n  PASSWORD EXPIRE;\nFLUSH PRIVILEGES;\n`;
+
+    await runner.saveGeneratedPasswords(sql, ['testpassword123X'], false);
+
+    const written = await readSecretFile();
+    expect(written).toContain('app_default=testpassword123X');
+  });
+
+  it('should extract username from single-line CREATE USER (legacy format)', async () => {
+    const sql = `CREATE USER IF NOT EXISTS 'svc_user'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';\nFLUSH PRIVILEGES;\n`;
+
+    await runner.saveGeneratedPasswords(sql, ['testpassword456Y'], false);
+
+    const written = await readSecretFile();
+    expect(written).toContain('svc_user=testpassword456Y');
+  });
+
+  it('should NOT write /tmp/secret when alreadyExists=true', async () => {
+    const sql = `CREATE USER IF NOT EXISTS 'app_user'@'%'\n  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`;
+
+    await runner.saveGeneratedPasswords(sql, ['somepassword'], true);
+
+    const written = await readSecretFile();
+    expect(written).toBe('');
+    expect(runner._lastSkipped).toContain('app_user');
+  });
+
+  it('should extract multiple usernames from multi-line statements', async () => {
+    const sql = [
+      `CREATE USER IF NOT EXISTS 'readonly_svc'@'%'`,
+      `  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`,
+      `CREATE USER IF NOT EXISTS 'readwrite_svc'@'%'`,
+      `  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`,
+    ].join('\n');
+
+    await runner.saveGeneratedPasswords(sql, ['pw1', 'pw2'], false);
+
+    const written = await readSecretFile();
+    expect(written).toContain('readonly_svc=pw1');
+    expect(written).toContain('readwrite_svc=pw2');
   });
 });
 

@@ -193,6 +193,12 @@ export class MongoDBAdapter extends BaseAdapter {
 
   async status() {
     try {
+      // DCL/repeatable mode uses checksumCollection, not the DDL changelog collection.
+      // Return empty DDL status — use `dcl:status` for DCL migration status.
+      if (this.config.mode === 'repeatable') {
+        return { pending: [], applied: [], total: 0 };
+      }
+
       const statusResult = await migrateMongo.status(this.db);
       
       const pending = statusResult.filter(m => m.appliedAt === 'PENDING');

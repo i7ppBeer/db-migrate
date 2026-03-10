@@ -213,6 +213,25 @@ export class RepeatableRunner {
   }
 
   /**
+   * Strip SQL single-line comments and collapse whitespace to a single space.
+   * Unlike normalizeSQL(), this intentionally keeps string literal values intact
+   * so that CHANGE_ME_ON_FIRST_LOGIN (which appears inside IDENTIFIED BY '…')
+   * is still detectable after normalization.
+   *
+   * @param {string} sql - Raw SQL content
+   * @returns {string} - Comment-free, whitespace-collapsed SQL
+   */
+  stripCommentsAndCollapse(sql) {
+    if (!sql) return '';
+    return sql
+      // Remove single-line comments (-- …) but keep the newline as a space
+      .replace(/--[^\n]*/g, ' ')
+      // Collapse all whitespace (including newlines) to a single space
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  /**
    * Parse CREATE USER / ALTER USER lines that contained CHANGE_ME_ON_FIRST_LOGIN
    * and append `username=password` entries to /tmp/secret.
    *
@@ -234,19 +253,24 @@ export class RepeatableRunner {
       usernames = explicitNames;
     } else {
       const isJS = originalContent.includes('export async function up');
-      for (const line of originalContent.split('\n')) {
-        if (isJS) {
-          // JS pattern: const username = 'app_xxx';
-          const m = line.match(/const\s+username\s*=\s*['"]([^'"]+)['"]/);
+      if (isJS) {
+        // JS: scan line by line for:  const username = 'app_xxx';
+        for (const line of originalContent.split('\n')) {
+          const m = line.match(/const\s+username\s*=\s*['"']([^'"']+)['"']/);
           if (m) usernames.push(m[1]);
-        } else {
-          const upper = line.toUpperCase();
+        }
+      } else {
+        // SQL: strip comments, collapse whitespace, then split by ';' into statements.
+        // This handles multi-line CREATE USER … IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'
+        // which is the format used by all official templates.
+        const collapsed = this.stripCommentsAndCollapse(originalContent);
+        for (const stmt of collapsed.split(';')) {
           if (
-            (upper.includes('CREATE USER') || upper.includes('ALTER USER')) &&
-            line.includes(PLACEHOLDER)
+            /\bCREATE\s+USER\b/i.test(stmt) || /\bALTER\s+USER\b/i.test(stmt)
           ) {
-            // SQL pattern: 'username'@host
-            const m = line.match(/['"`]([^'"`@\s]+)['"`]\s*@/);
+            if (!stmt.includes(PLACEHOLDER)) continue;
+            // SQL pattern: 'username'@host  or  `username`@host
+            const m = stmt.match(/['"\`]([^'"\`@\s]+)['"\`]\s*@/);
             if (m) usernames.push(m[1]);
           }
         }
@@ -407,13 +431,18 @@ export class RepeatableRunner {
   async preCheckAccountsExistMariaDB(connection, originalContent) {
     const PLACEHOLDER = 'CHANGE_ME_ON_FIRST_LOGIN';
     const usernames = [];
-    for (const line of originalContent.split('\n')) {
-      const upper = line.toUpperCase();
+    // Strip comments and collapse whitespace so that multi-line statements like:
+    //   CREATE USER IF NOT EXISTS 'app_user'@'%'
+    //     IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'
+    //     PASSWORD EXPIRE;
+    // are treated as a single unit and the username can be extracted correctly.
+    const collapsed = this.stripCommentsAndCollapse(originalContent);
+    for (const stmt of collapsed.split(';')) {
       if (
-        (upper.includes('CREATE USER') || upper.includes('ALTER USER')) &&
-        line.includes(PLACEHOLDER)
+        /\bCREATE\s+USER\b/i.test(stmt) || /\bALTER\s+USER\b/i.test(stmt)
       ) {
-        const m = line.match(/['"`]([^'"`@\s]+)['"`]\s*@/);
+        if (!stmt.includes(PLACEHOLDER)) continue;
+        const m = stmt.match(/['"\`]([^'"\`@\s]+)['"\`]\s*@/);
         if (m) usernames.push(m[1]);
       }
     }

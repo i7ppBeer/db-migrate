@@ -260,6 +260,13 @@ export class MariaDBAdapter extends BaseAdapter {
 
   async status() {
     try {
+      // DCL/repeatable mode does not use the DDL changelog table (schema_migrations).
+      // Calling adapter.status() in DCL mode would create schema_migrations and then
+      // query it. Return empty DDL status instead — use `dcl:status` for DCL migration status.
+      if (this.config.mode === 'repeatable') {
+        return { pending: [], applied: [], total: 0 };
+      }
+
       // Ensure DB + changelog table exist (may have been dropped by a DOWN migration)
       await this.ensureChangelogTable();
 
