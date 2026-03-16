@@ -272,4 +272,211 @@ DROP TABLE users;
       expect(result.error).toContain('EXPECT_ROWS failed');
     });
   });
+
+  describe('validateContent() — mode-aware validation', () => {
+    describe('DDL mode (versioned, default)', () => {
+      it('should forbid CREATE USER in DDL migration', () => {
+        const sql = `
+-- +migrate Up
+CREATE USER 'app'@'%' IDENTIFIED BY 'secret';
+-- +migrate Down
+DROP USER IF EXISTS 'app'@'%';
+`;
+        const result = adapter.validateContent(sql, 'V001__add_user.sql');
+        expect(result.valid).toBe(false);
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_USER')).toBe(true);
+      });
+
+      it('should forbid GRANT in DDL migration', () => {
+        const sql = `
+-- +migrate Up
+GRANT SELECT ON mydb.* TO 'app'@'%';
+-- +migrate Down
+REVOKE SELECT ON mydb.* FROM 'app'@'%';
+`;
+        const result = adapter.validateContent(sql, 'V001__grant.sql');
+        expect(result.valid).toBe(false);
+        expect(result.forbiddenOps.some(op => op.code === 'GRANT')).toBe(true);
+      });
+
+      it('should emit missing-DOWN warning', () => {
+        const sql = `-- +migrate Up\nCREATE TABLE foo (id INT);\n`;
+        const result = adapter.validateContent(sql, 'V001__create.sql');
+        expect(result.warnings.some(w => w.type === 'missing-down')).toBe(true);
+      });
+    });
+
+    describe('DCL mode (repeatable)', () => {
+      let dclAdapter;
+      beforeEach(() => {
+        dclAdapter = new MariaDBAdapter({ ...mockConfig, mode: 'repeatable' });
+      });
+
+      it('should NOT forbid CREATE USER in DCL migration', () => {
+        const sql = `DROP USER IF EXISTS 'app'@'%';\nCREATE USER 'app'@'%' IDENTIFIED BY 'secret';\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_app_user.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_USER')).toBe(false);
+      });
+
+      it('should forbid DROP USER in DCL migration (dclHighRisk)', () => {
+        const sql = `DROP USER IF EXISTS 'app'@'%';\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_app_user.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'DROP_USER')).toBe(true);
+      });
+
+      it('should allow DROP USER with -- @allow-forbidden: true annotation', () => {
+        const sql = `-- @allow-forbidden: true\nDROP USER IF EXISTS 'app'@'%';\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_app_user.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'DROP_USER')).toBe(false);
+      });
+
+      it('should allow DROP USER with specific -- @allow: DROP_USER annotation', () => {
+        const sql = `-- @allow: DROP_USER\nDROP USER IF EXISTS 'app'@'%';\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_app_user.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'DROP_USER')).toBe(false);
+      });
+
+      it('should forbid ALTER USER in DCL migration (dclHighRisk)', () => {
+        const sql = `ALTER USER 'app'@'%' IDENTIFIED BY 'newpass';\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_app_user.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'ALTER_USER')).toBe(true);
+      });
+
+      it('should allow ALTER USER with -- @allow-forbidden: true annotation', () => {
+        const sql = `-- @allow-forbidden: true\nALTER USER 'app'@'%' IDENTIFIED BY 'newpass';\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_app_user.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'ALTER_USER')).toBe(false);
+      });
+
+      it('should forbid SET PASSWORD FOR in DCL migration (dclHighRisk)', () => {
+        const sql = `SET PASSWORD FOR 'app'@'%' = PASSWORD('newpass');\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_app_user.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'SET_PASSWORD')).toBe(true);
+      });
+
+      it('should allow SET PASSWORD FOR with -- @allow-forbidden: true annotation', () => {
+        const sql = `-- @allow-forbidden: true\nSET PASSWORD FOR 'app'@'%' = PASSWORD('newpass');\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_app_user.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'SET_PASSWORD')).toBe(false);
+      });
+
+      it('should forbid CREATE INDEX in DCL migration (expanded dclReverse)', () => {
+        const sql = `CREATE INDEX idx_email ON users(email);\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_INDEX_IN_DCL')).toBe(true);
+      });
+
+      it('should NOT allow CREATE INDEX bypass with annotation (dclReverse is absolute)', () => {
+        const sql = `-- @allow-forbidden: true\nCREATE INDEX idx_email ON users(email);\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_INDEX_IN_DCL')).toBe(true);
+      });
+
+      it('should forbid DROP INDEX in DCL migration (expanded dclReverse)', () => {
+        const sql = `DROP INDEX idx_email ON users;\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'DROP_INDEX_IN_DCL')).toBe(true);
+      });
+
+      it('should forbid CREATE VIEW in DCL migration (expanded dclReverse)', () => {
+        const sql = `CREATE VIEW v_users AS SELECT id FROM users;\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_VIEW_IN_DCL')).toBe(true);
+      });
+
+      it('should forbid DROP VIEW in DCL migration (expanded dclReverse)', () => {
+        const sql = `DROP VIEW v_users;\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'DROP_VIEW_IN_DCL')).toBe(true);
+      });
+
+      it('should forbid CREATE PROCEDURE in DCL migration (expanded dclReverse)', () => {
+        const sql = `CREATE PROCEDURE my_proc() BEGIN SELECT 1; END;\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_ROUTINE_IN_DCL')).toBe(true);
+      });
+
+      it('should forbid DROP PROCEDURE in DCL migration (expanded dclReverse)', () => {
+        const sql = `DROP PROCEDURE IF EXISTS my_proc;\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'DROP_ROUTINE_IN_DCL')).toBe(true);
+      });
+
+      it('should forbid CREATE TRIGGER in DCL migration (expanded dclReverse)', () => {
+        const sql = `CREATE TRIGGER trg_before BEFORE INSERT ON users FOR EACH ROW BEGIN END;\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_TRIGGER_IN_DCL')).toBe(true);
+      });
+
+      it('should forbid DROP TRIGGER in DCL migration (expanded dclReverse)', () => {
+        const sql = `DROP TRIGGER IF EXISTS trg_before;\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'DROP_TRIGGER_IN_DCL')).toBe(true);
+      });
+
+      it('should forbid RENAME TABLE in DCL migration (expanded dclReverse)', () => {
+        const sql = `RENAME TABLE old_users TO users;\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'RENAME_TABLE_IN_DCL')).toBe(true);
+      });
+
+      it('should pass a full idiomatic R__ file: DROP IF EXISTS + CREATE + GRANT with annotation at top', () => {
+        const sql = [
+          `-- @allow-forbidden: true`,
+          `DROP USER IF EXISTS 'app'@'%';`,
+          `CREATE USER 'app'@'%' IDENTIFIED BY 'secret';`,
+          `GRANT SELECT ON mydb.* TO 'app'@'%';`,
+          `FLUSH PRIVILEGES;`
+        ].join('\n');
+        const result = dclAdapter.validateContent(sql, 'R__001_drop_create.sql');
+        // DROP USER present but annotation at top covers it
+        expect(result.forbiddenOps.some(op => op.code === 'DROP_USER')).toBe(false);
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_USER')).toBe(false);
+      });
+
+      it('should NOT forbid GRANT in DCL migration', () => {
+        const sql = `GRANT SELECT ON mydb.* TO 'app'@'%';\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_app_user.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'GRANT')).toBe(false);
+      });
+
+      it('should NOT forbid FLUSH PRIVILEGES in DCL migration', () => {
+        const sql = `FLUSH PRIVILEGES;\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_app_user.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'FLUSH_PRIVILEGES')).toBe(false);
+      });
+
+      it('should forbid CREATE TABLE in DCL migration (dclReverse)', () => {
+        const sql = `CREATE TABLE users (id INT);\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+        expect(result.valid).toBe(false);
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_TABLE_IN_DCL')).toBe(true);
+      });
+
+      it('should forbid ALTER TABLE in DCL migration (dclReverse)', () => {
+        const sql = `ALTER TABLE users ADD COLUMN email VARCHAR(255);\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+        expect(result.valid).toBe(false);
+        expect(result.forbiddenOps.some(op => op.code === 'ALTER_TABLE_IN_DCL')).toBe(true);
+      });
+
+      it('should NOT emit missing-DOWN warning for R__ file', () => {
+        const sql = `DROP USER IF EXISTS 'app'@'%';\nCREATE USER 'app'@'%' IDENTIFIED BY 'secret';\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_app_user.sql');
+        expect(result.warnings.some(w => w.type === 'missing-down')).toBe(false);
+      });
+
+      it('should still block dangerous ops (TRUNCATE valid in both modes)', () => {
+        const sql = `TRUNCATE TABLE audit_log;\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_cleanup.sql');
+        expect(result.dangerousOps.some(op => op.code === 'TRUNCATE_TABLE')).toBe(true);
+      });
+
+      it('should still block system-level forbidden ops (SET GLOBAL valid in both modes)', () => {
+        const sql = `SET GLOBAL max_connections = 500;\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'SET_GLOBAL')).toBe(true);
+      });
+    });
+  });
 });

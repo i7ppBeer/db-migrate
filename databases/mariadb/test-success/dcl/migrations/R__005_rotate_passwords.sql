@@ -1,5 +1,6 @@
 -- Repeatable Migration: Force password rotation on existing service accounts
 -- @allow-dangerous: false
+-- @allow-forbidden: true
 --
 -- PURPOSE: ALTER USER (not CREATE USER IF NOT EXISTS) so MariaDB does NOT emit
 --          Note 1973 → SHOW WARNINGS stays empty → alreadyExists = false →

@@ -40,7 +40,8 @@ export class MongoDBAdapter extends BaseAdapter {
    * - dangerous: 🟠 危險操作 (可用 --allow-dangerous 放行)
    * - warnings:  🟡 警告提示 (不阻擋執行)
    */
-  getValidationRules() {
+  getValidationRules(mode = 'versioned') {
+    const isRepeatable = mode === 'repeatable';
     return {
       // ========================================
       // 🔴 絕對禁止 - 預設無法放行 (需 --allow-forbidden)
@@ -50,7 +51,25 @@ export class MongoDBAdapter extends BaseAdapter {
           { pattern: /\.dropDatabase\s*\(/i, code: 'DROP_DATABASE', message: '🔴 DATA LOSS: Drop database is forbidden / 禁止刪除資料庫' },
           { pattern: /dropDatabase\s*:\s*(?:true|1)/i, code: 'DROP_DATABASE_CMD', message: '🔴 DATA LOSS: Drop database is forbidden / 禁止刪除資料庫' }
         ],
-        dcl: [
+        // DCL mode: forbid DDL schema changes (must live in DDL versioned project)
+        // DDL mode: forbid user/role management (must live in DCL repeatable project)
+        ...(isRepeatable ? {
+          // DDL structural operations — absolutely not allowed in DCL (no bypass)
+          dclReverse: [
+            { pattern: /\.createCollection\s*\(/i,   code: 'CREATE_COLLECTION_IN_DCL',      message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /\.createIndex(?:es)?\s*\(/i, code: 'CREATE_INDEX_IN_DCL',           message: '🔴 DDL: Index management should be in DDL project (Versioned) / 索引管理應在 DDL 專案' },
+            { pattern: /\.renameCollection\s*\(/i,   code: 'RENAME_COLLECTION_IN_DCL',      message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /renameCollection\s*:/i,      code: 'RENAME_COLLECTION_IN_DCL_CMD',  message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' }
+          ],
+          // High-risk DCL ops: irreversible or credential-sensitive — require // @allow-forbidden: true
+          dclHighRisk: [
+            { pattern: /\.dropUser\s*\(/i,   code: 'DROP_USER',       message: '🔴 DCL HIGH RISK: dropUser is irreversible, requires // @allow-forbidden: true / dropUser 為不可逆操作，需加 annotation 審批' },
+            { pattern: /dropUser\s*:/i,      code: 'DROP_USER_CMD',   message: '🔴 DCL HIGH RISK: dropUser is irreversible, requires // @allow-forbidden: true / dropUser 為不可逆操作，需加 annotation 審批' },
+            { pattern: /\.updateUser\s*\(/i, code: 'UPDATE_USER',     message: '🔴 DCL HIGH RISK: updateUser (including password change) requires // @allow-forbidden: true / 更新使用者（含密碼變更）需加 annotation 審批' },
+            { pattern: /updateUser\s*:/i,    code: 'UPDATE_USER_CMD', message: '🔴 DCL HIGH RISK: updateUser (including password change) requires // @allow-forbidden: true / 更新使用者（含密碼變更）需加 annotation 審批' }
+          ]
+        } : {
+          dcl: [
           { pattern: /\.createUser\s*\(/i, code: 'CREATE_USER', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
           { pattern: /createUser\s*:/i, code: 'CREATE_USER_CMD', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
           { pattern: /\.dropUser\s*\(/i, code: 'DROP_USER', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
@@ -67,7 +86,8 @@ export class MongoDBAdapter extends BaseAdapter {
           { pattern: /dropRole\s*:/i, code: 'DROP_ROLE_CMD', message: '🔴 DCL: Role management should be in DCL project (Repeatable) / 角色管理應在 DCL 專案' },
           { pattern: /\.updateRole\s*\(/i, code: 'UPDATE_ROLE', message: '🔴 DCL: Role management should be in DCL project (Repeatable) / 角色管理應在 DCL 專案' },
           { pattern: /updateRole\s*:/i, code: 'UPDATE_ROLE_CMD', message: '🔴 DCL: Role management should be in DCL project (Repeatable) / 角色管理應在 DCL 專案' }
-        ],
+          ]
+        }),
         system: [
           { pattern: /shutdown\s*:\s*(?:true|1)/i, code: 'SHUTDOWN', message: '🔴 SYSTEM: Shutdown database is forbidden / 禁止關閉資料庫' },
           { pattern: /\.shutdown\s*\(/i, code: 'SHUTDOWN_FUNC', message: '🔴 SYSTEM: Shutdown database is forbidden / 禁止關閉資料庫' },
@@ -651,7 +671,7 @@ export async function down(db, client) {
     const warnings = [];
     const dangerousOps = [];
     const forbiddenOps = [];
-    const rules = this.getValidationRules();
+    const rules = this.getValidationRules(this.config.mode);
 
     // Normalize content for pattern matching (remove comments, collapse whitespace)
     const normalizedContent = this.normalizeJS(content);
@@ -664,23 +684,25 @@ export async function down(db, client) {
     const normalizedUpBody = this.normalizeJS(upBody);
     const normalizedDownBody = this.normalizeJS(downBody);
 
-    // === 1. Check for empty down() when up() has operations ===
-    const upHasOperations = upBody.trim().length > 0 && 
-      (this.containsOperation(upBody, 'createCollection') ||
-       this.containsOperation(upBody, 'createIndex') ||
-       this.containsOperation(upBody, 'insertMany') ||
-       this.containsOperation(upBody, 'insertOne'));
-    
-    const downIsEmpty = !downBody.trim() || 
-      downBody.trim() === '// BUG: Empty down() - no rollback!' ||
-      !(/\w+\s*\.\s*\w+\s*\(/.test(downBody)); // No method calls
-    
-    if (upHasOperations && downIsEmpty) {
-      errors.push({
-        type: 'missing-down',
-        operation: 'down()',
-        message: 'down() is empty but up() contains operations - rollback missing!'
-      });
+    // === 1. DDL only: Check for empty down() (R__ repeatable files have no down()) ===
+    if (this.config.mode !== 'repeatable') {
+      const upHasOperations = upBody.trim().length > 0 && 
+        (this.containsOperation(upBody, 'createCollection') ||
+         this.containsOperation(upBody, 'createIndex') ||
+         this.containsOperation(upBody, 'insertMany') ||
+         this.containsOperation(upBody, 'insertOne'));
+      
+      const downIsEmpty = !downBody.trim() || 
+        downBody.trim() === '// BUG: Empty down() - no rollback!' ||
+        !(/\w+\s*\.\s*\w+\s*\(/.test(downBody)); // No method calls
+      
+      if (upHasOperations && downIsEmpty) {
+        errors.push({
+          type: 'missing-down',
+          operation: 'down()',
+          message: 'down() is empty but up() contains operations - rollback missing!'
+        });
+      }
     }
 
     // === 2. Extract created collections in up() ===
@@ -688,25 +710,27 @@ export async function down(db, client) {
     const droppedCollectionsInDown = this.extractDroppedCollections(downBody);
     const droppedCollectionsInUp = this.extractDroppedCollections(upBody);
     
-    // === 3. Check for orphan drops in down() ===
-    for (const dropped of droppedCollectionsInDown) {
-      if (!createdCollections.includes(dropped)) {
-        errors.push({
-          type: 'orphan-drop',
-          operation: 'drop',
-          message: `Orphan drop: down() drops '${dropped}' but up() doesn't create it`
-        });
+    // === 3. DDL only: Check for orphan drops in down() (R__ repeatable files have no up/down) ===
+    if (this.config.mode !== 'repeatable') {
+      for (const dropped of droppedCollectionsInDown) {
+        if (!createdCollections.includes(dropped)) {
+          errors.push({
+            type: 'orphan-drop',
+            operation: 'drop',
+            message: `Orphan drop: down() drops '${dropped}' but up() doesn't create it`
+          });
+        }
       }
-    }
 
-    // === 3b. Check for orphan drops in up() ===
-    for (const dropped of droppedCollectionsInUp) {
-      if (!createdCollections.includes(dropped)) {
-        errors.push({
-          type: 'orphan-drop-in-up',
-          operation: 'drop',
-          message: `Orphan drop in up(): '${dropped}' is dropped but not created in this migration`
-        });
+      // === 3b. Check for orphan drops in up() ===
+      for (const dropped of droppedCollectionsInUp) {
+        if (!createdCollections.includes(dropped)) {
+          errors.push({
+            type: 'orphan-drop-in-up',
+            operation: 'drop',
+            message: `Orphan drop in up(): '${dropped}' is dropped but not created in this migration`
+          });
+        }
       }
     }
 
@@ -741,8 +765,12 @@ export async function down(db, client) {
         
         // Use normalized content for pattern matching
         if (rule.pattern.test(normalizedContent)) {
-          const isAllowed = options.allowForbidden || 
-            (options.allowedCodes && options.allowedCodes.includes(rule.code));
+          // dclReverse (DDL ops in DCL file) can NEVER be bypassed
+          const isAbsolute = category === 'dclReverse';
+          const isAllowed = !isAbsolute && (
+            options.allowForbidden || 
+            (options.allowedCodes && options.allowedCodes.includes(rule.code))
+          );
           
           if (isAllowed) {
             warnings.push({
@@ -764,8 +792,8 @@ export async function down(db, client) {
     // === 5. Check for dangerous operations ===
     for (const category of Object.keys(rules.dangerous)) {
       for (const rule of rules.dangerous[category]) {
-        // Special case: Allow 'drop' in down() for collections created in up()
-        if (rule.code === 'DROP_COLLECTION') {
+        // Special case (DDL only): Allow 'drop' in down() for collections created in up()
+        if (rule.code === 'DROP_COLLECTION' && this.config.mode !== 'repeatable') {
           const hasDropInDown = this.containsOperation(downBody, 'drop');
           const hasDropInUp = this.containsOperation(upBody, 'drop');
           

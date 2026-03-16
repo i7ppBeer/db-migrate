@@ -38,7 +38,8 @@ export class MariaDBAdapter extends BaseAdapter {
    * - dangerous: 🟠 危險操作 (可用 --allow-dangerous 放行)
    * - warnings:  🟡 警告提示 (不阻擋執行)
    */
-  getValidationRules() {
+  getValidationRules(mode = 'versioned') {
+    const isRepeatable = mode === 'repeatable';
     return {
       // ========================================
       // 🔴 絕對禁止 - 預設無法放行 (需 --allow-forbidden)
@@ -48,7 +49,33 @@ export class MariaDBAdapter extends BaseAdapter {
           { pattern: /DROP\s+DATABASE/i, code: 'DROP_DATABASE', message: '🔴 DATA LOSS: Drop database is forbidden / 禁止刪除資料庫' },
           { pattern: /DROP\s+SCHEMA/i, code: 'DROP_SCHEMA', message: '🔴 DATA LOSS: Drop schema is forbidden / 禁止刪除 SCHEMA' }
         ],
-        dcl: [
+        // DCL mode: forbid DDL schema changes (must live in DDL versioned project)
+        // DDL mode: forbid user/permission management (must live in DCL repeatable project)
+        ...(isRepeatable ? {
+          // DDL structural operations — absolutely not allowed in DCL (no bypass)
+          dclReverse: [
+            { pattern: /\bCREATE\s+TABLE\b/i,              code: 'CREATE_TABLE_IN_DCL',     message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /\bALTER\s+TABLE\b/i,               code: 'ALTER_TABLE_IN_DCL',      message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /\bDROP\s+TABLE\b/i,                code: 'DROP_TABLE_IN_DCL',       message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /\bCREATE\s+(?:UNIQUE\s+)?INDEX\b/i, code: 'CREATE_INDEX_IN_DCL',   message: '🔴 DDL: Index management should be in DDL project (Versioned) / 索引管理應在 DDL 專案' },
+            { pattern: /\bDROP\s+INDEX\b/i,                code: 'DROP_INDEX_IN_DCL',       message: '🔴 DDL: Index management should be in DDL project (Versioned) / 索引管理應在 DDL 專案' },
+            { pattern: /\bCREATE\s+(?:OR\s+REPLACE\s+)?VIEW\b/i, code: 'CREATE_VIEW_IN_DCL', message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /\bALTER\s+VIEW\b/i,                code: 'ALTER_VIEW_IN_DCL',       message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /\bDROP\s+VIEW\b/i,                 code: 'DROP_VIEW_IN_DCL',        message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /\bCREATE\s+(?:DEFINER\s*=\S+\s+)?(?:PROCEDURE|FUNCTION)\b/i, code: 'CREATE_ROUTINE_IN_DCL', message: '🔴 DDL: Routine management should be in DDL project (Versioned) / 程序管理應在 DDL 專案' },
+            { pattern: /\bDROP\s+(?:PROCEDURE|FUNCTION)\b/i, code: 'DROP_ROUTINE_IN_DCL',  message: '🔴 DDL: Routine management should be in DDL project (Versioned) / 程序管理應在 DDL 專案' },
+            { pattern: /\bCREATE\s+(?:DEFINER\s*=\S+\s+)?TRIGGER\b/i, code: 'CREATE_TRIGGER_IN_DCL', message: '🔴 DDL: Trigger management should be in DDL project (Versioned) / 觸發器管理應在 DDL 專案' },
+            { pattern: /\bDROP\s+TRIGGER\b/i,              code: 'DROP_TRIGGER_IN_DCL',     message: '🔴 DDL: Trigger management should be in DDL project (Versioned) / 觸發器管理應在 DDL 專案' },
+            { pattern: /\bRENAME\s+TABLE\b/i,              code: 'RENAME_TABLE_IN_DCL',     message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' }
+          ],
+          // High-risk DCL ops: irreversible or credential-sensitive — require -- @allow-forbidden: true
+          dclHighRisk: [
+            { pattern: /\bDROP\s+USER\b/i,                 code: 'DROP_USER',               message: '🔴 DCL HIGH RISK: DROP USER is irreversible, requires -- @allow-forbidden: true / DROP USER 為不可逆操作，需加 annotation 審批' },
+            { pattern: /\bALTER\s+USER\b/i,                code: 'ALTER_USER',              message: '🔴 DCL HIGH RISK: ALTER USER (e.g. password change) requires -- @allow-forbidden: true / ALTER USER 含密碼變更，需加 annotation 審批' },
+            { pattern: /\bSET\s+PASSWORD\s+FOR\b/i,        code: 'SET_PASSWORD',            message: '🔴 DCL HIGH RISK: Password change requires -- @allow-forbidden: true / 密碼變更需加 annotation 審批' }
+          ]
+        } : {
+          dcl: [
           { pattern: /\bCREATE\s+USER\s+['"`@]/i, code: 'CREATE_USER', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
           { pattern: /\bDROP\s+USER\s+(?:IF\s+EXISTS\s+)?['"`@]/i, code: 'DROP_USER', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
           { pattern: /\bALTER\s+USER\s+['"`@]/i, code: 'ALTER_USER', message: '🔴 DCL: User management should be in DCL project (Repeatable) / 使用者管理應在 DCL 專案' },
@@ -56,7 +83,8 @@ export class MariaDBAdapter extends BaseAdapter {
           { pattern: /\bGRANT\s+(?:ALL|USAGE|SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|INDEX|EXECUTE|REFERENCES|TRIGGER|EVENT|PROCESS|RELOAD|SUPER|REPLICATION|SHOW)\s*(?:PRIVILEGES\s+)?(?:ON|,)/i, code: 'GRANT', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' },
           { pattern: /\bREVOKE\s+(?:ALL|SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|INDEX|EXECUTE|REFERENCES|TRIGGER|EVENT|PROCESS|RELOAD|SUPER|REPLICATION|SHOW)\s*(?:PRIVILEGES\s+)?(?:ON|,)/i, code: 'REVOKE', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' },
           { pattern: /\bFLUSH\s+PRIVILEGES/i, code: 'FLUSH_PRIVILEGES', message: '🔴 DCL: Permission management should be in DCL project (Repeatable) / 權限管理應在 DCL 專案' }
-        ],
+          ]
+        }),
         dataExfiltration: [
           { pattern: /\bSELECT\s+.*\s+INTO\s+OUTFILE/i, code: 'INTO_OUTFILE', message: '🔴 DATA RISK: Export data to file is forbidden / 禁止匯出資料到檔案' },
           { pattern: /\bLOAD\s+DATA\s+(?:LOCAL\s+)?INFILE/i, code: 'LOAD_DATA', message: '🔴 DATA RISK: Load data from file is forbidden / 禁止從檔案載入資料' },
@@ -963,7 +991,7 @@ export class MariaDBAdapter extends BaseAdapter {
     const warnings = [];
     const dangerousOps = [];
     const forbiddenOps = [];
-    const rules = this.getValidationRules();
+    const rules = this.getValidationRules(this.config.mode);
 
     const upSQL = this.extractSection(content, 'Up');
     const downSQL = this.extractSection(content, 'Down');
@@ -986,30 +1014,33 @@ export class MariaDBAdapter extends BaseAdapter {
     const hasDropDatabaseInDown = /DROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?/i.test(normalizedDownSQL);
     const hasDropDatabaseInUp = /DROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?/i.test(normalizedUpSQL);
 
-    // === 2. Check for orphan drops in DOWN section ===
-    for (const dropped of droppedTablesInDown) {
-      if (!createdTables.map(t => t.toLowerCase()).includes(dropped.toLowerCase())) {
-        errors.push({
-          type: 'orphan-drop',
-          code: 'ORPHAN_DROP_DOWN',
-          message: `Orphan drop: DOWN drops '${dropped}' but UP doesn't create it`
-        });
+    // === 2. DDL only: Check for orphan drops in DOWN section (R__ repeatable files have no UP/DOWN) ===
+    if (this.config.mode !== 'repeatable') {
+      for (const dropped of droppedTablesInDown) {
+        if (!createdTables.map(t => t.toLowerCase()).includes(dropped.toLowerCase())) {
+          errors.push({
+            type: 'orphan-drop',
+            code: 'ORPHAN_DROP_DOWN',
+            message: `Orphan drop: DOWN drops '${dropped}' but UP doesn't create it`
+          });
+        }
+      }
+
+      // === 2b. Check for orphan drops in UP section ===
+      for (const dropped of droppedTablesInUp) {
+        if (!createdTables.map(t => t.toLowerCase()).includes(dropped.toLowerCase())) {
+          errors.push({
+            type: 'orphan-drop-in-up',
+            code: 'ORPHAN_DROP_UP',
+            message: `Orphan drop in UP: '${dropped}' is dropped but not created in this migration`
+          });
+        }
       }
     }
 
-    // === 2b. Check for orphan drops in UP section ===
-    for (const dropped of droppedTablesInUp) {
-      if (!createdTables.map(t => t.toLowerCase()).includes(dropped.toLowerCase())) {
-        errors.push({
-          type: 'orphan-drop-in-up',
-          code: 'ORPHAN_DROP_UP',
-          message: `Orphan drop in UP: '${dropped}' is dropped but not created in this migration`
-        });
-      }
-    }
-
-    // Detect valid CREATE/DROP pairs
-    const hasValidCreateDropPair = createdTables.length > 0 && 
+    // Detect valid CREATE/DROP pairs (always false in repeatable mode — no UP/DOWN sections)
+    const hasValidCreateDropPair = this.config.mode !== 'repeatable' &&
+      createdTables.length > 0 && 
       droppedTablesInDown.every(d => createdTables.map(t => t.toLowerCase()).includes(d.toLowerCase()));
 
     // === 3. Check FORBIDDEN operations ===
@@ -1047,8 +1078,12 @@ export class MariaDBAdapter extends BaseAdapter {
 
         // Use normalized content for pattern matching
         if (rule.pattern.test(normalizedContent)) {
-          const isAllowed = options.allowForbidden || 
-            (options.allowedCodes && options.allowedCodes.includes(rule.code));
+          // dclReverse (DDL ops in DCL file) can NEVER be bypassed
+          const isAbsolute = category === 'dclReverse';
+          const isAllowed = !isAbsolute && (
+            options.allowForbidden || 
+            (options.allowedCodes && options.allowedCodes.includes(rule.code))
+          );
           
           if (isAllowed) {
             warnings.push({
@@ -1154,8 +1189,8 @@ export class MariaDBAdapter extends BaseAdapter {
     const performanceWarnings = performanceResult.warnings;
     warnings.push(...performanceWarnings);
 
-    // === 9. Check if DOWN section exists ===
-    if (!downSQL || downSQL.trim() === '') {
+    // === 9. DDL only: Check if DOWN section exists (R__ repeatable files have no DOWN) ===
+    if (this.config.mode !== 'repeatable' && (!downSQL || downSQL.trim() === '')) {
       warnings.push({
         type: 'missing-down',
         message: '⚠️ DOWN migration is empty or missing'

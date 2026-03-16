@@ -1,3 +1,4 @@
+// @allow-forbidden: true
 /**
  * Repeatable Migration: Create application user
  * Must be idempotent - safe to run multiple times

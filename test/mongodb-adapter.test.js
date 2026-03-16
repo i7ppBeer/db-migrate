@@ -562,4 +562,138 @@ describe('MongoDBAdapter', () => {
       expect(result.total).toBe(0);
     });
   });
+
+  describe('validateContent() — mode-aware validation', () => {
+    describe('DDL mode (versioned, default)', () => {
+      it('should forbid createUser in DDL migration', () => {
+        const js = `
+export const up = async (db) => { await db.command({ createUser: 'app', pwd: 'secret', roles: [] }); };
+export const down = async (db) => {};
+`;
+        const result = adapter.validateContent(js, '20260101_add_user.js');
+        expect(result.valid).toBe(false);
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_USER_CMD')).toBe(true);
+      });
+
+      it('should forbid grantRolesToUser in DDL migration', () => {
+        const js = `
+export const up = async (db) => { await db.command({ grantRolesToUser: 'app', roles: ['read'] }); };
+export const down = async (db) => {};
+`;
+        const result = adapter.validateContent(js, '20260101_grant.js');
+        expect(result.valid).toBe(false);
+        expect(result.forbiddenOps.some(op => op.code === 'GRANT_ROLES_CMD')).toBe(true);
+      });
+    });
+
+    describe('DCL mode (repeatable)', () => {
+      let dclAdapter;
+      beforeEach(() => {
+        dclAdapter = new MongoDBAdapter({ ...mockConfig, mode: 'repeatable' });
+      });
+
+      it('should NOT forbid createUser in DCL migration', () => {
+        const js = `
+export const up = async (db) => { await db.command({ createUser: 'app', pwd: 'secret', roles: [] }); };
+export const down = async (db) => {};
+`;
+        const result = dclAdapter.validateContent(js, 'R__001_app_user.js');
+        expect(result.forbiddenOps.some(op => ['CREATE_USER', 'CREATE_USER_CMD'].includes(op.code))).toBe(false);
+      });
+
+      it('should forbid dropUser in DCL migration (dclHighRisk)', () => {
+        const js = `export const up = async (db) => { await db.command({ dropUser: 'app' }); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_app_user.js');
+        expect(result.forbiddenOps.some(op => ['DROP_USER', 'DROP_USER_CMD'].includes(op.code))).toBe(true);
+      });
+
+      it('should allow dropUser with // @allow-forbidden: true annotation', () => {
+        const js = `// @allow-forbidden: true\nexport const up = async (db) => { await db.command({ dropUser: 'app' }); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_app_user.js');
+        expect(result.forbiddenOps.some(op => ['DROP_USER', 'DROP_USER_CMD'].includes(op.code))).toBe(false);
+      });
+
+      it('should allow db.dropUser() with // @allow-forbidden: true annotation', () => {
+        const js = `// @allow-forbidden: true\nexport const up = async (db) => { await db.dropUser('app'); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_app_user.js');
+        expect(result.forbiddenOps.some(op => op.code === 'DROP_USER')).toBe(false);
+      });
+
+      it('should forbid updateUser in DCL migration (dclHighRisk — password change)', () => {
+        const js = `export const up = async (db) => { await db.command({ updateUser: 'app', pwd: 'newpass' }); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_app_user.js');
+        expect(result.forbiddenOps.some(op => ['UPDATE_USER', 'UPDATE_USER_CMD'].includes(op.code))).toBe(true);
+      });
+
+      it('should allow updateUser with // @allow-forbidden: true annotation', () => {
+        const js = `// @allow-forbidden: true\nexport const up = async (db) => { await db.command({ updateUser: 'app', pwd: 'newpass' }); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_app_user.js');
+        expect(result.forbiddenOps.some(op => ['UPDATE_USER', 'UPDATE_USER_CMD'].includes(op.code))).toBe(false);
+      });
+
+      it('should NOT allow createCollection bypass with annotation (dclReverse is absolute)', () => {
+        const js = `// @allow-forbidden: true\nexport const up = async (db) => { await db.createCollection('users'); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_bad.js');
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_COLLECTION_IN_DCL')).toBe(true);
+      });
+
+      it('should forbid renameCollection command form in DCL migration (dclReverse)', () => {
+        const js = `export const up = async (db) => { await db.command({ renameCollection: 'test.old', to: 'test.new' }); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_bad.js');
+        expect(result.forbiddenOps.some(op => op.code === 'RENAME_COLLECTION_IN_DCL_CMD')).toBe(true);
+      });
+
+      it('should pass a full idiomatic R__ file: createUser + grantRolesToUser', () => {
+        const js = [
+          `// @allow-forbidden: true`,
+          `export const up = async (db) => {`,
+          `  await db.command({ dropUser: 'app' });`,
+          `  await db.command({ createUser: 'app', pwd: 'secret', roles: [{ role: 'read', db: 'mydb' }] });`,
+          `  await db.command({ grantRolesToUser: 'app', roles: [{ role: 'read', db: 'mydb' }] });`,
+          `};`
+        ].join('\n') + '\n';
+        const result = dclAdapter.validateContent(js, 'R__001_drop_create.js');
+        expect(result.forbiddenOps.some(op => ['DROP_USER', 'DROP_USER_CMD'].includes(op.code))).toBe(false);
+        expect(result.forbiddenOps.some(op => ['CREATE_USER', 'CREATE_USER_CMD'].includes(op.code))).toBe(false);
+      });
+
+      it('should NOT forbid grantRolesToUser in DCL migration', () => {
+        const js = `export const up = async (db) => { await db.command({ grantRolesToUser: 'app', roles: ['read'] }); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_app_user.js');
+        expect(result.forbiddenOps.some(op => ['GRANT_ROLES', 'GRANT_ROLES_CMD'].includes(op.code))).toBe(false);
+      });
+
+      it('should forbid createCollection in DCL migration (dclReverse)', () => {
+        const js = `export const up = async (db) => { await db.createCollection('users'); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_bad.js');
+        expect(result.valid).toBe(false);
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_COLLECTION_IN_DCL')).toBe(true);
+      });
+
+      it('should forbid createIndex in DCL migration (dclReverse)', () => {
+        const js = `export const up = async (db) => { await db.collection('users').createIndex({ email: 1 }); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_bad.js');
+        expect(result.valid).toBe(false);
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_INDEX_IN_DCL')).toBe(true);
+      });
+
+      it('should NOT emit missing-down error for R__ file', () => {
+        const js = `export const up = async (db) => { await db.command({ createUser: 'app', pwd: 'x', roles: [] }); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_app_user.js');
+        expect(result.errors.some(e => e.type === 'missing-down')).toBe(false);
+      });
+
+      it('should still block dangerous ops like deleteMany in DCL mode', () => {
+        const js = `export const up = async (db) => { await db.collection('audit').deleteMany({}); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_cleanup.js');
+        expect(result.dangerousOps.some(op => op.code === 'DELETE_ALL')).toBe(true);
+      });
+
+      it('should still block system-level forbidden ops in DCL mode', () => {
+        const js = `export const up = async (db) => { await db.command({ shutdown: true }); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_bad.js');
+        expect(result.forbiddenOps.some(op => op.code === 'SHUTDOWN')).toBe(true);
+      });
+    });
+  });
 });

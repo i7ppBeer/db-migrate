@@ -1,3 +1,4 @@
+// @allow-forbidden: true
 /**
  * DCL Repeatable Migration: Secret service accounts (auto-generated passwords)
  * CHANGE_ME_ON_FIRST_LOGIN will be replaced at runtime with a secure password.

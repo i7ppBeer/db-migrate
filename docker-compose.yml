@@ -106,6 +106,16 @@ services:
         condition: service_healthy
     environment:
       - DB_TYPE=all
+      # MariaDB connection
+      - MARIADB_HOST=mariadb
+      - MARIADB_PORT=3306
+      - MARIADB_USER=root
+      - MARIADB_PASSWORD=rootpass
+      # MongoDB connection
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_URL=mongodb://mongodb:27017
+      - MONGODB_HOST=mongodb
+      - MONGODB_PORT=27017
     volumes:
       - ./databases:/app/databases:ro
       - ./reports:/app/reports
