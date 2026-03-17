@@ -52,6 +52,29 @@ wait_for_database() {
     exit 1
 }
 
+# Detect DB type and host from -c config path argument
+# Sets DB_TYPE / DB_HOST / DB_PORT / DB_USER / DB_PASSWORD
+setup_db_from_args() {
+    local args=("$@")
+    for ((i=0; i<${#args[@]}; i++)); do
+        if [[ "${args[i]}" == "-c" && $((i+1)) -lt ${#args[@]} ]]; then
+            local config_path="${args[$((i+1))]}"
+            if [[ "$config_path" == *"/mariadb/"* ]]; then
+                export DB_TYPE="mariadb"
+                export DB_HOST="${MARIADB_HOST:-mariadb}"
+                export DB_PORT="${MARIADB_PORT:-3306}"
+                export DB_USER="${MARIADB_USER:-root}"
+                export DB_PASSWORD="${MARIADB_PASSWORD:-}"
+            elif [[ "$config_path" == *"/mongodb/"* ]]; then
+                export DB_TYPE="mongodb"
+                export DB_HOST="${MONGODB_HOST:-mongodb}"
+                export DB_PORT="${MONGODB_PORT:-27017}"
+            fi
+            break
+        fi
+    done
+}
+
 # Check if -c parameter is provided (skip for commands that don't need it)
 check_config_parameter() {
     local cmd="$1"
@@ -101,13 +124,13 @@ main() {
         wait)
             wait_for_database
             ;;
-        validate-all|test-all)
-            # These commands handle database connections per-config file
-            # No need to wait for a specific database at startup
-            echo -e "\n${BLUE}[INFO] Running $command (database connections handled per-config)${NC}"
+        validate-all|validate|test-all|create|create-dcl)
+            # These commands only operate on local files, no DB connection needed
+            echo -e "\n${BLUE}[INFO] Running $command (no database connection required)${NC}"
             run_command "$command" "$@"
             ;;
-        up|down|status|validate|test|create|create-dcl|baseline|dcl|dcl:status|dcl:verify|status-all|up-all|dcl-all|dcl:status-all|dcl:verify-all|test-instances)
+        up|down|status|test|baseline|dcl|dcl:status|dcl:verify|status-all|up-all|dcl-all|dcl:status-all|dcl:verify-all|test-instances)
+            setup_db_from_args "$@"
             wait_for_database
             run_command "$command" "$@"
             ;;

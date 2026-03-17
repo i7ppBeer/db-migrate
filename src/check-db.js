@@ -5,10 +5,12 @@
  */
 
 const DB_TYPE = process.env.DB_TYPE || 'mongodb';
-const DB_HOST = process.env.DB_HOST || 'localhost';
-const DB_PORT = process.env.DB_PORT || (DB_TYPE === 'mongodb' ? '27017' : '3306');
-const DB_USER = process.env.DB_USER || '';
-const DB_PASSWORD = process.env.DB_PASSWORD || '';
+const DB_HOST = process.env.DB_HOST ||
+  (DB_TYPE === 'mariadb' ? (process.env.MARIADB_HOST || 'localhost') : (process.env.MONGODB_HOST || 'localhost'));
+const DB_PORT = process.env.DB_PORT ||
+  (DB_TYPE === 'mariadb' ? (process.env.MARIADB_PORT || '3306') : (process.env.MONGODB_PORT || '27017'));
+const DB_USER = process.env.DB_USER || (DB_TYPE === 'mariadb' ? (process.env.MARIADB_USER || '') : '');
+const DB_PASSWORD = process.env.DB_PASSWORD || (DB_TYPE === 'mariadb' ? (process.env.MARIADB_PASSWORD || '') : '');
 
 async function checkMongoDB() {
   const { MongoClient } = await import('mongodb');
