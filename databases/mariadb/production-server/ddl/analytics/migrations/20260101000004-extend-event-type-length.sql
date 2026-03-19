@@ -5,7 +5,7 @@
 -- 確認欄位目前為 VARCHAR(100)，防止重複執行
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='event_type' AND CHARACTER_MAXIMUM_LENGTH=100
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='daily_stats' AND COLUMN_NAME='metric_name' AND CHARACTER_MAXIMUM_LENGTH=100
--- END_CHECK
+-- -sanity PreCheck
 
 -- +migrate Up
 -- Extend event_type column from VARCHAR(100) to VARCHAR(200)
@@ -22,7 +22,7 @@ ALTER TABLE daily_stats
 -- 確認兩個欄位已成功擴展為 VARCHAR(200)
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='event_type' AND CHARACTER_MAXIMUM_LENGTH=200
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='daily_stats' AND COLUMN_NAME='metric_name' AND CHARACTER_MAXIMUM_LENGTH=200
--- END_CHECK
+-- -sanity PostCheck
 
 -- +migrate Down
 ALTER TABLE daily_stats

@@ -1,7 +1,7 @@
 -- +sanity PreCheck
 -- 確認 analytics 資料庫尚不存在，或已存在時不影響冪等執行
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='analytics'
--- END_CHECK
+-- -sanity PreCheck
 
 -- +migrate Up
 -- ============================================================
@@ -22,7 +22,7 @@ CREATE DATABASE IF NOT EXISTS analytics
 -- +sanity PostCheck
 -- 確認 analytics 資料庫成功建立
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='analytics'
--- END_CHECK
+-- -sanity PostCheck
 
 -- +migrate Down
 -- ============================================================

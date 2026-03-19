@@ -1,7 +1,7 @@
 -- +sanity PreCheck
 -- 確認 ecommerce 資料庫尚不存在
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='ecommerce'
--- END_CHECK
+-- -sanity PreCheck
 
 -- +migrate Up
 -- ============================================================
@@ -24,7 +24,7 @@ USE ecommerce;
 -- +sanity PostCheck
 -- 確認 ecommerce 資料庫成功建立
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='ecommerce'
--- END_CHECK
+-- -sanity PostCheck
 
 -- +migrate Down
 -- ============================================================

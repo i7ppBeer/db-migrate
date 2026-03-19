@@ -3,7 +3,7 @@
 -- +sanity PreCheck
 -- 確認 app_logs 表尚不存在
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs'
--- END_CHECK
+-- -sanity PreCheck
 
 -- +migrate Up
 -- Create app_logs table for application logging
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS app_logs (
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs' AND INDEX_NAME='idx_level'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs' AND INDEX_NAME='idx_service'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs' AND INDEX_NAME='idx_trace_id'
--- END_CHECK
+-- -sanity PostCheck
 
 -- +migrate Down
 DROP TABLE IF EXISTS app_logs;

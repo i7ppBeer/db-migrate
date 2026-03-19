@@ -3,7 +3,7 @@
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events'
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='platform'
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='country_code'
--- END_CHECK
+-- -sanity PreCheck
 
 -- +migrate Up
 -- Add platform and country_code columns to events table
@@ -23,7 +23,7 @@ CREATE INDEX idx_events_country ON events (country_code);
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='country_code'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND INDEX_NAME='idx_events_platform'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND INDEX_NAME='idx_events_country'
--- END_CHECK
+-- -sanity PostCheck
 
 -- +migrate Down
 DROP INDEX idx_events_country ON events;

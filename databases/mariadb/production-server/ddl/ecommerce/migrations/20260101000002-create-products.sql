@@ -2,7 +2,7 @@
 -- 確認前置依賴 users 表已存在，且 products 表尚未建立
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='users'
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products'
--- END_CHECK
+-- -sanity PreCheck
 
 -- +migrate Up
 -- Create products table for ecommerce database
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS products (
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products' AND COLUMN_NAME='price'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products' AND INDEX_NAME='idx_sku'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products' AND INDEX_NAME='idx_category'
--- END_CHECK
+-- -sanity PostCheck
 
 -- +migrate Down
 DROP TABLE IF EXISTS products;

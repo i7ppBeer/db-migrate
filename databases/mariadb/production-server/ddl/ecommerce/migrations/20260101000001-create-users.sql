@@ -1,7 +1,7 @@
 -- +sanity PreCheck
 -- 確認 users 表尚不存在
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='users'
--- END_CHECK
+-- -sanity PreCheck
 
 -- +migrate Up
 -- Create users table for ecommerce database
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='users' AND COLUMN_NAME='email'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='users' AND COLUMN_NAME='password_hash'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='users' AND INDEX_NAME='idx_email'
--- END_CHECK
+-- -sanity PostCheck
 
 -- +migrate Down
 DROP TABLE IF EXISTS users;
