@@ -1,3 +1,8 @@
+-- +sanity PreCheck
+-- 確認 events 表尚不存在（避免重複建立）
+-- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events'
+-- END_CHECK
+
 -- +migrate Up
 -- Create events table for analytics tracking
 
@@ -14,6 +19,14 @@ CREATE TABLE IF NOT EXISTS events (
     INDEX idx_user_id (user_id),
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- +sanity PostCheck
+-- 確認 events 表及關鍵索引成功建立
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events'
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND INDEX_NAME='idx_event_type'
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND INDEX_NAME='idx_user_id'
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND INDEX_NAME='idx_created_at'
+-- END_CHECK
 
 -- +migrate Down
 DROP TABLE IF EXISTS events;

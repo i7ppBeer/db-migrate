@@ -1349,18 +1349,15 @@ export class MariaDBAdapter extends BaseAdapter {
     if (!sql) return '';
     return sql
       // Remove zero-width characters (Unicode confusion attack prevention)
+      // Step 1: Remove zero-width characters (Unicode confusion attack prevention)
       .replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '')
-      // Convert fullwidth characters to halfwidth (Unicode normalization)
+      // Step 2: Convert fullwidth characters to halfwidth (Unicode normalization)
       .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
-      // Remove string literals (single quotes) to avoid false positives
-      // e.g., INSERT INTO log VALUES ('DROP DATABASE test') should NOT trigger
-      // Use a placeholder to preserve syntax
-      .replace(/'(?:[^'\\]|\\.)*'/g, "'__STRING__'")
-      // Remove string literals (double quotes)
-      .replace(/"(?:[^"\\]|\\.)*"/g, '"__STRING__"')
-      // Remove single-line comments (but preserve -- EXPECT_ROWS: and -- EXPECT_NO_ROWS:)
+      // Step 3: Remove single-line comments FIRST so that apostrophes in comments
+      // (e.g. "doesn't") don't interfere with the string-literal replacement below.
+      // Preserve -- EXPECT_ROWS: / -- EXPECT_NO_ROWS: directives used by sanity checks.
       .replace(/--(?!\s*EXPECT).*$/gm, ' ')
-      // Remove multi-line comments /* ... */ (but detect MySQL conditional comments first)
+      // Step 4: Remove multi-line comments /* ... */ (but detect MySQL conditional comments first)
       .replace(/\/\*[\s\S]*?\*\//g, (match) => {
         // MySQL conditional comments /*! ... */ are executed, preserve content
         if (match.startsWith('/*!')) {
@@ -1368,6 +1365,12 @@ export class MariaDBAdapter extends BaseAdapter {
         }
         return ' ';
       })
+      // Step 5: Remove string literals (single quotes) to avoid false positives from data values
+      // e.g., INSERT INTO log VALUES ('DROP DATABASE test') should NOT trigger
+      // Use a placeholder to preserve syntax
+      .replace(/'(?:[^'\\]|\\.)*'/g, "'__STRING__'")
+      // Step 6: Remove string literals (double quotes)
+      .replace(/"(?:[^"\\]|\\.)*"/g, '"__STRING__"')
       // Collapse multiple whitespace/newlines to single space
       .replace(/\s+/g, ' ')
       // Trim

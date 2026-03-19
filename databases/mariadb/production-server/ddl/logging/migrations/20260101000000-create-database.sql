@@ -1,3 +1,8 @@
+-- +sanity PreCheck
+-- 確認 logging 資料庫尚不存在
+-- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='logging'
+-- END_CHECK
+
 -- +migrate Up
 -- ============================================================
 -- Create logging database
@@ -16,6 +21,11 @@ CREATE DATABASE IF NOT EXISTS logging
 
 USE logging;
 
+-- +sanity PostCheck
+-- 確認 logging 資料庫成功建立
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='logging'
+-- END_CHECK
+
 -- +migrate Down
 -- ============================================================
 -- Drop logging database
@@ -29,5 +39,6 @@ USE logging;
 -- 2. Ensure backup exists
 -- 3. Run: node src/cli.js down -c config.js --allow-forbidden
 -- ============================================================
+-- @allow-forbidden: true
 
 DROP DATABASE IF EXISTS logging;

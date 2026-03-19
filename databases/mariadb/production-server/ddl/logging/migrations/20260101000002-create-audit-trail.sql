@@ -1,3 +1,9 @@
+-- +sanity PreCheck
+-- 確認前置依賴 app_logs 已存在，且 audit_trail 尚未建立
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs'
+-- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='audit_trail'
+-- END_CHECK
+
 -- +migrate Up
 -- Create audit_trail table for security auditing
 
@@ -16,6 +22,14 @@ CREATE TABLE IF NOT EXISTS audit_trail (
     INDEX idx_actor (actor_id),
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- +sanity PostCheck
+-- 確認 audit_trail 表及關鍵索引成功建立
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='audit_trail'
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='audit_trail' AND COLUMN_NAME='actor_id'
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='audit_trail' AND INDEX_NAME='idx_entity'
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='audit_trail' AND INDEX_NAME='idx_actor'
+-- END_CHECK
 
 -- +migrate Down
 DROP TABLE IF EXISTS audit_trail;
