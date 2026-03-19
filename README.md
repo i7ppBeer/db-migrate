@@ -1049,28 +1049,148 @@ DROP TABLE IF EXISTS users;
 
 ### MariaDB/MySQL with Sanity Check (.sql)
 
+Sanity Check lets you attach **PreCheck** and **PostCheck** SQL queries to each migration. When `--sanity-check` is enabled, the execution flow becomes:
+
+```
+PreCheck → Execute Migration (Up) → PostCheck
+   ↓ fail        ↓ fail               ↓ fail
+  ABORT      Auto-Rollback (Down)   Auto-Rollback (Down)
+```
+
+#### Syntax
+
+Use raw SQL directly — one `SELECT` per line. Each query must return **at least 1 row** to pass. Comments (lines starting with `--`) are ignored.
+
+```
+-- +sanity PreCheck      ← start of PreCheck block
+<SQL queries>
+-- +migrate Up           ← implicit end of PreCheck (next section marker)
+```
+
+```
+-- +sanity PostCheck     ← start of PostCheck block
+<SQL queries>
+-- +migrate Down         ← implicit end of PostCheck (next section marker)
+```
+
+The boundary between sanity block and the next section is **implicit** — the next `-- +migrate` marker automatically closes the sanity block.
+
+#### Full Example: Add Column with Sanity Check
+
 ```sql
--- 20250101000002-add-phone-column.sql
+-- 20260101000003-add-events-platform-columns.sql
+-- @allow: ALTER_TABLE_ADD
 
 -- +sanity PreCheck
--- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='phone'
--- END_CHECK
-
+-- 確認 events 表存在、platform 欄位尚未存在、country_code 欄位尚未存在
+SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events';
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='event_type';
+SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='platform');
 -- +migrate Up
-ALTER TABLE users ADD COLUMN phone VARCHAR(20) DEFAULT NULL;
-ALTER TABLE users ADD COLUMN phone_verified BOOLEAN DEFAULT FALSE;
-CREATE INDEX idx_users_phone ON users(phone);
+ALTER TABLE events
+    ADD COLUMN platform VARCHAR(50) DEFAULT NULL AFTER user_agent,
+    ADD COLUMN country_code CHAR(2) DEFAULT NULL AFTER platform;
+
+CREATE INDEX idx_events_platform ON events(platform);
 
 -- +sanity PostCheck
--- EXPECT_ROWS: SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='phone'
--- EXPECT_ROWS: SELECT 1 FROM information_schema.statistics WHERE table_name='users' AND index_name='idx_users_phone'
--- END_CHECK
-
+-- 確認新欄位和索引已成功建立
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='platform';
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='country_code';
+SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND INDEX_NAME='idx_events_platform';
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='platform' AND COLUMN_TYPE='varchar(50)';
 -- +migrate Down
-DROP INDEX idx_users_phone ON users;
-ALTER TABLE users DROP COLUMN phone_verified;
-ALTER TABLE users DROP COLUMN phone;
+DROP INDEX idx_events_platform ON events;
+ALTER TABLE events
+    DROP COLUMN country_code,
+    DROP COLUMN platform;
 ```
+
+#### Example: Extend Column Length
+
+```sql
+-- 20260101000004-extend-event-type-length.sql
+-- @allow: ALTER_TABLE_MODIFY,MODIFY_COLUMN
+
+-- +sanity PreCheck
+-- 確認欄位目前為 VARCHAR(100)，防止重複執行
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='event_type' AND CHARACTER_MAXIMUM_LENGTH=100;
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='daily_stats' AND COLUMN_NAME='metric_name' AND CHARACTER_MAXIMUM_LENGTH=100;
+-- +migrate Up
+ALTER TABLE events
+    MODIFY COLUMN event_type VARCHAR(200) NOT NULL;
+
+ALTER TABLE daily_stats
+    MODIFY COLUMN metric_name VARCHAR(200) NOT NULL;
+
+-- +sanity PostCheck
+-- 確認兩個欄位已成功擴展為 VARCHAR(200)
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='event_type' AND CHARACTER_MAXIMUM_LENGTH=200;
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='daily_stats' AND COLUMN_NAME='metric_name' AND CHARACTER_MAXIMUM_LENGTH=200;
+-- +migrate Down
+ALTER TABLE daily_stats
+    MODIFY COLUMN metric_name VARCHAR(100) NOT NULL;
+
+ALTER TABLE events
+    MODIFY COLUMN event_type VARCHAR(100) NOT NULL;
+```
+
+#### Example: Create Database (PostCheck only)
+
+```sql
+-- 20260101000000-create-database.sql
+
+-- +migrate Up
+CREATE DATABASE IF NOT EXISTS analytics
+  DEFAULT CHARACTER SET utf8mb4
+  DEFAULT COLLATE utf8mb4_unicode_ci;
+
+-- +sanity PostCheck
+-- 確認資料庫成功建立
+SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='analytics';
+-- +migrate Down
+DROP DATABASE IF EXISTS analytics;
+```
+
+> **Note**: PreCheck is omitted here because the adapter auto-creates the database before migrations run, making a NOT EXISTS check impossible to pass.
+
+#### Execution Phases
+
+When running `up --sanity-check`:
+
+| Phase | Description | On Failure |
+|---|---|---|
+| **Phase 1: PreCheck** | Run PreCheck queries before migration | Abort — migration is **not** executed |
+| **Phase 2: Execute** | Run the Up migration SQL | Auto-Rollback (execute Down section) |
+| **Phase 3: PostCheck** | Run PostCheck queries after migration | Auto-Rollback (execute Down section) |
+
+- Each sanity query must return **≥ 1 row** to pass
+- If PostCheck fails, the Down section is executed automatically to restore the previous state
+- If auto-rollback also fails, the error is reported and **manual intervention** is required
+
+#### CLI Usage
+
+```bash
+# Run with sanity check enabled
+node src/cli.js up --sanity-check -c config.js
+
+# Docker
+docker compose run --rm migrate up --sanity-check -c /app/databases/mariadb/production-server/ddl/analytics/config.js
+```
+
+#### SQL Syntax Validation for Sanity Blocks
+
+The `validate` command checks SQL syntax in **all 4 sections**: PreCheck, Up, PostCheck, and Down.
+
+```bash
+node src/cli.js validate -c config.js
+```
+
+| Section | Error Code | Description |
+|---|---|---|
+| Up | `SQL_SYNTAX_ERROR` | Syntax error in Up migration SQL |
+| Down | `SQL_SYNTAX_ERROR_DOWN` | Syntax error in Down rollback SQL |
+| PreCheck / PostCheck | `SANITY_SQL_SYNTAX_ERROR` | Syntax error in sanity block SQL |
 
 ---
 
@@ -1126,14 +1246,15 @@ validate pipeline
 
 ### What is checked
 
-The **UP section** of the file is extracted and parsed. If no `-- +migrate Up` marker is present (e.g. R__ files), the full file content is used.
+**All 4 sections** are extracted and parsed independently: PreCheck, Up, PostCheck, and Down. If no `-- +migrate Up` marker is present (e.g. R__ files), the full file content is used.
 
-| Scenario | Behaviour |
-|---|---|
-| Valid SQL | No error |
-| Syntax error (`SELCT`, missing `,`, etc.) | ❌ `SQL_SYNTAX_ERROR` — validation fails |
-| File contains `DELIMITER` keyword | ⚠️ Skipped with warning (stored procedure — see below) |
-| `-- @skip-syntax-check: true` annotation | ⚠️ Skipped with warning (opt-out) |
+| Section | Error Code | Behaviour |
+|---|---|---|
+| Up (or full file for R__) | `SQL_SYNTAX_ERROR` | ❌ Validation fails |
+| Down | `SQL_SYNTAX_ERROR_DOWN` | ❌ Validation fails |
+| PreCheck / PostCheck | `SANITY_SQL_SYNTAX_ERROR` | ❌ Validation fails |
+| File contains `DELIMITER` | — | ⚠️ Skipped with warning (per-section) |
+| `-- @skip-syntax-check: true` | — | ⚠️ Skipped entirely |
 
 ### Unsupported syntax — DELIMITER (Stored Procedures)
 

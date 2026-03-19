@@ -946,28 +946,148 @@ DROP TABLE IF EXISTS users;
 
 ### MariaDB/MySQL with Sanity Check (.sql)
 
+Sanity Check 讓你在每個 migration 加上 **PreCheck** 和 **PostCheck** SQL 查詢。啟用 `--sanity-check` 後，執行流程如下：
+
+```
+PreCheck → 執行 Migration (Up) → PostCheck
+   ↓ 失敗        ↓ 失敗               ↓ 失敗
+  中止執行    自動回滾 (Down)       自動回滾 (Down)
+```
+
+#### 語法
+
+直接寫原生 SQL — 每行一個 `SELECT`。每個查詢必須回傳**至少 1 行**才算通過。註解行（`--` 開頭）會被忽略。
+
+```
+-- +sanity PreCheck      ← PreCheck 區塊開始
+<SQL 查詢>
+-- +migrate Up           ← 隱式結束（下一個區段標記自動關閉）
+```
+
+```
+-- +sanity PostCheck     ← PostCheck 區塊開始
+<SQL 查詢>
+-- +migrate Down         ← 隱式結束（下一個區段標記自動關閉）
+```
+
+sanity 區塊和下一個區段之間的邊界是**隱式的** — 下一個 `-- +migrate` 標記會自動關閉前一個 sanity 區塊。
+
+#### 完整範例：新增欄位搭配 Sanity Check
+
 ```sql
--- 20250101000002-add-phone-column.sql
+-- 20260101000003-add-events-platform-columns.sql
+-- @allow: ALTER_TABLE_ADD
 
 -- +sanity PreCheck
--- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='phone'
--- END_CHECK
-
+-- 確認 events 表存在、platform 欄位尚未存在、country_code 欄位尚未存在
+SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events';
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='event_type';
+SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='platform');
 -- +migrate Up
-ALTER TABLE users ADD COLUMN phone VARCHAR(20) DEFAULT NULL;
-ALTER TABLE users ADD COLUMN phone_verified BOOLEAN DEFAULT FALSE;
-CREATE INDEX idx_users_phone ON users(phone);
+ALTER TABLE events
+    ADD COLUMN platform VARCHAR(50) DEFAULT NULL AFTER user_agent,
+    ADD COLUMN country_code CHAR(2) DEFAULT NULL AFTER platform;
+
+CREATE INDEX idx_events_platform ON events(platform);
 
 -- +sanity PostCheck
--- EXPECT_ROWS: SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='phone'
--- EXPECT_ROWS: SELECT 1 FROM information_schema.statistics WHERE table_name='users' AND index_name='idx_users_phone'
--- END_CHECK
-
+-- 確認新欄位和索引已成功建立
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='platform';
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='country_code';
+SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND INDEX_NAME='idx_events_platform';
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='platform' AND COLUMN_TYPE='varchar(50)';
 -- +migrate Down
-DROP INDEX idx_users_phone ON users;
-ALTER TABLE users DROP COLUMN phone_verified;
-ALTER TABLE users DROP COLUMN phone;
+DROP INDEX idx_events_platform ON events;
+ALTER TABLE events
+    DROP COLUMN country_code,
+    DROP COLUMN platform;
 ```
+
+#### 範例：擴展欄位長度
+
+```sql
+-- 20260101000004-extend-event-type-length.sql
+-- @allow: ALTER_TABLE_MODIFY,MODIFY_COLUMN
+
+-- +sanity PreCheck
+-- 確認欄位目前為 VARCHAR(100)，防止重複執行
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='event_type' AND CHARACTER_MAXIMUM_LENGTH=100;
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='daily_stats' AND COLUMN_NAME='metric_name' AND CHARACTER_MAXIMUM_LENGTH=100;
+-- +migrate Up
+ALTER TABLE events
+    MODIFY COLUMN event_type VARCHAR(200) NOT NULL;
+
+ALTER TABLE daily_stats
+    MODIFY COLUMN metric_name VARCHAR(200) NOT NULL;
+
+-- +sanity PostCheck
+-- 確認兩個欄位已成功擴展為 VARCHAR(200)
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='event_type' AND CHARACTER_MAXIMUM_LENGTH=200;
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='daily_stats' AND COLUMN_NAME='metric_name' AND CHARACTER_MAXIMUM_LENGTH=200;
+-- +migrate Down
+ALTER TABLE daily_stats
+    MODIFY COLUMN metric_name VARCHAR(100) NOT NULL;
+
+ALTER TABLE events
+    MODIFY COLUMN event_type VARCHAR(100) NOT NULL;
+```
+
+#### 範例：建立資料庫（僅 PostCheck）
+
+```sql
+-- 20260101000000-create-database.sql
+
+-- +migrate Up
+CREATE DATABASE IF NOT EXISTS analytics
+  DEFAULT CHARACTER SET utf8mb4
+  DEFAULT COLLATE utf8mb4_unicode_ci;
+
+-- +sanity PostCheck
+-- 確認資料庫成功建立
+SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='analytics';
+-- +migrate Down
+DROP DATABASE IF EXISTS analytics;
+```
+
+> **注意**：此處省略 PreCheck，因為 adapter 會在 migration 執行前自動建立資料庫，導致 NOT EXISTS 檢查不可能通過。
+
+#### 執行階段
+
+使用 `up --sanity-check` 時：
+
+| 階段 | 說明 | 失敗行為 |
+|---|---|---|
+| **Phase 1: PreCheck** | 執行前檢查查詢 | 中止 — migration **不會**執行 |
+| **Phase 2: Execute** | 執行 Up migration SQL | 自動回滾（執行 Down 區段） |
+| **Phase 3: PostCheck** | 執行後驗證查詢 | 自動回滾（執行 Down 區段） |
+
+- 每個 sanity 查詢必須回傳 **≥ 1 行**才算通過
+- PostCheck 失敗時，系統自動執行 Down 區段回復到先前狀態
+- 如果自動回滾也失敗，會報告錯誤並要求**人工介入**
+
+#### CLI 用法
+
+```bash
+# 啟用 sanity check 執行遷移
+node src/cli.js up --sanity-check -c config.js
+
+# Docker
+docker compose run --rm migrate up --sanity-check -c /app/databases/mariadb/production-server/ddl/analytics/config.js
+```
+
+#### Sanity 區塊的 SQL 語法驗證
+
+`validate` 指令會檢查 **全部 4 個區段**的 SQL 語法：PreCheck、Up、PostCheck、Down。
+
+```bash
+node src/cli.js validate -c config.js
+```
+
+| 區段 | 錯誤代碼 | 說明 |
+|---|---|---|
+| Up | `SQL_SYNTAX_ERROR` | Up migration SQL 語法錯誤 |
+| Down | `SQL_SYNTAX_ERROR_DOWN` | Down 回滾 SQL 語法錯誤 |
+| PreCheck / PostCheck | `SANITY_SQL_SYNTAX_ERROR` | Sanity 區塊 SQL 語法錯誤 |
 
 ---
 
