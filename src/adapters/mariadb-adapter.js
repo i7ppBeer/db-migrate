@@ -74,7 +74,8 @@ export class MariaDBAdapter extends BaseAdapter {
           dclHighRisk: [
             { pattern: /\bDROP\s+USER\b/i,                 code: 'DROP_USER',               message: '🔴 DCL HIGH RISK: DROP USER is irreversible, requires -- @allow-forbidden: true / DROP USER 為不可逆操作，需加 annotation 審批' },
             { pattern: /\bALTER\s+USER\b/i,                code: 'ALTER_USER',              message: '🔴 DCL HIGH RISK: ALTER USER (e.g. password change) requires -- @allow-forbidden: true / ALTER USER 含密碼變更，需加 annotation 審批' },
-            { pattern: /\bSET\s+PASSWORD\s+FOR\b/i,        code: 'SET_PASSWORD',            message: '🔴 DCL HIGH RISK: Password change requires -- @allow-forbidden: true / 密碼變更需加 annotation 審批' }
+            { pattern: /\bSET\s+PASSWORD\s+FOR\b/i,        code: 'SET_PASSWORD',            message: '🔴 DCL HIGH RISK: Password change requires -- @allow-forbidden: true / 密碼變更需加 annotation 審批' },
+            { pattern: /\bREVOKE\s+(?:ALL|SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|INDEX|EXECUTE|REFERENCES|TRIGGER|EVENT|PROCESS|RELOAD|SUPER|REPLICATION|SHOW)\s*(?:PRIVILEGES\s+)?(?:ON|,)/i, code: 'REVOKE', message: '🔴 DCL HIGH RISK: REVOKE may remove critical permissions, requires -- @allow-forbidden: true / REVOKE 可能移除關鍵權限，需加 annotation 審批' }
           ]
         } : {
           dcl: [
