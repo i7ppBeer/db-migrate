@@ -521,7 +521,9 @@ export class MariaDBAdapter extends BaseAdapter {
             const sanityResult = await checker.runWithSanityCheck({
               up: async () => {
                 if (upSQL) {
-                  await this.connection.execute(upSQL);
+                  const dbName = (this.config.mariadb || this.config).database;
+                  const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
+                  await this.connection.query(wrappedUpSQL);
                   const id = file.replace('.sql', '');
                   await this.connection.execute(
                     `INSERT INTO ${this.changelogTable} (id) VALUES (?)`,
@@ -531,7 +533,9 @@ export class MariaDBAdapter extends BaseAdapter {
               },
               down: async () => {
                 if (downSQL) {
-                  await this.connection.execute(downSQL);
+                  const dbName = (this.config.mariadb || this.config).database;
+                  const wrappedDownSQL = dbName ? `USE \`${dbName}\`;\n${downSQL}` : downSQL;
+                  await this.connection.query(wrappedDownSQL);
                   const id = file.replace('.sql', '');
                   await this.connection.execute(
                     `DELETE FROM ${this.changelogTable} WHERE id = ?`,
