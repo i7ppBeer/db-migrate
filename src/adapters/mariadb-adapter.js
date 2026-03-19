@@ -1065,13 +1065,23 @@ export class MariaDBAdapter extends BaseAdapter {
             });
             continue;
           }
-          // Forbid DROP DATABASE in UP section (dangerous!)
+          // Forbid DROP DATABASE in UP section unless explicitly approved via @allow-forbidden
           if (hasDropDatabaseInUp) {
-            forbiddenOps.push({
-              type: `forbidden-${category}`,
-              code: rule.code,
-              message: rule.message + ' (in UP section)'
-            });
+            const isAllowed = options.allowForbidden ||
+              (options.allowedCodes && options.allowedCodes.includes(rule.code));
+            if (isAllowed) {
+              warnings.push({
+                type: 'forbidden-allowed',
+                code: rule.code,
+                message: `⚠️ [FORCE ALLOWED] ${rule.message} (in UP section — EXPLICIT APPROVAL)`
+              });
+            } else {
+              forbiddenOps.push({
+                type: `forbidden-${category}`,
+                code: rule.code,
+                message: rule.message + ' (in UP section)'
+              });
+            }
             continue;
           }
         }

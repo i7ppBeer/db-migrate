@@ -752,13 +752,23 @@ export async function down(db, client) {
             continue;
           }
           
-          // Forbid dropDatabase in up() (dangerous!)
+          // Forbid dropDatabase in up() unless explicitly approved via @allow-forbidden
           if (hasDropDBInUp) {
-            forbiddenOps.push({
-              type: `forbidden-${category}`,
-              code: rule.code,
-              message: rule.message + ' (in up() function)'
-            });
+            const isAllowed = options.allowForbidden ||
+              (options.allowedCodes && options.allowedCodes.includes(rule.code));
+            if (isAllowed) {
+              warnings.push({
+                type: 'forbidden-allowed',
+                code: rule.code,
+                message: `⚠️ [FORCE ALLOWED] ${rule.message} (in up() function — EXPLICIT APPROVAL)`
+              });
+            } else {
+              forbiddenOps.push({
+                type: `forbidden-${category}`,
+                code: rule.code,
+                message: rule.message + ' (in up() function)'
+              });
+            }
             continue;
           }
         }
