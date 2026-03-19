@@ -133,10 +133,16 @@ export class RepeatableRunner {
   }
 
   /**
-   * Generate a cryptographically random 16-character password.
+   * Generate a cryptographically random password.
    *
-   * Character set: a-z  A-Z  0-9  plus special chars  - ~
-   * These two special chars are safe across ALL of:
+   * Character sets and length are configurable via environment variables:
+   *   DDL_MIGRATE_PASSWORD_LENGTH   - total length            (default: 16, min: 8)
+   *   DDL_MIGRATE_PASSWORD_SPECIAL  - special character set   (default: "-~")
+   *   DDL_MIGRATE_PASSWORD_LOWER    - lowercase character set (default: "abcdefghijklmnopqrstuvwxyz")
+   *   DDL_MIGRATE_PASSWORD_UPPER    - uppercase character set (default: "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+   *   DDL_MIGRATE_PASSWORD_DIGITS   - digit character set     (default: "0123456789")
+   *
+   * The default special chars (-~) are safe across ALL of:
    *   - MySQL / MariaDB CLI   (mysql -p'...')
    *   - mongosh CLI           (--password '...')
    *   - MongoDB URI           mongodb://user:PWD@host  (no percent-encode needed)
@@ -145,20 +151,31 @@ export class RepeatableRunner {
    *
    * Guarantees per password: ≥2 lower, ≥2 upper, ≥2 digit, 1-2 special.
    *
-   * @returns {string} 16-character password
+   * @returns {string} password of configured length
    */
   generateSecurePassword() {
-    const lower   = 'abcdefghijklmnopqrstuvwxyz';
-    const upper   = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-    const digits  = '0123456789';
-    const special = '-~';
+    // --- Resolve character sets from env vars (fall back to safe defaults) ---
+    const lower   = process.env.DDL_MIGRATE_PASSWORD_LOWER?.trim()   || 'abcdefghijklmnopqrstuvwxyz';
+    const upper   = process.env.DDL_MIGRATE_PASSWORD_UPPER?.trim()   || 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const digits  = process.env.DDL_MIGRATE_PASSWORD_DIGITS?.trim()  || '0123456789';
+    const special = process.env.DDL_MIGRATE_PASSWORD_SPECIAL?.trim() || '-~';
+
+    // Validate: each charset must be non-empty
+    if (!lower)   throw new Error('[DDL_MIGRATE_PASSWORD_LOWER] must not be empty');
+    if (!upper)   throw new Error('[DDL_MIGRATE_PASSWORD_UPPER] must not be empty');
+    if (!digits)  throw new Error('[DDL_MIGRATE_PASSWORD_DIGITS] must not be empty');
+    if (!special) throw new Error('[DDL_MIGRATE_PASSWORD_SPECIAL] must not be empty');
+
+    // --- Resolve password length (minimum 8 to keep guarantee slots sensible) ---
+    const rawLength = parseInt(process.env.DDL_MIGRATE_PASSWORD_LENGTH || '16', 10);
+    const length = (!isNaN(rawLength) && rawLength >= 8) ? rawLength : 16;
 
     const pick = (charset, n) => {
       const bytes = crypto.randomBytes(n);
       return Array.from(bytes).map(b => charset[b % charset.length]);
     };
 
-    // Guaranteed slots: 2 lower + 2 upper + 2 digit + 1 special = 7
+    // Guaranteed slots: 2 lower + 2 upper + 2 digit + 1 special = 7 (or 8 with bonus special)
     const required = [
       ...pick(lower,   2),
       ...pick(upper,   2),
@@ -170,8 +187,8 @@ export class RepeatableRunner {
 
     // Pad remaining slots with alphanumeric only
     const alphaNum  = lower + upper + digits;
-    const remaining = 16 - required.length;
-    const all = [...required, ...pick(alphaNum, remaining)];
+    const remaining = length - required.length;
+    const all = [...required, ...(remaining > 0 ? pick(alphaNum, remaining) : [])];
 
     // Fisher-Yates shuffle using crypto random
     for (let i = all.length - 1; i > 0; i--) {
