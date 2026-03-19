@@ -15,6 +15,7 @@
   - **Repeatable (DCL)**: Checksum-driven, auto-detect changes and re-execute
 - **Unified CLI**: Single command-line interface for all database migrations
 - **Validation Rules**: Auto-detect dangerous operations, empty down(), orphaned drops, DCL operations, etc.
+  - **SQL Syntax Check (MariaDB)**: All `.sql` files are pre-validated by `node-sql-parser` (MariaDB dialect) before rule checks — syntax errors are caught early
   - **Smart Allowance**: CREATE DATABASE allowed in UP, DROP DATABASE allowed in DOWN (when UP creates it)
   - **Batch Validation**: `validate-all` command validates entire directory of DDL + DCL at once
 - **Auto Database Creation**: MariaDB adapter auto-creates database before connection (dual guarantee)
@@ -1108,6 +1109,65 @@ Automatically detect the following issues:
 - `DROP DATABASE` in DOWN section auto-allowed (when corresponding UP has CREATE DATABASE)
 - `DROP DATABASE` in UP section always prohibited (prevent accidental deletion)
 - MongoDB `dropDatabase()` in `down()` function auto-allowed (when `up()` initializes database)
+
+---
+
+## 🔍 SQL Syntax Pre-Validation (MariaDB)
+
+Every `.sql` migration file goes through **`node-sql-parser`** (MariaDB dialect) as the **first** validation step — before any dangerous-op or structural rules run. This catches raw syntax mistakes early.
+
+```
+validate pipeline
+  └─ Step 0: SQL syntax check (node-sql-parser, MariaDB dialect)
+  └─ Step 1: forbidden / dangerous operation rules
+  └─ Step 2: structural checks (orphan drops, empty DOWN, etc.)
+  └─ Step 3: performance & suspicious-name checks
+```
+
+### What is checked
+
+The **UP section** of the file is extracted and parsed. If no `-- +migrate Up` marker is present (e.g. R__ files), the full file content is used.
+
+| Scenario | Behaviour |
+|---|---|
+| Valid SQL | No error |
+| Syntax error (`SELCT`, missing `,`, etc.) | ❌ `SQL_SYNTAX_ERROR` — validation fails |
+| File contains `DELIMITER` keyword | ⚠️ Skipped with warning (stored procedure — see below) |
+| `-- @skip-syntax-check: true` annotation | ⚠️ Skipped with warning (opt-out) |
+
+### Unsupported syntax — DELIMITER (Stored Procedures)
+
+`node-sql-parser` does **not** support MariaDB's `DELIMITER` syntax used in stored procedures / triggers. Files containing it are **automatically skipped** from syntax check and produce a warning instead of a false error:
+
+```sql
+-- +migrate Up
+DELIMITER //
+CREATE PROCEDURE my_proc()
+BEGIN
+  SELECT 1;
+END //
+DELIMITER ;
+```
+
+Output:
+```
+[OK] my-procedure.sql
+   ⚠️  ⚠️ SQL syntax check skipped: DELIMITER syntax detected (stored procedure — not supported by parser)
+```
+
+The file still goes through all other validation rules (dangerous ops, structural checks, etc.); only the syntax check is skipped.
+
+### Opt-out annotation
+
+If you have other non-standard syntax that the parser doesn't handle (e.g. MariaDB-specific extensions), add the annotation at the **very top** of the file:
+
+```sql
+-- @skip-syntax-check: true
+-- +migrate Up
+-- your SQL here ...
+```
+
+> ⚠️ Use sparingly. Prefer fixing the syntax or using `DELIMITER` skip (automatic). This annotation bypasses syntax check entirely.
 
 ---
 
