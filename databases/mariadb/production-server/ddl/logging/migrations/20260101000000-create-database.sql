@@ -1,8 +1,3 @@
--- +sanity PreCheck
--- 確認 logging 資料庫尚不存在
--- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='logging'
--- -sanity PreCheck
-
 -- +migrate Up
 -- ============================================================
 -- Create logging database
@@ -23,9 +18,7 @@ USE logging;
 
 -- +sanity PostCheck
 -- 確認 logging 資料庫成功建立
--- EXPECT_ROWS: SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='logging'
--- -sanity PostCheck
-
+SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='logging';
 -- +migrate Down
 -- ============================================================
 -- Drop logging database

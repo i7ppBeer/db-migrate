@@ -269,7 +269,365 @@ DROP TABLE users;
       const result = await adapter.executeSanityCheck(mockConnection, sanitySection);
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('EXPECT_ROWS failed');
+      expect(result.error).toContain('Sanity check failed');
+    });
+  });
+
+  describe('extractSanitySection — implicit close (no -- -sanity)', () => {
+    it('should end at next -- +migrate Up', () => {
+      const sql = `
+-- +sanity PreCheck
+SELECT 1 FROM information_schema.TABLES WHERE TABLE_NAME='users';
+
+-- +migrate Up
+CREATE TABLE users (id INT);
+
+-- +migrate Down
+DROP TABLE users;
+`;
+      const result = adapter.extractSanitySection(sql, 'PreCheck');
+      expect(result).toContain("SELECT 1 FROM information_schema.TABLES");
+      expect(result).not.toContain('CREATE TABLE');
+    });
+
+    it('should end at next -- +sanity PostCheck', () => {
+      const sql = `
+-- +sanity PreCheck
+SELECT 1 FROM information_schema.TABLES WHERE TABLE_NAME='users';
+
+-- +sanity PostCheck
+SELECT 1 FROM information_schema.COLUMNS WHERE COLUMN_NAME='email';
+
+-- +migrate Down
+DROP TABLE users;
+`;
+      const result = adapter.extractSanitySection(sql, 'PreCheck');
+      expect(result).toContain("TABLE_NAME='users'");
+      expect(result).not.toContain("COLUMN_NAME='email'");
+    });
+
+    it('should work when sanity block is at end of file (no trailing marker)', () => {
+      const sql = `
+-- +migrate Up
+CREATE TABLE users (id INT);
+
+-- +sanity PostCheck
+SELECT 1 FROM information_schema.TABLES WHERE TABLE_NAME='users';
+`;
+      const result = adapter.extractSanitySection(sql, 'PostCheck');
+      expect(result).toContain("TABLE_NAME='users'");
+    });
+
+    it('should prefer explicit -- -sanity close over implicit', () => {
+      const sql = `
+-- +sanity PreCheck
+SELECT 1 FROM t1;
+-- -sanity PreCheck
+
+-- +migrate Up
+CREATE TABLE t1 (id INT);
+`;
+      const result = adapter.extractSanitySection(sql, 'PreCheck');
+      expect(result).toBe('SELECT 1 FROM t1;');
+    });
+  });
+
+  describe('executeSanityCheck — raw SQL format', () => {
+    let mockConnection;
+
+    beforeEach(() => {
+      mockConnection = {
+        execute: vi.fn()
+      };
+    });
+
+    it('should execute bare SQL as EXPECT_ROWS (pass)', async () => {
+      mockConnection.execute.mockResolvedValue([[{ r: 1 }]]);
+      const section = `SELECT 1 FROM users;`;
+      const result = await adapter.executeSanityCheck(mockConnection, section);
+      expect(result.success).toBe(true);
+      expect(mockConnection.execute).toHaveBeenCalledWith('SELECT 1 FROM users');
+    });
+
+    it('should fail bare SQL when 0 rows returned', async () => {
+      mockConnection.execute.mockResolvedValue([[]]);
+      const section = `SELECT 1 FROM users;`;
+      const result = await adapter.executeSanityCheck(mockConnection, section);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Sanity check failed');
+    });
+
+    it('should split multiple statements by semicolon', async () => {
+      mockConnection.execute
+        .mockResolvedValueOnce([[{ r: 1 }]])
+        .mockResolvedValueOnce([[{ r: 1 }]]);
+      const section = `SELECT 1 FROM t1;\nSELECT 1 FROM t2;`;
+      const result = await adapter.executeSanityCheck(mockConnection, section);
+      expect(result.success).toBe(true);
+      expect(mockConnection.execute).toHaveBeenCalledTimes(2);
+    });
+
+    it('should support multi-line SQL split by semicolon', async () => {
+      mockConnection.execute.mockResolvedValue([[{ r: 1 }]]);
+      const section = `
+SELECT 1 FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA='analytics'
+    AND TABLE_NAME='events'
+    AND COLUMN_NAME='platform';
+`;
+      const result = await adapter.executeSanityCheck(mockConnection, section);
+      expect(result.success).toBe(true);
+      expect(mockConnection.execute).toHaveBeenCalledTimes(1);
+      const calledSQL = mockConnection.execute.mock.calls[0][0];
+      expect(calledSQL).toContain("COLUMN_NAME='platform'");
+    });
+
+    it('should handle NOT EXISTS wrapper (zero rows = fail)', async () => {
+      // NOT EXISTS returns 1 row when subquery has 0 rows → pass
+      mockConnection.execute.mockResolvedValue([[{ r: 1 }]]);
+      const section = `
+SELECT 1 WHERE NOT EXISTS (
+  SELECT 1 FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA='analytics' AND COLUMN_NAME='platform'
+);
+`;
+      const result = await adapter.executeSanityCheck(mockConnection, section);
+      expect(result.success).toBe(true);
+    });
+
+    it('should mix legacy directives and raw SQL', async () => {
+      mockConnection.execute
+        .mockResolvedValueOnce([[{ r: 1 }]])  // EXPECT_ROWS
+        .mockResolvedValueOnce([[]]);           // EXPECT_NO_ROWS
+      // Legacy directives processed first (line by line), then raw SQL buffer (empty here)
+      const section = `
+-- EXPECT_ROWS: SELECT 1 FROM t1
+-- EXPECT_NO_ROWS: SELECT 1 FROM t2
+`;
+      const result = await adapter.executeSanityCheck(mockConnection, section);
+      expect(result.success).toBe(true);
+      expect(result.details).toHaveLength(2);
+    });
+
+    it('should skip comment lines in raw SQL', async () => {
+      mockConnection.execute.mockResolvedValue([[{ r: 1 }]]);
+      const section = `
+-- Check that the table exists
+SELECT 1 FROM t1;
+`;
+      const result = await adapter.executeSanityCheck(mockConnection, section);
+      expect(result.success).toBe(true);
+      expect(mockConnection.execute).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('stripSanityBlocks', () => {
+    it('should strip explicit close blocks', () => {
+      const content = `
+-- +sanity PreCheck
+SELECT 1 FROM t;
+-- -sanity PreCheck
+
+-- +migrate Up
+CREATE TABLE t (id INT);
+`;
+      const result = adapter.stripSanityBlocks(content);
+      expect(result).not.toContain('SELECT 1 FROM t;');
+      expect(result).toContain('CREATE TABLE t (id INT)');
+    });
+
+    it('should strip END_CHECK close blocks', () => {
+      const content = `
+-- +sanity PreCheck
+-- EXPECT_ROWS: SELECT 1 FROM t
+-- END_CHECK
+
+-- +migrate Up
+CREATE TABLE t (id INT);
+`;
+      const result = adapter.stripSanityBlocks(content);
+      expect(result).not.toContain('EXPECT_ROWS');
+      expect(result).toContain('CREATE TABLE t (id INT)');
+    });
+
+    it('should strip implicit close blocks (ends at -- +migrate)', () => {
+      const content = `
+-- +sanity PreCheck
+SELECT 1 FROM t;
+
+-- +migrate Up
+CREATE TABLE t (id INT);
+`;
+      const result = adapter.stripSanityBlocks(content);
+      expect(result).not.toContain('SELECT 1 FROM t;');
+      expect(result).toContain('CREATE TABLE t (id INT)');
+    });
+  });
+
+  describe('extractSection — sanity block stripping', () => {
+    it('should not include PreCheck raw SQL in Up section', () => {
+      const content = `
+-- +sanity PreCheck
+SELECT 1 FROM information_schema.TABLES WHERE TABLE_NAME='users';
+
+-- +migrate Up
+ALTER TABLE users ADD COLUMN email VARCHAR(255);
+
+-- +sanity PostCheck
+SELECT 1 FROM information_schema.COLUMNS WHERE COLUMN_NAME='email';
+
+-- +migrate Down
+ALTER TABLE users DROP COLUMN email;
+`;
+      const up = adapter.extractSection(content, 'Up');
+      expect(up).toContain('ALTER TABLE users ADD COLUMN email');
+      expect(up).not.toContain("TABLE_NAME='users'");
+      expect(up).not.toContain("COLUMN_NAME='email'");
+    });
+
+    it('should not include PostCheck raw SQL in Down section', () => {
+      const content = `
+-- +migrate Up
+ALTER TABLE users ADD COLUMN email VARCHAR(255);
+
+-- +sanity PostCheck
+SELECT 1 FROM information_schema.COLUMNS WHERE COLUMN_NAME='email';
+
+-- +migrate Down
+ALTER TABLE users DROP COLUMN email;
+`;
+      const down = adapter.extractSection(content, 'Down');
+      expect(down).toContain('ALTER TABLE users DROP COLUMN email');
+      expect(down).not.toContain("COLUMN_NAME='email'");
+    });
+  });
+
+  describe('validateSQLSyntax — sanity block SQL check', () => {
+    it('should catch syntax error in PostCheck raw SQL (e.g. WHER instead of WHERE)', () => {
+      const sql = `
+-- +sanity PreCheck
+SELECT 1 FROM information_schema.TABLES WHERE TABLE_NAME='events';
+
+-- +migrate Up
+CREATE TABLE events (id INT);
+
+-- +sanity PostCheck
+SELECT 1 FROM information_schema.TABLES WHER TABLE_NAME='events';
+
+-- +migrate Down
+DROP TABLE events;
+`;
+      const result = adapter.validateSQLSyntax(sql, 'test.sql');
+      expect(result.errors.some(e => e.code === 'SANITY_SQL_SYNTAX_ERROR')).toBe(true);
+      expect(result.errors.some(e => e.message.includes('PostCheck'))).toBe(true);
+    });
+
+    it('should catch syntax error in PreCheck raw SQL', () => {
+      const sql = `
+-- +sanity PreCheck
+SELEC 1 FROM information_schema.TABLES WHERE TABLE_NAME='events';
+
+-- +migrate Up
+CREATE TABLE events (id INT);
+
+-- +migrate Down
+DROP TABLE events;
+`;
+      const result = adapter.validateSQLSyntax(sql, 'test.sql');
+      expect(result.errors.some(e => e.code === 'SANITY_SQL_SYNTAX_ERROR')).toBe(true);
+      expect(result.errors.some(e => e.message.includes('PreCheck'))).toBe(true);
+    });
+
+    it('should catch syntax error in legacy EXPECT_ROWS directive', () => {
+      const sql = `
+-- +sanity PostCheck
+-- EXPECT_ROWS: SELECT 1 FORM information_schema.TABLES WHERE TABLE_NAME='events'
+
+-- +migrate Down
+DROP TABLE events;
+`;
+      const result = adapter.validateSQLSyntax(sql, 'test.sql');
+      expect(result.errors.some(e => e.code === 'SANITY_SQL_SYNTAX_ERROR')).toBe(true);
+    });
+
+    it('should pass when sanity SQL is valid', () => {
+      const sql = `
+-- +sanity PreCheck
+SELECT 1 FROM information_schema.TABLES WHERE TABLE_NAME='events';
+
+-- +migrate Up
+CREATE TABLE events (id INT);
+
+-- +sanity PostCheck
+SELECT 1 FROM information_schema.TABLES WHERE TABLE_NAME='events';
+
+-- +migrate Down
+DROP TABLE events;
+`;
+      const result = adapter.validateSQLSyntax(sql, 'test.sql');
+      expect(result.errors.filter(e => e.code === 'SANITY_SQL_SYNTAX_ERROR')).toHaveLength(0);
+    });
+
+    it('should not report sanity errors when @skip-syntax-check is set', () => {
+      const sql = `
+-- @skip-syntax-check: true
+-- +sanity PostCheck
+SELECT 1 FROM information_schema.TABLES WHER TABLE_NAME='events';
+
+-- +migrate Down
+DROP TABLE events;
+`;
+      const result = adapter.validateSQLSyntax(sql, 'test.sql');
+      expect(result.errors).toHaveLength(0);
+      expect(result.warnings.some(w => w.type === 'syntax-check-skipped')).toBe(true);
+    });
+
+    it('should catch syntax error in Down section (e.g. ALER TABLE)', () => {
+      const sql = `
+-- +migrate Up
+CREATE TABLE events (id INT);
+
+-- +migrate Down
+ALER TABLE events DROP COLUMN id;
+`;
+      const result = adapter.validateSQLSyntax(sql, 'test.sql');
+      expect(result.errors.some(e => e.code === 'SQL_SYNTAX_ERROR_DOWN')).toBe(true);
+      expect(result.errors.some(e => e.message.includes('Down'))).toBe(true);
+    });
+
+    it('should pass when both Up and Down are valid', () => {
+      const sql = `
+-- +migrate Up
+CREATE TABLE events (id INT);
+
+-- +migrate Down
+DROP TABLE events;
+`;
+      const result = adapter.validateSQLSyntax(sql, 'test.sql');
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it('should catch errors in all four sections simultaneously', () => {
+      const sql = `
+-- +sanity PreCheck
+SELEC 1 FROM t;
+
+-- +migrate Up
+CREAT TABLE t (id INT);
+
+-- +sanity PostCheck
+SELEC 1 FROM t;
+
+-- +migrate Down
+DRO TABLE t;
+`;
+      const result = adapter.validateSQLSyntax(sql, 'test.sql');
+      // Up error + Down error + PreCheck error + PostCheck error = 4
+      expect(result.errors.length).toBe(4);
+      expect(result.errors.some(e => e.code === 'SQL_SYNTAX_ERROR')).toBe(true);
+      expect(result.errors.some(e => e.code === 'SQL_SYNTAX_ERROR_DOWN')).toBe(true);
+      expect(result.errors.some(e => e.message.includes('PreCheck'))).toBe(true);
+      expect(result.errors.some(e => e.message.includes('PostCheck'))).toBe(true);
     });
   });
 

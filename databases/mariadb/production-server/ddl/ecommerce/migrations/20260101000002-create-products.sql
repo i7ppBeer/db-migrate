@@ -1,9 +1,7 @@
 -- +sanity PreCheck
 -- 確認前置依賴 users 表已存在，且 products 表尚未建立
--- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='users'
--- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products'
--- -sanity PreCheck
-
+SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='users';
+SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products');
 -- +migrate Up
 -- Create products table for ecommerce database
 
@@ -25,12 +23,10 @@ CREATE TABLE IF NOT EXISTS products (
 
 -- +sanity PostCheck
 -- 確認 products 表、sku 欄位及關鍵索引成功建立
--- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products'
--- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products' AND COLUMN_NAME='sku'
--- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products' AND COLUMN_NAME='price'
--- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products' AND INDEX_NAME='idx_sku'
--- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products' AND INDEX_NAME='idx_category'
--- -sanity PostCheck
-
+SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products';
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products' AND COLUMN_NAME='sku';
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products' AND COLUMN_NAME='price';
+SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products' AND INDEX_NAME='idx_sku';
+SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='ecommerce' AND TABLE_NAME='products' AND INDEX_NAME='idx_category';
 -- +migrate Down
 DROP TABLE IF EXISTS products;

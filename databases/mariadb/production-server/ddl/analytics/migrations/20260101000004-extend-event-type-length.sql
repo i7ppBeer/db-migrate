@@ -3,10 +3,8 @@
 
 -- +sanity PreCheck
 -- 確認欄位目前為 VARCHAR(100)，防止重複執行
--- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='event_type' AND CHARACTER_MAXIMUM_LENGTH=100
--- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='daily_stats' AND COLUMN_NAME='metric_name' AND CHARACTER_MAXIMUM_LENGTH=100
--- -sanity PreCheck
-
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='event_type' AND CHARACTER_MAXIMUM_LENGTH=100;
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='daily_stats' AND COLUMN_NAME='metric_name' AND CHARACTER_MAXIMUM_LENGTH=100;
 -- +migrate Up
 -- Extend event_type column from VARCHAR(100) to VARCHAR(200)
 -- to support longer namespaced event names (e.g., "checkout.payment.credit_card.failed")
@@ -20,10 +18,8 @@ ALTER TABLE daily_stats
 
 -- +sanity PostCheck
 -- 確認兩個欄位已成功擴展為 VARCHAR(200)
--- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='event_type' AND CHARACTER_MAXIMUM_LENGTH=200
--- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='daily_stats' AND COLUMN_NAME='metric_name' AND CHARACTER_MAXIMUM_LENGTH=200
--- -sanity PostCheck
-
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='events' AND COLUMN_NAME='event_type' AND CHARACTER_MAXIMUM_LENGTH=200;
+SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='analytics' AND TABLE_NAME='daily_stats' AND COLUMN_NAME='metric_name' AND CHARACTER_MAXIMUM_LENGTH=200;
 -- +migrate Down
 ALTER TABLE daily_stats
     MODIFY COLUMN metric_name VARCHAR(100) NOT NULL;

@@ -2,9 +2,7 @@
 
 -- +sanity PreCheck
 -- 確認 app_logs 表尚不存在
--- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs'
--- -sanity PreCheck
-
+SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs');
 -- +migrate Up
 -- Create app_logs table for application logging
 
@@ -25,11 +23,9 @@ CREATE TABLE IF NOT EXISTS app_logs (
 
 -- +sanity PostCheck
 -- 確認 app_logs 表及關鍵索引成功建立
--- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs'
--- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs' AND INDEX_NAME='idx_level'
--- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs' AND INDEX_NAME='idx_service'
--- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs' AND INDEX_NAME='idx_trace_id'
--- -sanity PostCheck
-
+SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs';
+SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs' AND INDEX_NAME='idx_level';
+SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs' AND INDEX_NAME='idx_service';
+SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='logging' AND TABLE_NAME='app_logs' AND INDEX_NAME='idx_trace_id';
 -- +migrate Down
 DROP TABLE IF EXISTS app_logs;

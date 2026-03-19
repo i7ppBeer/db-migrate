@@ -591,28 +591,39 @@ export class MariaDBAdapter extends BaseAdapter {
 
   /**
    * Extract sanity check section from SQL content
-   * Supports two formats:
-   * 1. New format: -- +sanity PreCheck ... -- -sanity PreCheck
-   * 2. Test format: -- +sanity PreCheck ... -- END_CHECK
+   * Supports three formats (in priority order):
+   * 1. Explicit close: -- +sanity PreCheck ... -- -sanity PreCheck
+   * 2. END_CHECK close: -- +sanity PreCheck ... -- END_CHECK
+   * 3. Implicit close: -- +sanity PreCheck ... (ends at next -- +migrate or -- +sanity)
    */
   extractSanitySection(content, sectionName) {
-    // Try new format first: -- +sanity ... -- -sanity
-    const newFormatRegex = new RegExp(
+    // Try explicit close first: -- +sanity ... -- -sanity
+    const explicitRegex = new RegExp(
       `--\\s*\\+sanity\\s+${sectionName}\\s*\\n([\\s\\S]*?)--\\s*-sanity\\s+${sectionName}`,
       'i'
     );
-    let match = content.match(newFormatRegex);
+    let match = content.match(explicitRegex);
     if (match) {
       return match[1].trim();
     }
     
-    // Try test format: -- +sanity ... -- END_CHECK
-    const testFormatRegex = new RegExp(
+    // Try END_CHECK close: -- +sanity ... -- END_CHECK
+    const endCheckRegex = new RegExp(
       `--\\s*\\+sanity\\s+${sectionName}\\s*\\n([\\s\\S]*?)--\\s*END_CHECK`,
       'i'
     );
-    match = content.match(testFormatRegex);
+    match = content.match(endCheckRegex);
     if (match) {
+      return match[1].trim();
+    }
+
+    // Try implicit close: -- +sanity ... ends at next -- +migrate or -- +sanity
+    const implicitRegex = new RegExp(
+      `--\\s*\\+sanity\\s+${sectionName}\\s*\\n([\\s\\S]*?)(?=--\\s*\\+migrate|--\\s*\\+sanity|$)`,
+      'i'
+    );
+    match = content.match(implicitRegex);
+    if (match && match[1].trim()) {
       return match[1].trim();
     }
     
@@ -620,77 +631,144 @@ export class MariaDBAdapter extends BaseAdapter {
   }
 
   /**
-   * Execute sanity check section and interpret results
-   * Supports EXPECT_ROWS / EXPECT_NO_ROWS directives
+   * Strip all sanity check blocks from SQL content.
+   * Removes everything between -- +sanity ... and its closing boundary
+   * (-- -sanity, -- END_CHECK, or next -- +migrate / -- +sanity).
+   * Used to prevent raw SQL in sanity blocks from leaking into Up/Down sections.
+   */
+  stripSanityBlocks(content) {
+    // Strip explicit close: -- +sanity ... -- -sanity ...
+    let result = content.replace(
+      /--\s*\+sanity\s+\w+\s*\n[\s\S]*?--\s*-sanity\s+\w+[^\n]*/gi,
+      ''
+    );
+    // Strip END_CHECK close: -- +sanity ... -- END_CHECK
+    result = result.replace(
+      /--\s*\+sanity\s+\w+\s*\n[\s\S]*?--\s*END_CHECK[^\n]*/gi,
+      ''
+    );
+    // Strip implicit close: -- +sanity ... up to next -- +migrate or -- +sanity
+    result = result.replace(
+      /--\s*\+sanity\s+\w+\s*\n[\s\S]*?(?=--\s*\+migrate|--\s*\+sanity|$)/gi,
+      ''
+    );
+    return result;
+  }
+
+  /**
+   * Execute sanity check section and interpret results.
+   *
+   * Supports two formats (can be mixed):
+   * 1. Legacy directive format:
+   *      -- EXPECT_ROWS: SELECT 1 FROM t;
+   *      -- EXPECT_NO_ROWS: SELECT 1 FROM t;
+   * 2. Raw SQL format (default = EXPECT_ROWS):
+   *      SELECT 1 FROM information_schema.COLUMNS
+   *        WHERE COLUMN_NAME='platform';
+   *    Statements are split by ';'. Multi-line SQL is supported.
+   *    0 rows returned → check fails → triggers rollback.
+   *
    * Returns { success: true/false, error: string, details: [] }
    */
   async executeSanityCheck(connection, sanitySection) {
-    // Use provided connection or instance connection
     const conn = connection || this.connection;
     const details = [];
-    
-    // Parse lines for EXPECT_ROWS / EXPECT_NO_ROWS directives
+
+    // Phase 1: Process legacy -- EXPECT_ROWS: / -- EXPECT_NO_ROWS: directives
+    // Phase 2: Collect remaining raw SQL lines and split by ';'
+    const rawSQLBuffer = [];
     const lines = sanitySection.split('\n');
     
     for (const line of lines) {
       const trimmedLine = line.trim();
       
-      // Skip empty lines and pure comments
-      if (!trimmedLine || trimmedLine === '--') continue;
-      
-      // Parse EXPECT_ROWS directive
+      // Skip empty lines
+      if (!trimmedLine) continue;
+
+      // Parse legacy EXPECT_ROWS directive
       const expectRowsMatch = trimmedLine.match(/^--\s*EXPECT_ROWS:\s*(.+)$/i);
       if (expectRowsMatch) {
-        const sql = expectRowsMatch[1].trim();
-        try {
-          const [rows] = await conn.execute(sql);
-          if (rows.length === 0) {
-            return {
-              success: false,
-              error: `EXPECT_ROWS failed: Query returned no rows - ${sql}`,
-              details
-            };
-          }
-          details.push(`✓ EXPECT_ROWS passed: ${rows.length} row(s)`);
-        } catch (error) {
-          return {
-            success: false,
-            error: `EXPECT_ROWS SQL error: ${error.message}`,
-            details
-          };
-        }
+        const sql = expectRowsMatch[1].trim().replace(/;$/, '');
+        const result = await this._execExpectRows(conn, sql, details);
+        if (result) return result; // failed
         continue;
       }
       
-      // Parse EXPECT_NO_ROWS directive
+      // Parse legacy EXPECT_NO_ROWS directive
       const expectNoRowsMatch = trimmedLine.match(/^--\s*EXPECT_NO_ROWS:\s*(.+)$/i);
       if (expectNoRowsMatch) {
-        const sql = expectNoRowsMatch[1].trim();
-        try {
-          const [rows] = await conn.execute(sql);
-          if (rows.length > 0) {
-            return {
-              success: false,
-              error: `EXPECT_NO_ROWS failed: Query returned ${rows.length} row(s) - ${sql}`,
-              details
-            };
-          }
-          details.push(`✓ EXPECT_NO_ROWS passed: 0 rows`);
-        } catch (error) {
-          return {
-            success: false,
-            error: `EXPECT_NO_ROWS SQL error: ${error.message}`,
-            details
-          };
-        }
+        const sql = expectNoRowsMatch[1].trim().replace(/;$/, '');
+        const result = await this._execExpectNoRows(conn, sql, details);
+        if (result) return result; // failed
         continue;
+      }
+
+      // Skip pure comment lines (not EXPECT directives)
+      if (/^--/.test(trimmedLine)) continue;
+
+      // Collect raw SQL lines
+      rawSQLBuffer.push(line);
+    }
+
+    // Phase 2: Process raw SQL buffer — split by ';' and execute each
+    if (rawSQLBuffer.length > 0) {
+      const rawSQL = rawSQLBuffer.join('\n');
+      const statements = rawSQL
+        .split(';')
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+
+      for (const sql of statements) {
+        const result = await this._execExpectRows(conn, sql, details);
+        if (result) return result; // failed
       }
     }
     
-    return {
-      success: true,
-      details
-    };
+    return { success: true, details };
+  }
+
+  /** @private Execute a single EXPECT_ROWS check. Returns failure object or null on success. */
+  async _execExpectRows(conn, sql, details) {
+    try {
+      const [rows] = await conn.execute(sql);
+      if (rows.length === 0) {
+        return {
+          success: false,
+          error: `Sanity check failed: Query returned no rows - ${sql.replace(/\s+/g, ' ').slice(0, 200)}`,
+          details
+        };
+      }
+      details.push(`✓ Check passed: ${rows.length} row(s)`);
+      return null;
+    } catch (error) {
+      return {
+        success: false,
+        error: `Sanity check SQL error: ${error.message}`,
+        details
+      };
+    }
+  }
+
+  /** @private Execute a single EXPECT_NO_ROWS check. Returns failure object or null on success. */
+  async _execExpectNoRows(conn, sql, details) {
+    try {
+      const [rows] = await conn.execute(sql);
+      if (rows.length > 0) {
+        return {
+          success: false,
+          error: `EXPECT_NO_ROWS failed: Query returned ${rows.length} row(s) - ${sql.replace(/\s+/g, ' ').slice(0, 200)}`,
+          details
+        };
+      }
+      details.push(`✓ EXPECT_NO_ROWS passed: 0 rows`);
+      return null;
+    } catch (error) {
+      return {
+        success: false,
+        error: `EXPECT_NO_ROWS SQL error: ${error.message}`,
+        details
+      };
+    }
   }
 
   /**
@@ -1003,42 +1081,89 @@ export class MariaDBAdapter extends BaseAdapter {
       return { errors, warnings };
     }
 
-    // Extract UP section (or fall back to full content for R__ files)
-    const upSQL = this.extractSection(content, 'Up');
-    const sqlToCheck = upSQL || content;
-
-    // Strip migration-tool comment lines and annotation lines before parsing
-    // (-- +migrate Up/Down, -- @allow*, -- ===... are valid SQL comments but
-    //  some add noise; parser handles -- comments fine, so no stripping needed)
-    const cleanSQL = sqlToCheck
-      // Remove zero-width / fullwidth chars (mirrors normalizeSQL)
+    // Helper: clean unicode noise from SQL before parsing
+    const cleanUnicode = (sql) => sql
       .replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '')
       .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
       .trim();
 
-    if (!cleanSQL) return { errors, warnings };
+    // Helper: parse SQL with node-sql-parser; push error if syntax invalid
+    const checkSQL = (sql, label, code) => {
+      const clean = cleanUnicode(sql);
+      if (!clean) return;
+      // DELIMITER syntax — node-sql-parser doesn't support it
+      if (/^\s*DELIMITER\b/im.test(clean)) {
+        warnings.push({
+          type: 'syntax-check-skipped',
+          message: `⚠️ SQL syntax check skipped (${label}): DELIMITER syntax detected (stored procedure — not supported by parser)`
+        });
+        return;
+      }
+      try {
+        const parser = new SQLParser();
+        parser.astify(clean, { database: 'MariaDB' });
+      } catch (e) {
+        errors.push({
+          type: 'syntax-error',
+          code,
+          message: `🔴 ${label} SQL syntax error: ${e.message.split('\n')[0]}`
+        });
+      }
+    };
 
-    // DELIMITER syntax is used for stored procedures — node-sql-parser does not
-    // support it; skip instead of reporting a false syntax error
-    if (/^\s*DELIMITER\b/im.test(cleanSQL)) {
-      warnings.push({
-        type: 'syntax-check-skipped',
-        message: '⚠️ SQL syntax check skipped: DELIMITER syntax detected (stored procedure — not supported by parser)'
-      });
-      return { errors, warnings };
+    // === 1. Check Up section (or full content for R__ files) ===
+    const upSQL = this.extractSection(content, 'Up');
+    const sqlToCheck = upSQL || this.stripSanityBlocks(content);
+    checkSQL(sqlToCheck, 'Up', 'SQL_SYNTAX_ERROR');
+
+    // === 2. Check Down section ===
+    const downSQL = this.extractSection(content, 'Down');
+    if (downSQL) {
+      checkSQL(downSQL, 'Down', 'SQL_SYNTAX_ERROR_DOWN');
     }
 
-    try {
-      const parser = new SQLParser();
-      parser.astify(cleanSQL, { database: 'MariaDB' });
-    } catch (e) {
-      // node-sql-parser throws Error with message like:
-      // "Expected ... but "X" found." — extract location if present
-      errors.push({
-        type: 'syntax-error',
-        code: 'SQL_SYNTAX_ERROR',
-        message: `🔴 SQL syntax error: ${e.message.split('\n')[0]}`
-      });
+    // === 3. Sanity block SQL syntax check (PreCheck / PostCheck) ===
+    for (const section of ['PreCheck', 'PostCheck']) {
+      const sanityBody = this.extractSanitySection(content, section);
+      if (!sanityBody) continue;
+
+      // Collect SQL statements from the sanity section:
+      // - Legacy: -- EXPECT_ROWS: <sql> / -- EXPECT_NO_ROWS: <sql>
+      // - Raw: bare SQL split by ';'
+      const rawBuf = [];
+      for (const line of sanityBody.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        // Legacy directive → extract the SQL part
+        const expectMatch = trimmed.match(/^--\s*EXPECT_(?:NO_)?ROWS:\s*(.+)$/i);
+        if (expectMatch) {
+          rawBuf.push(expectMatch[1].trim().replace(/;$/, ''));
+          continue;
+        }
+        // Skip pure comments
+        if (/^--/.test(trimmed)) continue;
+        // Raw SQL line
+        rawBuf.push(line);
+      }
+
+      if (rawBuf.length === 0) continue;
+
+      // Split collected lines by ';' into individual statements
+      const statements = rawBuf.join('\n').split(';').map(s => s.trim()).filter(s => s.length > 0);
+
+      for (const stmt of statements) {
+        try {
+          const parser = new SQLParser();
+          parser.astify(stmt, { database: 'MariaDB' });
+        } catch (e) {
+          errors.push({
+            type: 'syntax-error',
+            code: 'SANITY_SQL_SYNTAX_ERROR',
+            message: `🔴 Sanity ${section} SQL syntax error: ${e.message.split('\n')[0]}`
+          });
+        }
+      }
     }
 
     return { errors, warnings };
@@ -1331,7 +1456,11 @@ export class MariaDBAdapter extends BaseAdapter {
   extractSection(content, section) {
     const regex = new RegExp(`--\\s*\\+migrate\\s+${section}([\\s\\S]*?)(?=--\\s*\\+migrate|$)`, 'i');
     const match = content.match(regex);
-    return match ? match[1].trim() : '';
+    if (!match) return '';
+    // Strip any sanity check blocks that may appear inside the section
+    // (raw SQL in sanity blocks must NOT be treated as migration SQL)
+    const stripped = this.stripSanityBlocks(match[1]);
+    return stripped.trim();
   }
 
   /**
