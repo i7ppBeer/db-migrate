@@ -8,6 +8,8 @@ import { SanityChecker, SQLChecks } from '../core/sanity-checker.js';
 import mysql from 'mysql2/promise';
 import fs from 'fs/promises';
 import path from 'path';
+import nodeSqlParserPkg from 'node-sql-parser';
+const { Parser: SQLParser } = nodeSqlParserPkg;
 
 export class MariaDBAdapter extends BaseAdapter {
   constructor(config) {
@@ -975,6 +977,69 @@ export class MariaDBAdapter extends BaseAdapter {
    * @param {boolean} options.allowForbidden - Allow forbidden operations (requires approval)
    * @param {string[]} options.allowedCodes - Specific codes to allow
    */
+  /**
+   * Validate SQL syntax using node-sql-parser (MariaDB dialect).
+   * Runs BEFORE all other validation rules.
+   *
+   * Skips parsing when:
+   *   - File contains DELIMITER keyword (stored procedures — not supported by parser)
+   *   - File has annotation: -- @skip-syntax-check: true
+   *
+   * @param {string} content  Raw file content
+   * @param {string} fileName File name for error messages
+   * @returns {{ errors: Array, warnings: Array }}
+   */
+  validateSQLSyntax(content, fileName) {
+    const errors = [];
+    const warnings = [];
+
+    // Allow opt-out via annotation
+    if (/--\s*@skip-syntax-check\s*:\s*true/i.test(content)) {
+      warnings.push({ type: 'syntax-check-skipped', message: '⚠️ SQL syntax check skipped (@skip-syntax-check: true)' });
+      return { errors, warnings };
+    }
+
+    // Extract UP section (or fall back to full content for R__ files)
+    const upSQL = this.extractSection(content, 'Up');
+    const sqlToCheck = upSQL || content;
+
+    // Strip migration-tool comment lines and annotation lines before parsing
+    // (-- +migrate Up/Down, -- @allow*, -- ===... are valid SQL comments but
+    //  some add noise; parser handles -- comments fine, so no stripping needed)
+    const cleanSQL = sqlToCheck
+      // Remove zero-width / fullwidth chars (mirrors normalizeSQL)
+      .replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '')
+      .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+      .trim();
+
+    if (!cleanSQL) return { errors, warnings };
+
+    // DELIMITER syntax is used for stored procedures — node-sql-parser does not
+    // support it; skip instead of reporting a false syntax error
+    if (/^\s*DELIMITER\b/im.test(cleanSQL)) {
+      warnings.push({
+        type: 'syntax-check-skipped',
+        message: '⚠️ SQL syntax check skipped: DELIMITER syntax detected (stored procedure — not supported by parser)'
+      });
+      return { errors, warnings };
+    }
+
+    try {
+      const parser = new SQLParser();
+      parser.astify(cleanSQL, { database: 'MariaDB' });
+    } catch (e) {
+      // node-sql-parser throws Error with message like:
+      // "Expected ... but "X" found." — extract location if present
+      errors.push({
+        type: 'syntax-error',
+        code: 'SQL_SYNTAX_ERROR',
+        message: `🔴 SQL syntax error: ${e.message.split('\n')[0]}`
+      });
+    }
+
+    return { errors, warnings };
+  }
+
   validateContent(content, fileName, options = {}) {
     // === Parse per-file annotations (-- @allow-dangerous: true / -- @allow: CODE1,CODE2) ===
     const fileAnnotations = this.parseFileAnnotations(content, fileName);
@@ -987,8 +1052,11 @@ export class MariaDBAdapter extends BaseAdapter {
     };
     options = effectiveOptions;
 
-    const errors = [];
-    const warnings = [];
+    // === 0. SQL Syntax check via node-sql-parser (MariaDB dialect) ===
+    const syntaxResult = this.validateSQLSyntax(content, fileName);
+
+    const errors = [...syntaxResult.errors];
+    const warnings = [...syntaxResult.warnings];
     const dangerousOps = [];
     const forbiddenOps = [];
     const rules = this.getValidationRules(this.config.mode);

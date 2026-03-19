@@ -46,6 +46,7 @@
     "migrate-mongo": "^14.0.7",
     "mongodb": "^6.10.0",
     "mysql2": "^3.16.1",
+    "node-sql-parser": "^5.4.0",
     "open": "^11.0.0",
     "socket.io": "^4.8.3"
   },
