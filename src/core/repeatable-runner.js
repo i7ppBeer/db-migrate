@@ -155,16 +155,18 @@ export class RepeatableRunner {
    */
   generateSecurePassword() {
     // --- Resolve character sets from env vars (fall back to safe defaults) ---
-    const lower   = process.env.DDL_MIGRATE_PASSWORD_LOWER?.trim()   || 'abcdefghijklmnopqrstuvwxyz';
-    const upper   = process.env.DDL_MIGRATE_PASSWORD_UPPER?.trim()   || 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-    const digits  = process.env.DDL_MIGRATE_PASSWORD_DIGITS?.trim()  || '0123456789';
-    const special = process.env.DDL_MIGRATE_PASSWORD_SPECIAL?.trim() || '-~';
-
-    // Validate: each charset must be non-empty
-    if (!lower)   throw new Error('[DDL_MIGRATE_PASSWORD_LOWER] must not be empty');
-    if (!upper)   throw new Error('[DDL_MIGRATE_PASSWORD_UPPER] must not be empty');
-    if (!digits)  throw new Error('[DDL_MIGRATE_PASSWORD_DIGITS] must not be empty');
-    if (!special) throw new Error('[DDL_MIGRATE_PASSWORD_SPECIAL] must not be empty');
+    // Rule: if env var is NOT set → use default silently
+    //       if env var IS set but empty → throw (explicit misconfiguration)
+    const resolveCharset = (envKey, defaultVal) => {
+      if (process.env[envKey] === undefined) return defaultVal;
+      const v = process.env[envKey].trim();
+      if (!v) throw new Error(`[${envKey}] is set but empty — provide at least one character or unset it`);
+      return v;
+    };
+    const lower   = resolveCharset('DDL_MIGRATE_PASSWORD_LOWER',   'abcdefghijklmnopqrstuvwxyz');
+    const upper   = resolveCharset('DDL_MIGRATE_PASSWORD_UPPER',   'ABCDEFGHIJKLMNOPQRSTUVWXYZ');
+    const digits  = resolveCharset('DDL_MIGRATE_PASSWORD_DIGITS',  '0123456789');
+    const special = resolveCharset('DDL_MIGRATE_PASSWORD_SPECIAL', '-~');
 
     // --- Resolve password length (minimum 8 to keep guarantee slots sensible) ---
     const rawLength = parseInt(process.env.DDL_MIGRATE_PASSWORD_LENGTH || '16', 10);
