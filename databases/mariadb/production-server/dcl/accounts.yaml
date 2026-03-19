@@ -1,0 +1,63 @@
+# DCL Account Definitions
+# python tools/gen-dcl.py databases/mariadb/production-server/dcl/accounts.yaml
+# python tools/gen-dcl.py databases/mariadb/production-server/dcl/accounts.yaml --dry-run
+#
+# 規則:
+#   account:     帳號名稱 (自動加 @'%')
+#   databases:   授權的資料庫列表
+#   grant:       授予的權限 (逗號分隔)
+#   description: 分組名稱 (相同 description 的帳號產生同一個 SQL 檔)
+#   revoke:      撤銷的權限 (選填，自動加 @allow-forbidden annotation)
+#   reset_pwd:   true = 產生 ALTER USER PASSWORD EXPIRE (選填)
+#   host:        連線來源 (預設 '%')
+#   password:    密碼 (預設 CHANGE_ME_ON_FIRST_LOGIN)
+#   comment:     額外說明 (選填)
+
+accounts:
+  # ---- Read-Only Users ----
+  - account: ecommerce_readonly
+    databases: [ecommerce]
+    grant: SELECT
+    description: "Read-Only Users"
+
+  - account: analytics_readonly
+    databases: [analytics]
+    grant: SELECT
+    description: "Read-Only Users"
+
+  - account: logging_readonly
+    databases: [logging]
+    grant: SELECT
+    description: "Read-Only Users"
+
+  # ---- Read-Write Users (Application Service Accounts) ----
+  - account: ecommerce_app
+    databases: [ecommerce]
+    grant: SELECT, INSERT, UPDATE, DELETE
+    description: "Read-Write Users (Application Service Accounts)"
+
+  - account: analytics_app
+    databases: [analytics]
+    grant: SELECT, INSERT, UPDATE, DELETE
+    description: "Read-Write Users (Application Service Accounts)"
+
+  - account: logging_app
+    databases: [logging]
+    grant: SELECT, INSERT, UPDATE
+    description: "Read-Write Users (Application Service Accounts)"
+
+  # ---- DDL Admin Users (Schema Management) ----
+  - account: ecommerce_ddl_admin
+    databases: [ecommerce]
+    grant: SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES
+    description: "DDL Admin Users (Schema Management)"
+
+  - account: analytics_ddl_admin
+    databases: [analytics]
+    grant: SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES
+    description: "DDL Admin Users (Schema Management)"
+
+  - account: logging_ddl_admin
+    databases: [logging]
+    grant: SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES
+    description: "DDL Admin Users (Schema Management)"

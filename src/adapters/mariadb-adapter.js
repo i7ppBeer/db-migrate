@@ -1115,11 +1115,22 @@ export class MariaDBAdapter extends BaseAdapter {
     // === 1. Check Up section (or full content for R__ files) ===
     const upSQL = this.extractSection(content, 'Up');
     const sqlToCheck = upSQL || this.stripSanityBlocks(content);
-    checkSQL(sqlToCheck, 'Up', 'SQL_SYNTAX_ERROR');
+
+    // DCL statements (CREATE USER, GRANT, REVOKE, FLUSH PRIVILEGES, etc.) are not
+    // supported by node-sql-parser — skip syntax check for files containing them
+    const isDCL = /\b(?:CREATE\s+USER|DROP\s+USER|ALTER\s+USER|GRANT\s+|REVOKE\s+|FLUSH\s+PRIVILEGES|SET\s+PASSWORD\s+FOR)\b/i.test(sqlToCheck);
+    if (isDCL) {
+      warnings.push({
+        type: 'syntax-check-skipped',
+        message: '⚠️ SQL syntax check skipped: DCL statements detected (CREATE USER/GRANT/REVOKE — not supported by parser)'
+      });
+    } else {
+      checkSQL(sqlToCheck, 'Up', 'SQL_SYNTAX_ERROR');
+    }
 
     // === 2. Check Down section ===
     const downSQL = this.extractSection(content, 'Down');
-    if (downSQL) {
+    if (downSQL && !isDCL) {
       checkSQL(downSQL, 'Down', 'SQL_SYNTAX_ERROR_DOWN');
     }
 
