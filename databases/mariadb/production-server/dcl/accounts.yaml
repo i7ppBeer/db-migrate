@@ -7,8 +7,13 @@
 #   databases:   授權的資料庫列表
 #   grant:       授予的權限 (逗號分隔)
 #   description: 分組名稱 (相同 description 的帳號產生同一個 SQL 檔)
-#   revoke:      撤銷的權限 (選填，自動加 @allow-forbidden annotation)
-#   reset_pwd:   true = 產生 ALTER USER PASSWORD EXPIRE (選填)
+#                → 主群組檔: R__01_<description>.sql  (CREATE USER + GRANT)
+#
+#   ── 高風險操作 (各自獨立產生 R__<YYYYMMDD>_<op>_<account>.sql + @allow-forbidden) ──
+#   revoke:      撤銷的權限 (選填) → 含 MariaDB 10.6 CONTINUE HANDLER FOR 1141 冪等包裝
+#   drop_user:   true = 產生 DROP USER IF EXISTS (預設 false)
+#   reset_pwd:   true = 產生 ALTER USER IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN' (預設 false)
+#
 #   host:        連線來源 (預設 '%')
 #   password:    密碼 (預設 CHANGE_ME_ON_FIRST_LOGIN)
 #   comment:     額外說明 (選填)
@@ -61,3 +66,37 @@ accounts:
     databases: [logging]
     grant: SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES
     description: "DDL Admin Users (Schema Management)"
+
+  # ---- High-Risk Examples (各自產生獨立檔案) ----
+
+  # revoke: 撤銷過度授權 → R__<ts>_revoke_analytics_app.sql
+  - account: analytics_app
+    databases: [analytics]
+    grant: SELECT, INSERT, UPDATE, DELETE
+    revoke: CREATE, DROP
+    description: "Read-Write Users (Application Service Accounts)"
+    comment: "Revoke over-privileged DDL grants from analytics_app"
+
+  # drop_user: 停用舊帳號 → R__<ts>_drop_user_legacy_report.sql
+  - account: legacy_report
+    databases: [analytics]
+    drop_user: true
+    description: "Decommissioned Users"
+    comment: "Legacy reporting account — decommissioned 2026Q1"
+
+  # reset_pwd: 強制改密碼 → R__<ts>_reset_pwd_ecommerce_app.sql
+  - account: ecommerce_app
+    databases: [ecommerce]
+    grant: SELECT, INSERT, UPDATE, DELETE
+    reset_pwd: true
+    description: "Read-Write Users (Application Service Accounts)"
+    comment: "Force password reset after credential rotation"
+
+  # 同時有 revoke + drop_user + reset_pwd → 三個獨立高風險檔
+  - account: old_admin
+    databases: [ecommerce, analytics]
+    revoke: CREATE, DROP, ALTER
+    drop_user: true
+    reset_pwd: true
+    description: "Decommissioned Users"
+    comment: "old_admin: revoke DDL, reset pwd, then drop"
