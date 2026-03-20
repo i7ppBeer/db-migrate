@@ -58,7 +58,16 @@ ALTER_RESOURCE_KEYS = frozenset({
     "MAX_USER_CONNECTIONS",
 })
 
-ON_PATTERN = re.compile(r"^[\w]+\.([\*]|[\w]+)$")
+ON_PATTERN = re.compile(r"^[a-zA-Z0-9_]+\.(\*|[a-zA-Z0-9_]+)$")
+
+VALID_PRIVILEGES = frozenset({
+    "SELECT", "INSERT", "UPDATE", "DELETE",
+    "CREATE", "ALTER", "DROP", "INDEX",
+    "CREATE VIEW", "SHOW VIEW",
+    "EXECUTE", "TRIGGER", "EVENT",
+    "REFERENCES", "LOCK TABLES",
+    "ALL", "ALL PRIVILEGES",
+})
 
 
 def get_on(item: dict) -> str:
@@ -97,12 +106,24 @@ def validate_account(acct: dict) -> list:
         errors.append(f"{name}: grants is required and must not be empty")
     else:
         for i, g in enumerate(grants):
-            if not g.get("privileges"):
+            privs = g.get("privileges") or []
+            if not privs:
                 errors.append(f"{name}.grants[{i}]: privileges is required")
+            else:
+                for p in privs:
+                    if str(p).strip().upper() not in VALID_PRIVILEGES:
+                        errors.append(
+                            f"{name}.grants[{i}]: unknown privilege '{p}'"
+                            f" (allowed: {', '.join(sorted(VALID_PRIVILEGES))})"
+                        )
             on = get_on(g)
-            if not ON_PATTERN.match(on):
+            if not on:
+                errors.append(f"{name}.grants[{i}]: on is required")
+            elif not ON_PATTERN.match(on):
                 errors.append(
-                    f"{name}.grants[{i}]: on='{on}' invalid format (expected db.* or db.table)"
+                    f"{name}.grants[{i}]: on='{on}' invalid format"
+                    f" — expected db.* or db.table"
+                    f" (only letters, digits, underscore; max depth: table level)"
                 )
 
     alter = acct.get("alter") or {}
@@ -122,12 +143,24 @@ def validate_account(acct: dict) -> list:
             )
         elif isinstance(revoke, list):
             for i, r in enumerate(revoke):
-                if not r.get("privileges"):
+                privs = r.get("privileges") or []
+                if not privs:
                     errors.append(f"{name}.revoke[{i}]: privileges is required")
+                else:
+                    for p in privs:
+                        if str(p).strip().upper() not in VALID_PRIVILEGES:
+                            errors.append(
+                                f"{name}.revoke[{i}]: unknown privilege '{p}'"
+                                f" (allowed: {', '.join(sorted(VALID_PRIVILEGES))})"
+                            )
                 on = get_on(r)
-                if not ON_PATTERN.match(on):
+                if not on:
+                    errors.append(f"{name}.revoke[{i}]: on is required")
+                elif not ON_PATTERN.match(on):
                     errors.append(
-                        f"{name}.revoke[{i}]: on='{on}' invalid format (expected db.* or db.table)"
+                        f"{name}.revoke[{i}]: on='{on}' invalid format"
+                        f" — expected db.* or db.table"
+                        f" (only letters, digits, underscore; max depth: table level)"
                     )
 
     return errors
