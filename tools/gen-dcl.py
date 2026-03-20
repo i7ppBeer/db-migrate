@@ -1,34 +1,34 @@
 #!/usr/bin/env python3
 """
-gen-dcl.py — 從 accounts.yaml 產生 DCL Repeatable SQL migration 檔案 (v2)
+gen-dcl.py — Generate DCL Repeatable SQL migration files from accounts.yaml (v2)
 
-新格式: grants 列表，支援 table-level 授權與 alter resource limits。
+Format: grants list supporting table-level privileges and alter resource limits.
 
-欄位說明:
-  account:     帳號名稱 (自動加 @'%')
-  description: 分組名稱 (相同 description 產生同一 SQL 檔)
-  host:        連線來源 (預設 '%')
-  password:    密碼 (預設 CHANGE_ME_ON_FIRST_LOGIN)
+Field reference:
+  account:     MariaDB username (host defaults to '%')
+  description: Group label — accounts with the same description share one SQL file
+  host:        Connection source host (default '%')
+  password:    Initial password (default CHANGE_ME_ON_FIRST_LOGIN)
 
-  grants:      授權列表 (必填)
-    - privileges: [SELECT, INSERT, ...]   # 權限清單
-      on: db.*                            # db-level
+  grants:      Grant list (required, at least one entry)
+    - privileges: [SELECT, INSERT, ...]   # privilege list
+      on: db.*                            # database-level
       on: db.table                        # table-level
 
-  alter:       resource limits (選填，不含密碼)
+  alter:       Resource limits (optional, no password fields)
     MAX_QUERIES_PER_HOUR:     N
     MAX_UPDATES_PER_HOUR:     N
     MAX_CONNECTIONS_PER_HOUR: N
     MAX_USER_CONNECTIONS:     N
 
-  revoke:      撤銷授權列表 (選填，高風險，獨立產生)
+  revoke:      Revoke list (optional, high-risk — written to a separate file)
     - privileges: [DROP, ALTER, ...]
-      on: db.*  或 db.table
+      on: db.*  or db.table
 
-  drop_user:   true = 產生 DROP USER IF EXISTS (預設 false)
-  reset_pwd:   true = 產生 ALTER USER IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN' (預設 false)
+  drop_user:   true = generate DROP USER IF EXISTS (default false)
+  reset_pwd:   true = generate ALTER USER IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN' (default false)
 
-使用方式:
+Usage:
   python tools/gen-dcl.py databases/mariadb/dcl-scenario-test/accounts.yaml
   python tools/gen-dcl.py databases/mariadb/dcl-scenario-test/accounts.yaml --dry-run
   python tools/gen-dcl.py databases/mariadb/dcl-scenario-test/accounts.yaml -o /tmp/dcl-output
@@ -87,47 +87,47 @@ def validate_account(acct: dict) -> list:
     name = acct.get("account", "<unknown>")
 
     if not acct.get("account"):
-        errors.append("account: 必填")
+        errors.append("account: required")
 
     if not acct.get("description"):
-        errors.append(f"{name}: description 必填")
+        errors.append(f"{name}: description is required")
 
     grants = acct.get("grants")
     if not grants:
-        errors.append(f"{name}: grants 必填且不可為空")
+        errors.append(f"{name}: grants is required and must not be empty")
     else:
         for i, g in enumerate(grants):
             if not g.get("privileges"):
-                errors.append(f"{name}.grants[{i}]: privileges 必填")
+                errors.append(f"{name}.grants[{i}]: privileges is required")
             on = get_on(g)
             if not ON_PATTERN.match(on):
                 errors.append(
-                    f"{name}.grants[{i}]: on='{on}' 格式錯誤 (需 db.* 或 db.table)"
+                    f"{name}.grants[{i}]: on='{on}' invalid format (expected db.* or db.table)"
                 )
 
     alter = acct.get("alter") or {}
     for k in alter:
         if k.upper() not in ALTER_RESOURCE_KEYS:
             errors.append(
-                f"{name}.alter: 不允許的 key '{k}'"
-                f" (允許: {', '.join(sorted(ALTER_RESOURCE_KEYS))})"
+                f"{name}.alter: unsupported key '{k}'"
+                f" (allowed: {', '.join(sorted(ALTER_RESOURCE_KEYS))})"
             )
 
     revoke = acct.get("revoke")
     if revoke is not None:
         if isinstance(revoke, str):
             errors.append(
-                f"{name}.revoke: 已不支援字串格式，"
-                f"請改用列表 [{{'privileges': [...], 'on': 'db.*'}}]"
+                f"{name}.revoke: string format is no longer supported, "
+                f"use a list: [{{\"privileges\": [...], \"on\": \"db.*\"}}]"
             )
         elif isinstance(revoke, list):
             for i, r in enumerate(revoke):
                 if not r.get("privileges"):
-                    errors.append(f"{name}.revoke[{i}]: privileges 必填")
+                    errors.append(f"{name}.revoke[{i}]: privileges is required")
                 on = get_on(r)
                 if not ON_PATTERN.match(on):
                     errors.append(
-                        f"{name}.revoke[{i}]: on='{on}' 格式錯誤 (需 db.* 或 db.table)"
+                        f"{name}.revoke[{i}]: on='{on}' invalid format (expected db.* or db.table)"
                     )
 
     return errors
@@ -322,6 +322,17 @@ def main():
     all_errors = []
     for acct in accounts:
         all_errors.extend(validate_account(acct))
+
+    # account names must be unique
+    seen, duplicates = set(), set()
+    for acct in accounts:
+        name = acct.get("account", "")
+        if name in seen:
+            duplicates.add(name)
+        seen.add(name)
+    for dup in sorted(duplicates):
+        all_errors.append(f"account '{dup}': duplicate account name — each account must appear only once")
+
     if all_errors:
         print("ERROR: accounts.yaml validation failed:", file=sys.stderr)
         for e in all_errors:
