@@ -663,6 +663,30 @@ export const down = async (db) => {};
         expect(result.forbiddenOps.some(op => ['GRANT_ROLES', 'GRANT_ROLES_CMD'].includes(op.code))).toBe(false);
       });
 
+      it('should forbid revokeRolesFromUser in DCL migration (dclHighRisk)', () => {
+        const js = `export const up = async (db) => { await db.command({ revokeRolesFromUser: 'app', roles: [{ role: 'read', db: 'mydb' }] }); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_app_user.js');
+        expect(result.forbiddenOps.some(op => ['REVOKE_ROLES', 'REVOKE_ROLES_CMD'].includes(op.code))).toBe(true);
+      });
+
+      it('should forbid db.revokeRolesFromUser() method call in DCL migration (dclHighRisk)', () => {
+        const js = `export const up = async (db) => { await db.revokeRolesFromUser('app', [{ role: 'read', db: 'mydb' }]); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_app_user.js');
+        expect(result.forbiddenOps.some(op => op.code === 'REVOKE_ROLES')).toBe(true);
+      });
+
+      it('should allow revokeRolesFromUser with // @allow-forbidden: true annotation', () => {
+        const js = `// @allow-forbidden: true\nexport const up = async (db) => { await db.command({ revokeRolesFromUser: 'app', roles: [{ role: 'read', db: 'mydb' }] }); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_app_user.js');
+        expect(result.forbiddenOps.some(op => ['REVOKE_ROLES', 'REVOKE_ROLES_CMD'].includes(op.code))).toBe(false);
+      });
+
+      it('should allow revokeRolesFromUser with specific // @allow: REVOKE_ROLES_CMD annotation', () => {
+        const js = `// @allow: REVOKE_ROLES_CMD\nexport const up = async (db) => { await db.command({ revokeRolesFromUser: 'app', roles: [{ role: 'read', db: 'mydb' }] }); };\n`;
+        const result = dclAdapter.validateContent(js, 'R__001_app_user.js');
+        expect(result.forbiddenOps.some(op => op.code === 'REVOKE_ROLES_CMD')).toBe(false);
+      });
+
       it('should forbid createCollection in DCL migration (dclReverse)', () => {
         const js = `export const up = async (db) => { await db.createCollection('users'); };\n`;
         const result = dclAdapter.validateContent(js, 'R__001_bad.js');

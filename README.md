@@ -606,6 +606,28 @@ Validation tool auto-detects dangerous operations and provides allowance mechani
 | `createUser()` | User management (should be in DCL) | - |
 | `dropUser()` | User management (should be in DCL) | - |
 | `grantRolesToUser()` | Permission management (should be in DCL) | - |
+| `revokeRolesFromUser()` | Permission management (should be in DCL) | - |
+
+#### 🔴 DCL High-Risk Operations (MongoDB — repeatable mode)
+
+When a migration file is in **DCL (repeatable)** mode, the following are allowed but require `// @allow-forbidden: true` annotation (separate file, reviewed by platform team):
+
+| Operation | Code | Reason |
+|-----------|------|--------|
+| `dropUser` / `{ dropUser: ... }` | `DROP_USER` / `DROP_USER_CMD` | Irreversible — user and all permissions deleted |
+| `updateUser` / `{ updateUser: ... }` | `UPDATE_USER` / `UPDATE_USER_CMD` | Credential-sensitive — may include password change |
+| `revokeRolesFromUser` / `{ revokeRolesFromUser: ... }` | `REVOKE_ROLES` / `REVOKE_ROLES_CMD` | May remove critical permissions |
+
+```js
+// @allow-forbidden: true
+// R__20260320_revoke_shop_ddl.js — approved by platform team
+export async function up(db) {
+  await db.command({
+    revokeRolesFromUser: 'shop_ddl',
+    roles: [{ role: 'dbOwner', db: 'ecommerce' }]
+  });
+}
+```
 
 #### 🟠 Dangerous Operations (MariaDB)
 
@@ -823,6 +845,54 @@ REFERENCES  LOCK TABLES
 ├── R__<YYYYMMDD>_reset_pwd_<account>.sql     # ⚠️ 高風險：ALTER USER IDENTIFIED BY
 └── R__<YYYYMMDD>_drop_user_<account>.sql     # ⚠️ 高風險：DROP USER IF EXISTS
 ```
+
+---
+
+### 🍃 MongoDB DCL — Account Lifecycle
+
+MongoDB DCL migrations follow the same **idempotent repeatable** pattern as MariaDB, but use the MongoDB driver's `db.command()` API.
+
+#### accounts.yaml (MongoDB)
+
+```yaml
+# databases/mongodb/dcl-scenario-test/accounts.yaml
+accounts:
+  - account: shop_api
+    description: "Shop Service Accounts"
+    roles:
+      - role: readWrite
+        db: ecommerce
+
+  - account: shop_ddl
+    description: "Shop DDL Admin"
+    roles:
+      - role: dbOwner
+        db: ecommerce
+    revoke_roles:                  # ⚠️ High-risk — separate file with @allow-forbidden
+      - role: dbOwner
+        db: ecommerce
+    drop_user: true                # ⚠️ High-risk — separate file with @allow-forbidden
+```
+
+| Field | Required | Default | High-Risk Separate File | Description |
+|-------|:--------:|---------|:-----------------------:|-------------|
+| `account` | ✅ | — | — | MongoDB username |
+| `description` | ✅ | — | — | Human-readable label |
+| `roles` | ✅ | — | — | List of `{ role, db }` to grant |
+| `revoke_roles` | ❌ | — | ✅ | List of `{ role, db }` to revoke — requires `@allow-forbidden` |
+| `drop_user` | ❌ | `false` | ✅ | Drop the user account — requires `@allow-forbidden` |
+
+#### Generated file structure (MongoDB)
+
+```
+<output_dir>/
+├── R__01_<group>.js                           # createUser / updateUser (idempotent) — @allow-forbidden
+├── R__02_<group>.js                           # same for another account group
+├── R__<YYYYMMDD>_revoke_<account>.js         # ⚠️ High-risk: revokeRolesFromUser + @allow-forbidden
+└── R__<YYYYMMDD>_drop_user_<account>.js      # ⚠️ High-risk: dropUser + @allow-forbidden
+```
+
+See `databases/mongodb/dcl-scenario-test/` for a complete lifecycle example (create → revoke → drop).
 
 ---
 
@@ -1054,41 +1124,62 @@ export async function down(db, client) {
 
 ### MongoDB with Sanity Check (.js)
 
-```javascript
-// 20250101000002-add-phone-field.js
+MongoDB migrations use **exported `preCheck` and `postCheck` async functions** alongside `up` and `down`. The same execution flow applies:
 
-/**
- * @sanity PreCheck
- * - EXPECT_NO_COLLECTION: users_backup
- */
-
-// Up Migration
-export const up = async (db, client) => {
-  await db.collection('users').updateMany(
-    {},
-    { 
-      $set: { 
-        phone: null,
-        phoneVerified: false 
-      } 
-    }
-  );
-  
-  await db.collection('users').createIndex({ phone: 1 });
-};
-
-/**
- * @sanity PostCheck
- * - EXPECT_INDEX: users.phone_1
- * - EXPECT_FIELD: users.phone
- */
-
-// Down Migration
-export const down = async (db, client) => {
-  await db.collection('users').dropIndex('phone_1');
-  await db.collection('users').updateMany({}, { $unset: { phone: '', phoneVerified: '' } });
-};
 ```
+preCheck → up (migration) → postCheck
+  ↓ fail      ↓ fail           ↓ fail
+ ABORT    Auto-Rollback (down)  Auto-Rollback (down)
+```
+
+Each function receives `{ db, client }` and must return `{ success: boolean, error?: string, details?: string[] }`.
+
+```javascript
+// 20260101000001-create-users.js
+import { MongoDBChecks } from '../../../../../src/core/sanity-checker.js';
+
+/** Pre-Check: collection must not exist yet */
+export async function preCheck({ db }) {
+  const exists = await MongoDBChecks.collectionExists(db, 'users');
+  if (exists) return { success: false, error: 'Collection "users" already exists' };
+  return { success: true, details: ['✓ Collection "users" does not exist yet'] };
+}
+
+/** Up Migration */
+export async function up(db, client) {
+  await db.createCollection('users', { /* validator ... */ });
+  await db.collection('users').createIndex({ email: 1 }, { unique: true });
+  await db.collection('users').createIndex({ createdAt: -1 });
+}
+
+/** Post-Check: verify collection and indexes were created */
+export async function postCheck({ db }) {
+  const details = [];
+  if (!await MongoDBChecks.collectionExists(db, 'users'))
+    return { success: false, error: 'Collection "users" was not created' };
+  details.push('✓ Collection "users" exists');
+  if (!await MongoDBChecks.indexExists(db, 'users', 'email_1'))
+    return { success: false, error: 'Unique index on "users.email" was not created' };
+  details.push('✓ Unique index on "users.email" exists');
+  return { success: true, details };
+}
+
+/** Down Migration */
+export async function down(db, client) {
+  await db.collection('users').drop();
+}
+```
+
+**Available `MongoDBChecks` helpers** (from `src/core/sanity-checker.js`):
+
+| Helper | Description |
+|--------|-------------|
+| `collectionExists(db, name)` | Returns true if collection exists |
+| `indexExists(db, collection, indexName)` | Returns true if named index exists |
+| `documentCount(db, collection, query?)` | Returns document count |
+| `hasField(db, collection, field)` | Returns true if any document has the field |
+
+See `databases/mongodb/production-server/ddl/ecommerce/` for production-ready examples with full PreCheck + PostCheck coverage.
 
 ### MariaDB/MySQL (.sql)
 
@@ -1295,9 +1386,10 @@ Automatically detect the following issues:
 | Category | Operation | Severity | Description |
 |----------|-----------|----------|-------------|
 | **Dangerous Ops** | `dropDatabase`, `dropAllUsers`, `dropAllRoles` | ❌ Error | `dropDatabase()` allowed in `down()` when `up()` initializes database |
-| **DCL Ops** | `createUser`, `dropUser`, `updateUser` | ⚠️ Warning | Should move to DCL repeatable migrations |
-| **DCL Ops** | `createRole`, `dropRole`, `grantRolesToUser` | ⚠️ Warning | Should move to DCL repeatable migrations |
-| **DCL Ops** | `revokeRolesFromUser`, `shutdown` | ⚠️ Warning | Should move to DCL repeatable migrations |
+| **DCL Ops (DDL mode)** | `createUser`, `dropUser`, `updateUser` | ❌ Error | Should move to DCL repeatable migrations |
+| **DCL Ops (DDL mode)** | `createRole`, `dropRole`, `grantRolesToUser` | ❌ Error | Should move to DCL repeatable migrations |
+| **DCL Ops (DDL mode)** | `revokeRolesFromUser`, `shutdown` | ❌ Error | Should move to DCL repeatable migrations |
+| **DCL High Risk (DCL mode)** | `dropUser`, `updateUser`, `revokeRolesFromUser` | ❌ Error | Requires `// @allow-forbidden: true` in a separate reviewed file |
 | **Empty down()** | up() has operations but down() is empty | ❌ Error | Must provide rollback logic |
 | **Orphaned drop** | down() drops collections not created by up() | ❌ Error | Prevent accidental deletion of existing data |
 | **Non-idempotent** | `deleteMany({})`, `drop()` without conditions | ⚠️ Warning | May affect DCL idempotency |

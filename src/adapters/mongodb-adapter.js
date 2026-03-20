@@ -63,10 +63,12 @@ export class MongoDBAdapter extends BaseAdapter {
           ],
           // High-risk DCL ops: irreversible or credential-sensitive — require // @allow-forbidden: true
           dclHighRisk: [
-            { pattern: /\.dropUser\s*\(/i,   code: 'DROP_USER',       message: '🔴 DCL HIGH RISK: dropUser is irreversible, requires // @allow-forbidden: true / dropUser 為不可逆操作，需加 annotation 審批' },
-            { pattern: /dropUser\s*:/i,      code: 'DROP_USER_CMD',   message: '🔴 DCL HIGH RISK: dropUser is irreversible, requires // @allow-forbidden: true / dropUser 為不可逆操作，需加 annotation 審批' },
-            { pattern: /\.updateUser\s*\(/i, code: 'UPDATE_USER',     message: '🔴 DCL HIGH RISK: updateUser (including password change) requires // @allow-forbidden: true / 更新使用者（含密碼變更）需加 annotation 審批' },
-            { pattern: /updateUser\s*:/i,    code: 'UPDATE_USER_CMD', message: '🔴 DCL HIGH RISK: updateUser (including password change) requires // @allow-forbidden: true / 更新使用者（含密碼變更）需加 annotation 審批' }
+            { pattern: /\.dropUser\s*\(/i,            code: 'DROP_USER',          message: '🔴 DCL HIGH RISK: dropUser is irreversible, requires // @allow-forbidden: true / dropUser 為不可逆操作，需加 annotation 審批' },
+            { pattern: /dropUser\s*:/i,               code: 'DROP_USER_CMD',      message: '🔴 DCL HIGH RISK: dropUser is irreversible, requires // @allow-forbidden: true / dropUser 為不可逆操作，需加 annotation 審批' },
+            { pattern: /\.updateUser\s*\(/i,          code: 'UPDATE_USER',        message: '🔴 DCL HIGH RISK: updateUser (including password change) requires // @allow-forbidden: true / 更新使用者（含密碼變更）需加 annotation 審批' },
+            { pattern: /updateUser\s*:/i,             code: 'UPDATE_USER_CMD',    message: '🔴 DCL HIGH RISK: updateUser (including password change) requires // @allow-forbidden: true / 更新使用者（含密碼變更）需加 annotation 審批' },
+            { pattern: /\.revokeRolesFromUser\s*\(/i, code: 'REVOKE_ROLES',       message: '🔴 DCL HIGH RISK: revokeRolesFromUser may remove critical permissions, requires // @allow-forbidden: true / revokeRolesFromUser 可能移除關鍵權限，需加 annotation 審批' },
+            { pattern: /revokeRolesFromUser\s*:/i,    code: 'REVOKE_ROLES_CMD',   message: '🔴 DCL HIGH RISK: revokeRolesFromUser may remove critical permissions, requires // @allow-forbidden: true / revokeRolesFromUser 可能移除關鍵權限，需加 annotation 審批' }
           ]
         } : {
           dcl: [

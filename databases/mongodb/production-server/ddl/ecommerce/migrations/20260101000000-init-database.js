@@ -10,6 +10,29 @@
  * MongoDB's dropDatabase() is also forbidden by default and requires --allow-forbidden.
  */
 
+import { MongoDBChecks } from '../../../../../src/core/sanity-checker.js';
+
+/**
+ * Post-Check: Verify database initialization succeeded
+ */
+export async function postCheck({ db }) {
+  const details = [];
+
+  const metaExists = await MongoDBChecks.collectionExists(db, '_db_metadata');
+  if (!metaExists) {
+    return { success: false, error: 'Collection "_db_metadata" was not created' };
+  }
+  details.push('✓ Collection "_db_metadata" exists');
+
+  const metaIndex = await MongoDBChecks.indexExists(db, '_db_metadata', 'key_1');
+  if (!metaIndex) {
+    return { success: false, error: 'Unique index on "_db_metadata.key" was not created' };
+  }
+  details.push('✓ Unique index on "_db_metadata.key" exists');
+
+  return { success: true, details };
+}
+
 export async function up(db, client) {
   // MongoDB automatically creates the database on first operation
   // We'll create a system metadata collection to mark database initialization

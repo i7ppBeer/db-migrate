@@ -1,0 +1,35 @@
+# DCL Scenario Test — MongoDB account lifecycle
+#
+# Mirrors the MariaDB dcl-scenario-test to demonstrate the same
+# account-management workflow for MongoDB.
+#
+# Field reference:
+#   account       - MongoDB username (string)
+#   description   - Human-readable grouping label (string)
+#   roles         - List of { role, db } objects to grant via grantRolesToUser
+#   revoke_roles  - List of { role, db } objects to revoke — generates @allow-forbidden file
+#   drop_user     - If true, generates a separate @allow-forbidden drop file (default: false)
+
+accounts:
+  - account: shop_api
+    description: "Shop Service Accounts"
+    roles:
+      - role: readWrite
+        db: ecommerce
+
+  - account: shop_report
+    description: "Shop Service Accounts"
+    roles:
+      - role: read
+        db: ecommerce
+    drop_user: true
+
+  - account: shop_ddl
+    description: "Shop DDL Admin"
+    roles:
+      - role: dbOwner
+        db: ecommerce
+    revoke_roles:
+      - role: dbOwner
+        db: ecommerce
+    drop_user: true
