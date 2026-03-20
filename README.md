@@ -734,7 +734,99 @@ databases/
 
 ---
 
-### 🔷 Practical Examples
+### � MariaDB DCL — accounts.yaml 使用指南 (gen-dcl.py)
+
+`tools/gen-dcl.py` 讀取 `accounts.yaml`，自動產生可直接套用的 DCL SQL 檔案。
+
+#### 執行方式
+
+```bash
+python3 tools/gen-dcl.py databases/mariadb/<env>/dcl/accounts.yaml
+# 指定輸出目錄
+python3 tools/gen-dcl.py databases/mariadb/<env>/dcl/accounts.yaml -o /tmp/dcl-out
+```
+
+#### 欄位說明
+
+| 欄位 | 必填 | 預設值 | 高風險獨立檔 | 說明 |
+|------|:----:|--------|:------------:|------|
+| `account` | ✅ | — | — | MariaDB User 名稱，host 固定為 `%` |
+| `description` | ✅ | — | — | 人類可讀說明，不影響 SQL |
+| `grants` | ✅ | — | — | 授權清單，至少一筆 |
+| `alter` | ❌ | 全 0（無限制） | — | 資源限制 key/value |
+| `revoke` | ❌ | 不撤銷 | ✅ | 撤銷已授予的權限 |
+| `drop_user` | ❌ | `false` | ✅ | 刪除帳號 |
+| `reset_pwd` | ❌ | `false` | ✅ | 強制密碼輪換 |
+
+> ⚠️ **高風險欄位**（`revoke` / `drop_user` / `reset_pwd`）會獨立產生 `R__<YYYYMMDD>_<op>_<account>.sql` 並自動標記 `@allow-forbidden: true`，需由平台團隊審核後另行套用。
+
+#### 完整範例
+
+```yaml
+accounts:
+
+  - account: shop_api                  # ⬅ 必填｜User 名稱
+    description: "Shop API Service"    # ⬅ 必填｜說明
+
+    # grants — 必填，至少一筆
+    grants:
+      - privileges: [SELECT, INSERT, UPDATE, DELETE]
+        on: ecommerce.*        # db.*  = 整個資料庫
+      - privileges: [SELECT]
+        on: analytics.events   # db.table = 單一資料表
+
+    # alter — 選填，不填 = 全部 0 (無限制)
+    alter:
+      MAX_QUERIES_PER_HOUR: 2000      # 每小時查詢上限   (0 = 無限制)
+      MAX_UPDATES_PER_HOUR: 0         # 每小時寫入上限   (0 = 無限制)
+      MAX_CONNECTIONS_PER_HOUR: 0     # 每小時連線建立上限
+      MAX_USER_CONNECTIONS: 10        # 同時連線上限
+
+    # reset_pwd — 選填，預設 false ⚠️ 高風險
+    reset_pwd: true   # → ALTER USER ... IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'
+
+  - account: shop_ddl
+    description: "Shop DDL Admin"
+    grants:
+      - privileges: [SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX]
+        on: ecommerce.*
+    alter:
+      MAX_USER_CONNECTIONS: 3
+
+    # revoke — 選填，不填 = 不撤銷 ⚠️ 高風險
+    # 若帳號原本無此權限，CONTINUE HANDLER FOR 1141 自動跳過不報錯
+    revoke:
+      - privileges: [DROP, ALTER]
+        on: ecommerce.*
+
+    # drop_user — 選填，預設 false ⚠️ 高風險
+    drop_user: true   # → DROP USER IF EXISTS 'shop_ddl'@'%'
+```
+
+#### grants.privileges 可用值（MariaDB 10.6）
+
+```
+SELECT  INSERT  UPDATE  DELETE
+CREATE  ALTER   DROP    INDEX
+CREATE VIEW  SHOW VIEW
+EXECUTE  TRIGGER  EVENT
+REFERENCES  LOCK TABLES
+```
+
+#### 產生的檔案結構
+
+```
+<output_dir>/
+├── R__01_<group>.sql                          # CREATE USER IF NOT EXISTS + GRANT（冪等）
+├── R__02_<group>.sql                          # 同上，另一個帳號群組
+├── R__<YYYYMMDD>_revoke_<account>.sql        # ⚠️ 高風險：REVOKE（含 CONTINUE HANDLER）
+├── R__<YYYYMMDD>_reset_pwd_<account>.sql     # ⚠️ 高風險：ALTER USER IDENTIFIED BY
+└── R__<YYYYMMDD>_drop_user_<account>.sql     # ⚠️ 高風險：DROP USER IF EXISTS
+```
+
+---
+
+### �🔷 Practical Examples
 
 #### Development Workflow
 
