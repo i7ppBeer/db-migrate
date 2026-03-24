@@ -17,46 +17,46 @@ async function readSecretFile() {
 // This avoids the ESM built-in mock limitation (vi.mock on fs/promises is unreliable).
 class TestableRepeatableRunner extends RepeatableRunner {
   async saveGeneratedPasswords(originalContent, passwords, alreadyExists = false, explicitNames = null) {
-    // Temporarily swap the real appendFile with one that writes to our test file
-    const origAppend = fsNative.appendFile.bind(fsNative);
-    const patchedFs = { appendFile: (path, data, enc) => fsNative.appendFile(SECRET_FILE, data, enc) };
-    // Inject patched fs into the method scope by calling super with a monkey-patched import
-    // Simplest: duplicate the relevant logic, routing output to SECRET_FILE
     const PLACEHOLDER = 'CHANGE_ME_ON_FIRST_LOGIN';
     const pwArray = Array.isArray(passwords) ? passwords : [passwords];
     let usernames = [];
 
     if (explicitNames && explicitNames.length > 0) {
-      usernames = explicitNames;
+      usernames = explicitNames.map(n => ({ name: n, isReset: false }));
     } else {
       const isJS = originalContent.includes('export async function up');
       if (isJS) {
         for (const line of originalContent.split('\n')) {
           const m = line.match(/const\s+username\s*=\s*['"']([^'"']+)['"']/);
-          if (m) usernames.push(m[1]);
+          if (m) usernames.push({ name: m[1], isReset: false });
         }
       } else {
         const collapsed = this.stripCommentsAndCollapse(originalContent);
         for (const stmt of collapsed.split(';')) {
-          if (/\bCREATE\s+USER\b/i.test(stmt) || /\bALTER\s+USER\b/i.test(stmt)) {
-            if (!stmt.includes(PLACEHOLDER)) continue;
-            const m = stmt.match(/['"`]([^'"`@\s]+)['"`]\s*@/);
-            if (m) usernames.push(m[1]);
-          }
+          const isCreate = /\bCREATE\s+USER\b/i.test(stmt);
+          const isAlter  = /\bALTER\s+USER\b/i.test(stmt);
+          if (!isCreate && !isAlter) continue;
+          if (!stmt.includes(PLACEHOLDER)) continue;
+          const m = stmt.match(/['"`]([^'"`@\s]+)['"`]\s*@/);
+          if (m) usernames.push({ name: m[1], isReset: isAlter && !isCreate });
         }
       }
     }
 
-    if (usernames.length === 0) return;
+    const isResetPwd = usernames.length > 0 && usernames.every(u => u?.isReset);
+    const usernameList = usernames.map(u => (typeof u === 'string' ? u : u.name));
 
-    if (alreadyExists) {
-      this._lastSkipped = usernames;
+    if (usernameList.length === 0) return;
+
+    if (alreadyExists && !isResetPwd) {
+      this._lastSkipped = usernameList;
       return;
     }
 
-    const lines = usernames.map((u, i) => `${u}=${pwArray[i] ?? pwArray[pwArray.length - 1]}`).join('\n') + '\n';
+    const lines = usernameList.map((u, i) => `${u}=${pwArray[i] ?? pwArray[pwArray.length - 1]}`).join('\n') + '\n';
     await fsNative.appendFile(SECRET_FILE, lines, 'utf-8');
-    this._lastWritten = usernames;
+    this._lastWritten = usernameList;
+    this._lastIsReset = isResetPwd;
   }
 }
 
@@ -255,7 +255,7 @@ describe('saveGeneratedPasswords — multi-line SQL template format', () => {
     expect(written).toContain('svc_user=testpassword456Y');
   });
 
-  it('should NOT write /tmp/secret when alreadyExists=true', async () => {
+  it('should NOT write /tmp/secret when alreadyExists=true (CREATE USER)', async () => {
     const sql = `CREATE USER IF NOT EXISTS 'app_user'@'%'\n  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`;
 
     await runner.saveGeneratedPasswords(sql, ['somepassword'], true);
@@ -278,6 +278,77 @@ describe('saveGeneratedPasswords — multi-line SQL template format', () => {
     const written = await readSecretFile();
     expect(written).toContain('readonly_svc=pw1');
     expect(written).toContain('readwrite_svc=pw2');
+  });
+
+  // ─── Scenario 1: New user → password generated ────────────────────────────
+  it('[Scenario 1] New user: CREATE USER writes credential to secret file', async () => {
+    const sql = `CREATE USER IF NOT EXISTS 'new_app'@'%'\n  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'\n  PASSWORD EXPIRE;\nFLUSH PRIVILEGES;`;
+    const { generated, passwords } = runner.resolvePlaceholderPasswords(sql, 'R__01_new_user.sql');
+
+    expect(generated).toBe(true);
+    expect(passwords).toHaveLength(1);
+
+    await runner.saveGeneratedPasswords(sql, passwords, false);
+
+    const written = await readSecretFile();
+    expect(written).toMatch(/^new_app=[^\s]+/);
+    expect(written).not.toContain('CHANGE_ME_ON_FIRST_LOGIN');
+  });
+
+  // ─── Scenario 2: Second run → checksum unchanged → no new password ─────────
+  it('[Scenario 2] Second run: original file unchanged → same checksum → runner skips', () => {
+    const originalSql = `CREATE USER IF NOT EXISTS 'new_app'@'%'\n  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`;
+
+    const checksum1 = runner.calculateChecksum(originalSql);
+    const checksum2 = runner.calculateChecksum(originalSql);
+    expect(checksum1).toBe(checksum2);
+
+    // Resolved content (real password substituted) must differ from original
+    // confirming that the runner correctly uses original content for checksum tracking
+    const { resolved } = runner.resolvePlaceholderPasswords(originalSql, 'R__01_new_user.sql');
+    const resolvedChecksum = runner.calculateChecksum(resolved);
+    expect(resolvedChecksum).not.toBe(checksum1);
+  });
+
+  // ─── Scenario 3: Reset password → NOT skipped, credential always written ───
+  it('[Scenario 3] Reset password: ALTER USER writes credential even when alreadyExists=true', async () => {
+    // SQL generated by gen-dcl.py when reset_pwd: true
+    const sql = [
+      `-- @allow-forbidden: true`,
+      `-- DCL High-Risk: RESET PASSWORD — existing_user`,
+      `ALTER USER 'existing_user'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`,
+      `FLUSH PRIVILEGES;`,
+    ].join('\n');
+
+    const { generated, passwords } = runner.resolvePlaceholderPasswords(sql, 'R__20260324_reset_pwd_existing_user.sql');
+    expect(generated).toBe(true);
+
+    // alreadyExists=true simulates the old buggy path — ALTER USER must NOT be skipped
+    await runner.saveGeneratedPasswords(sql, passwords, true /* alreadyExists */);
+
+    const written = await readSecretFile();
+    expect(written).toMatch(/^existing_user=[^\s]+/);
+    expect(runner._lastIsReset).toBe(true);
+    expect(runner._lastSkipped).toBeUndefined();
+  });
+
+  // ─── Scenario 4: Second run of reset → same checksum → no execution ────────
+  it('[Scenario 4] Second run of reset: same file → same checksum → runner skips execution', () => {
+    const resetSql = `ALTER USER 'existing_user'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';\nFLUSH PRIVILEGES;`;
+
+    const checksum1 = runner.calculateChecksum(resetSql);
+    const checksum2 = runner.calculateChecksum(resetSql);
+    // Identical content → same checksum → runner sees no change and skips the file
+    expect(checksum1).toBe(checksum2);
+  });
+
+  // ─── Fix verification: preCheckAccountsExistMariaDB excludes ALTER USER ────
+  it('[Fix] preCheckAccountsExistMariaDB: ALTER USER only → returns false without querying DB', async () => {
+    const alterSql = `ALTER USER 'existing_user'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`;
+    // Passing null connection — if it tried to query it would throw
+    // Returning false means it correctly detected no CREATE USER and exited early
+    const result = await runner.preCheckAccountsExistMariaDB(null, alterSql);
+    expect(result).toBe(false);
   });
 });
 

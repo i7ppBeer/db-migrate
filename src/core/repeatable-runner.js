@@ -226,9 +226,15 @@ export class RepeatableRunner {
       return pw;
     });
 
-    console.log(`  [DCL] Auto-generated password for: ${fileName}`);
+    // Detect whether this is a reset-password (ALTER USER) or new account (CREATE USER)
+    const isReset = /\bALTER\s+USER\b/i.test(content) && !/\bCREATE\s+USER\b/i.test(content);
+    if (isReset) {
+      console.log(`  🔄 [DCL] Reset password detected in: ${fileName} — generating temporary credential (not logged)`);
+    } else {
+      console.log(`  🔍 [DCL] CHANGE_ME_ON_FIRST_LOGIN detected in: ${fileName} — generating temporary credential (not logged)`);
+    }
 
-    return { resolved, generated: true, passwords };
+    return { resolved, generated: true, passwords }
   }
 
   /**
@@ -284,30 +290,38 @@ export class RepeatableRunner {
         // which is the format used by all official templates.
         const collapsed = this.stripCommentsAndCollapse(originalContent);
         for (const stmt of collapsed.split(';')) {
-          if (
-            /\bCREATE\s+USER\b/i.test(stmt) || /\bALTER\s+USER\b/i.test(stmt)
-          ) {
-            if (!stmt.includes(PLACEHOLDER)) continue;
-            // SQL pattern: 'username'@host  or  `username`@host
-            const m = stmt.match(/['"\`]([^'"\`@\s]+)['"\`]\s*@/);
-            if (m) usernames.push(m[1]);
-          }
+          const isCreate = /\bCREATE\s+USER\b/i.test(stmt);
+          const isAlter  = /\bALTER\s+USER\b/i.test(stmt);
+          if (!isCreate && !isAlter) continue;
+          if (!stmt.includes(PLACEHOLDER)) continue;
+          // SQL pattern: 'username'@host  or  `username`@host
+          const m = stmt.match(/['"\`]([^'"\`@\s]+)['"\`]\s*@/);
+          if (m) usernames.push({ name: m[1], isReset: isAlter && !isCreate });
         }
       }
     }
 
-    if (usernames.length === 0) return;
+    // Normalise to plain string list for writing; detect if all entries are resets
+    const isResetPwd = usernames.length > 0 && usernames.every(u => u?.isReset);
+    const usernameList = usernames.map(u => (typeof u === 'string' ? u : u.name));
 
-    // Account already existed → password was NOT changed, skip writing to /tmp/secret
-    if (alreadyExists) {
-      console.log(`  ⚠️  [DCL] Account already existed — password NOT changed. Skipped /tmp/secret: ${usernames.join(', ')}`);
+    if (usernameList.length === 0) return;
+
+    // CREATE USER: skip if account already existed (password was NOT changed by IF NOT EXISTS)
+    // ALTER USER (reset_pwd): always write — ALTER USER unconditionally changes the password
+    if (alreadyExists && !isResetPwd) {
+      console.log(`  ⚠️  [DCL] Account already existed — password NOT changed. Skipped /tmp/secret: ${usernameList.join(', ')}`);
       return;
     }
 
     // Pair usernames[i] → pwArray[i]; fall back to last password if arrays diverge
-    const lines = usernames.map((u, i) => `${u}=${pwArray[i] ?? pwArray[pwArray.length - 1]}`).join('\n') + '\n';
+    const lines = usernameList.map((u, i) => `${u}=${pwArray[i] ?? pwArray[pwArray.length - 1]}`).join('\n') + '\n';
     await fs.appendFile('/tmp/secret', lines, 'utf-8');
-    console.log(`  📝 [DCL] Credentials saved to /tmp/secret: ${usernames.join(', ')}`);
+    if (isResetPwd) {
+      console.log(`  🔄 [DCL] Reset password applied — temporary credential saved to /tmp/secret: ${usernameList.join(', ')} (password not logged)`);
+    } else {
+      console.log(`  🆕 [DCL] New account created — temporary credential saved to /tmp/secret: ${usernameList.join(', ')} (password not logged)`);
+    }
   }
 
   /**
@@ -457,13 +471,12 @@ export class RepeatableRunner {
     // are treated as a single unit and the username can be extracted correctly.
     const collapsed = this.stripCommentsAndCollapse(originalContent);
     for (const stmt of collapsed.split(';')) {
-      if (
-        /\bCREATE\s+USER\b/i.test(stmt) || /\bALTER\s+USER\b/i.test(stmt)
-      ) {
-        if (!stmt.includes(PLACEHOLDER)) continue;
-        const m = stmt.match(/['"\`]([^'"\`@\s]+)['"\`]\s*@/);
-        if (m) usernames.push(m[1]);
-      }
+      // Only check CREATE USER — ALTER USER (reset_pwd) always targets an existing account,
+      // so alreadyExists would always be true and incorrectly suppress /tmp/secret writes.
+      if (!/\bCREATE\s+USER\b/i.test(stmt)) continue;
+      if (!stmt.includes(PLACEHOLDER)) continue;
+      const m = stmt.match(/['"\`]([^'"\`@\s]+)['"\`]\s*@/);
+      if (m) usernames.push(m[1]);
     }
     if (usernames.length === 0) return false;
 
