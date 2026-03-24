@@ -636,6 +636,59 @@ docker compose run --rm migrate validate --allow-forbidden -c /app/databases/mar
 docker compose run --rm migrate up --allow-dangerous -c /app/databases/mariadb/test-success/ddl/config.js
 ```
 
+#### Per-File Annotation (Recommended)
+
+Instead of CLI flags (which affect all files in a run), you can embed allowance directly in the migration file. This keeps the approval traceable in code review.
+
+Annotations must appear **before the first non-comment line** of the file:
+
+```sql
+-- @allow-dangerous: true
+-- Approved: DROP COLUMN old_field, deprecated since v2.0 (ticket #123)
+
+-- +migrate Up
+ALTER TABLE users DROP COLUMN old_field;
+
+-- +migrate Down
+ALTER TABLE users ADD COLUMN old_field VARCHAR(255) NULL;
+```
+
+Allow only specific operation codes (stricter, preferred):
+
+```sql
+-- @allow: DROP_COLUMN
+
+-- +migrate Up
+ALTER TABLE users DROP COLUMN old_field;
+```
+
+Allow forbidden operations (requires team approval):
+
+```sql
+-- @allow-forbidden: true
+
+-- +migrate Up
+DROP DATABASE legacy_db;
+```
+
+Multiple codes can be combined:
+
+```sql
+-- @allow: TRUNCATE_TABLE,DELETE_ALL
+
+-- +migrate Up
+TRUNCATE TABLE audit_log;
+DELETE FROM temp_cache;
+```
+
+| Annotation | Scope | Equivalent CLI Flag |
+|---|---|---|
+| `-- @allow-dangerous: true` | All 🟠 dangerous ops in this file | `--allow-dangerous` |
+| `-- @allow-forbidden: true` | All 🔴 forbidden ops in this file | `--allow-forbidden` |
+| `-- @allow: CODE1,CODE2` | Only the listed operation codes | `--allow CODE1,CODE2` |
+
+> ⚠️ Annotations affect only the file they are written in. CLI flags affect all files in the run.
+
 #### CI/CD Integration
 
 ```yaml
