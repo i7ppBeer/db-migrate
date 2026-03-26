@@ -205,7 +205,9 @@ program
       if (result.sanityResults && result.sanityResults.length > 0) {
         console.log(chalk.cyan('\n📋 Sanity Check Results:'));
         for (const sr of result.sanityResults) {
-          if (sr.success) {
+          if (sr.success && sr.skipped) {
+            console.log(chalk.gray(`   ⏭️  ${sr.file}: SKIPPED (no sanity blocks)`));
+          } else if (sr.success) {
             console.log(chalk.green(`   ✅ ${sr.file}: PASSED (${sr.duration}ms)`));
           } else {
             console.log(chalk.red(`   ❌ ${sr.file}: FAILED - ${sr.error}`));

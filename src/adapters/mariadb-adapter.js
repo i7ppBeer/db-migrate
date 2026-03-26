@@ -567,15 +567,25 @@ export class MariaDBAdapter extends BaseAdapter {
               }
             }
           } else {
-            // No sanity checks, run normally
+            // No sanity checks, run normally (same behaviour as up())
             if (upSQL) {
-              await this.connection.execute(upSQL);
+              console.log(`\n🔍 Running ${file} (no sanity checks)...`);
+              const startTime = Date.now();
+              const dbName = (this.config.mariadb || this.config).database;
+              const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
+              await this.connection.query(wrappedUpSQL);
               const id = file.replace('.sql', '');
               await this.connection.execute(
                 `INSERT INTO ${this.changelogTable} (id) VALUES (?)`,
                 [id]
               );
               result.applied.push(file);
+              result.sanityResults.push({
+                file,
+                success: true,
+                skipped: true,
+                duration: Date.now() - startTime
+              });
             }
           }
         } catch (error) {
