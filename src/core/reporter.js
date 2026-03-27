@@ -104,6 +104,22 @@ export class Reporter {
     console.log(`  Passed:         ${summary.passed} ✅`);
     console.log(`  Failed:         ${summary.failed} ${summary.failed > 0 ? '❌' : ''}`);
     console.log(`  Pass Rate:      ${summary.passRate}%`);
+
+    // Breakdown by testType
+    const byType = {};
+    for (const r of this.results) {
+      if (!byType[r.testType]) byType[r.testType] = { passed: 0, failed: 0 };
+      byType[r.testType][r.success ? 'passed' : 'failed']++;
+    }
+    const typeOrder = ['validate', 'up-down-up', 'sanity-check', 'dcl-idempotency'];
+    const allTypes = [...new Set([...typeOrder, ...Object.keys(byType)])];
+    console.log('\n  BY TEST TYPE:');
+    for (const t of allTypes) {
+      if (!byType[t]) continue;
+      const { passed: p, failed: f } = byType[t];
+      const icon = f > 0 ? '❌' : '✅';
+      console.log(`  ${icon}  ${t.padEnd(18)} passed: ${p}  failed: ${f}`);
+    }
     console.log('  ' + '─'.repeat(66));
     
     // Final status
