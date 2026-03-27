@@ -17,6 +17,37 @@ export class DCLIdempotentChecker {
   }
 
   /**
+   * Canonicalize nested values for stable state comparison.
+   * - Object keys are sorted
+   * - Primitive arrays are sorted
+   * - Object arrays are sorted by JSON representation
+   * @param {any} value
+   * @returns {any}
+   */
+  canonicalizeValue(value) {
+    if (value == null) return value;
+
+    if (Array.isArray(value)) {
+      const normalized = value.map(v => this.canonicalizeValue(v));
+      const allPrimitive = normalized.every(v => v == null || ['string', 'number', 'boolean'].includes(typeof v));
+      if (allPrimitive) {
+        return [...normalized].sort((a, b) => String(a).localeCompare(String(b)));
+      }
+      return normalized.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    }
+
+    if (typeof value === 'object') {
+      const out = {};
+      for (const key of Object.keys(value).sort()) {
+        out[key] = this.canonicalizeValue(value[key]);
+      }
+      return out;
+    }
+
+    return value;
+  }
+
+  /**
    * Log verbose message
    * @param {string} message
    */
@@ -104,7 +135,9 @@ export class DCLIdempotentChecker {
         .map(u => ({
           user: u.user,
           db: u.db,
-          roles: u.roles.map(r => `${r.role}@${r.db}`).sort()
+          roles: (u.roles || []).map(r => `${r.role}@${r.db}`).sort(),
+          customData: this.canonicalizeValue(u.customData ?? null),
+          authenticationRestrictions: this.canonicalizeValue(u.authenticationRestrictions ?? [])
         }))
         .sort((a, b) => a.user.localeCompare(b.user));
 
@@ -115,8 +148,9 @@ export class DCLIdempotentChecker {
           .map(r => ({
             role: r.role,
             db: r.db,
-            privileges: r.privileges?.length || 0,
-            inheritedRoles: r.roles?.map(ir => `${ir.role}@${ir.db}`).sort() || []
+            privileges: this.canonicalizeValue(r.privileges || []),
+            inheritedRoles: (r.roles || []).map(ir => `${ir.role}@${ir.db}`).sort(),
+            authenticationRestrictions: this.canonicalizeValue(r.authenticationRestrictions ?? [])
           }))
           .sort((a, b) => a.role.localeCompare(b.role));
       } catch (e) {
@@ -140,8 +174,8 @@ export class DCLIdempotentChecker {
     const differences = [];
 
     // Remove timestamps for comparison
-    const s1 = { ...state1 };
-    const s2 = { ...state2 };
+    const s1 = this.canonicalizeValue({ ...state1 });
+    const s2 = this.canonicalizeValue({ ...state2 });
     delete s1.timestamp;
     delete s2.timestamp;
 

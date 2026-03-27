@@ -174,6 +174,123 @@ describe('DCLIdempotentChecker', () => {
       expect(formattedUsers[0].user).toBe('app_user');
       expect(formattedUsers[0].roles).toContain('readWrite@mydb');
     });
+
+    it('should treat reordered privilege objects as equal after canonicalization', () => {
+      const state1 = {
+        users: [
+          {
+            user: 'app_user',
+            db: 'admin',
+            roles: ['readWrite@mydb'],
+            customData: { owner: 'platform' },
+            authenticationRestrictions: []
+          }
+        ],
+        roles: [
+          {
+            role: 'appRole',
+            db: 'admin',
+            privileges: [
+              { resource: { db: 'mydb', collection: 'orders' }, actions: ['find', 'insert'] }
+            ],
+            inheritedRoles: []
+          }
+        ],
+        timestamp: '2026-01-01T00:00:00Z'
+      };
+
+      const state2 = {
+        users: [
+          {
+            user: 'app_user',
+            db: 'admin',
+            roles: ['readWrite@mydb'],
+            customData: { owner: 'platform' },
+            authenticationRestrictions: []
+          }
+        ],
+        roles: [
+          {
+            role: 'appRole',
+            db: 'admin',
+            privileges: [
+              { resource: { collection: 'orders', db: 'mydb' }, actions: ['insert', 'find'] }
+            ],
+            inheritedRoles: []
+          }
+        ],
+        timestamp: '2026-01-01T00:00:01Z'
+      };
+
+      const result = checker.compareStates(state1, state2);
+      expect(result.equal).toBe(true);
+    });
+
+    it('should detect privilege content changes even with same privilege count', () => {
+      const state1 = {
+        users: [],
+        roles: [
+          {
+            role: 'appRole',
+            db: 'admin',
+            privileges: [
+              { resource: { db: 'mydb', collection: 'orders' }, actions: ['find', 'insert'] }
+            ],
+            inheritedRoles: []
+          }
+        ]
+      };
+
+      const state2 = {
+        users: [],
+        roles: [
+          {
+            role: 'appRole',
+            db: 'admin',
+            privileges: [
+              { resource: { db: 'mydb', collection: 'orders' }, actions: ['find', 'update'] }
+            ],
+            inheritedRoles: []
+          }
+        ]
+      };
+
+      const result = checker.compareStates(state1, state2);
+      expect(result.equal).toBe(false);
+      expect(result.differences.some(d => d.field === 'roles')).toBe(true);
+    });
+
+    it('should detect customData differences on users', () => {
+      const state1 = {
+        users: [
+          {
+            user: 'app_user',
+            db: 'admin',
+            roles: ['readWrite@mydb'],
+            customData: { owner: 'platform', tier: 'gold' },
+            authenticationRestrictions: []
+          }
+        ],
+        roles: []
+      };
+
+      const state2 = {
+        users: [
+          {
+            user: 'app_user',
+            db: 'admin',
+            roles: ['readWrite@mydb'],
+            customData: { owner: 'platform', tier: 'silver' },
+            authenticationRestrictions: []
+          }
+        ],
+        roles: []
+      };
+
+      const result = checker.compareStates(state1, state2);
+      expect(result.equal).toBe(false);
+      expect(result.differences.some(d => d.field === 'users')).toBe(true);
+    });
   });
 
   describe('MariaDB state capture format', () => {

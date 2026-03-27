@@ -494,6 +494,51 @@ export class MongoDBAdapter extends BaseAdapter {
   async create(name) {
     try {
       const fileName = await migrateMongo.create(name);
+
+      // Enrich generated template with sanity check scaffolding for better authoring parity.
+      const filePath = path.join(this.config.migrationsDir, fileName);
+      const dbName = this.config.mongodb?.databaseName || this.config.mongodb?.database || 'mydb';
+      const template = `/**
+ * Migration: ${name}
+ * File: ${fileName}
+ * Created: ${new Date().toISOString()}
+ */
+
+export async function preCheck(db, client) {
+  // Example: ensure preconditions before migration
+  // const exists = await db.listCollections({ name: 'your_collection' }).hasNext();
+  // if (exists) return { success: false, error: 'Collection already exists' };
+  return { success: true, details: ['Pre-check passed'] };
+}
+
+export async function up(db, client) {
+  // Your migration logic here
+  // Example:
+  // await db.createCollection('example');
+}
+
+export async function postCheck(db, client) {
+  // Example: validate migration result
+  // const exists = await db.listCollections({ name: 'example' }).hasNext();
+  // if (!exists) return { success: false, error: 'Collection not found after migration' };
+  return { success: true, details: ['Post-check passed on ${dbName}'] };
+}
+
+export async function down(db, client) {
+  // Rollback logic for versioned migrations
+  // Example:
+  // await db.collection('example').drop();
+}
+`;
+
+      try {
+        await fs.access(filePath);
+        await fs.writeFile(filePath, template);
+      } catch (err) {
+        // Some test mocks or migrate-mongo versions may not create files immediately.
+        if (err.code !== 'ENOENT') throw err;
+      }
+
       return fileName;
     } catch (error) {
       throw new Error(`Failed to create migration: ${error.message}`);
@@ -534,6 +579,11 @@ export class MongoDBAdapter extends BaseAdapter {
 
 export async function up(db, client) {
   const adminDb = client.db('admin');
+
+  // Optional pre-check before applying DCL changes.
+  // Return { success: false, error: 'reason' } to stop execution.
+  // This is executed only when running with sanity-check workflow.
+  // export async function preCheck(db, client) { ... }
   
   // Example: Create user if not exists
   // try {
@@ -560,6 +610,19 @@ export async function up(db, client) {
   
   // Your DCL statements here:
   
+}
+
+export async function preCheck(db, client) {
+  // Example: ensure admin DB is reachable before DCL changes
+  // await client.db('admin').command({ ping: 1 });
+  return { success: true, details: ['Pre-check passed'] };
+}
+
+export async function postCheck(db, client) {
+  // Example: verify user/role state after DCL changes
+  // const info = await client.db('admin').command({ usersInfo: 'app_readonly' });
+  // if (!info.users?.length) return { success: false, error: 'User not found after migration' };
+  return { success: true, details: ['Post-check passed on ${dbName}'] };
 }
 
 // Note: DCL migrations typically don't need down()
@@ -647,6 +710,84 @@ export async function down(db, client) {
   }
 
   /**
+   * Check whether a migration file exports a function by name.
+   * Supports function declarations and const-assigned async arrows.
+   * @param {string} content
+   * @param {string} functionName
+   * @returns {boolean}
+   */
+  hasExportedFunction(content, functionName) {
+    const patterns = [
+      new RegExp(`export\\s+async\\s+function\\s+${functionName}\\s*\\(`),
+      new RegExp(`export\\s+function\\s+${functionName}\\s*\\(`),
+      new RegExp(`export\\s+const\\s+${functionName}\\s*=\\s*async\\s*\\(`),
+      new RegExp(`export\\s+const\\s+${functionName}\\s*=\\s*\\(`)
+    ];
+    return patterns.some(p => p.test(content));
+  }
+
+  /**
+   * Validate JS syntax and required migration exports.
+   * @param {string} content
+   * @param {string} fileName
+   * @returns {{errors: Array, warnings: Array}}
+   */
+  validateJSSyntax(content, fileName) {
+    const errors = [];
+    const warnings = [];
+
+    if (!content || !content.trim()) {
+      return { errors, warnings };
+    }
+
+    // Strip ESM export syntax and parse as a function body to catch syntax errors early.
+    const parseTarget = content
+      .replace(/^\s*export\s+default\s+/gm, '')
+      .replace(/^\s*export\s+(async\s+function|function|const|let|var|class)\s+/gm, '$1 ')
+      .replace(/^\s*export\s*\{\s*[^}]+\s*\};?\s*$/gm, '');
+
+    try {
+      // eslint-disable-next-line no-new-func
+      new Function(parseTarget);
+    } catch (error) {
+      errors.push({
+        type: 'syntax-error',
+        code: 'JS_SYNTAX_ERROR',
+        message: `🔴 JavaScript syntax error: ${error.message}`
+      });
+      return { errors, warnings };
+    }
+
+    const hasUp = this.hasExportedFunction(content, 'up');
+    const hasDown = this.hasExportedFunction(content, 'down');
+
+    if (!hasUp) {
+      errors.push({
+        type: 'missing-up-export',
+        code: 'MISSING_UP_EXPORT',
+        message: '🔴 Migration must export up() function'
+      });
+    }
+
+    if (this.config.mode !== 'repeatable' && !hasDown) {
+      errors.push({
+        type: 'missing-down-export',
+        code: 'MISSING_DOWN_EXPORT',
+        message: '🔴 Versioned migration must export down() function'
+      });
+    }
+
+    if (this.config.mode === 'repeatable' && !hasDown) {
+      warnings.push({
+        type: 'down-optional',
+        message: '⚠️ down() is optional in repeatable (DCL) mode'
+      });
+    }
+
+    return { errors, warnings };
+  }
+
+  /**
    * Validate migration content
    * @param {string} content - Migration file content
    * @param {string} fileName - File name
@@ -667,8 +808,9 @@ export async function down(db, client) {
     };
     options = effectiveOptions;
 
-    const errors = [];
-    const warnings = [];
+    const syntaxResult = this.validateJSSyntax(content, fileName);
+    const errors = [...syntaxResult.errors];
+    const warnings = [...syntaxResult.warnings];
     const dangerousOps = [];
     const forbiddenOps = [];
     const rules = this.getValidationRules(this.config.mode);
@@ -685,7 +827,7 @@ export async function down(db, client) {
     const normalizedDownBody = this.normalizeJS(downBody);
 
     // === 1. DDL only: Check for empty down() (R__ repeatable files have no down()) ===
-    if (this.config.mode !== 'repeatable') {
+    if (this.config.mode !== 'repeatable' && this.hasExportedFunction(content, 'down')) {
       const upHasOperations = upBody.trim().length > 0 && 
         (this.containsOperation(upBody, 'createCollection') ||
          this.containsOperation(upBody, 'createIndex') ||
