@@ -1138,6 +1138,7 @@ program
   .option('--pattern <pattern>', 'Glob pattern to match config files, relative to --base-dir or cwd (e.g., "project/**/config.js")')
   .option('--base-dir <dir>', 'Base directory for pattern search (default: current working directory)')
   .option('--console-only', 'Only output to console, do not save report files')
+  .option('--sanity-check', 'Run PreCheck/PostCheck sanity checks for DDL migrations (requires sanity sections in migration files)')
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     const reporter = new Reporter();
@@ -1313,14 +1314,13 @@ program
 
           if (isDCL) {
             // ═══════════════════════════════════════════════════════
-            // DCL: Validate + Run 3 times (Idempotency Check)
+            // DCL: Content Validate + DCLIdempotentChecker per-file
             // ═══════════════════════════════════════════════════════
 
+            // Step 1: Content validate (forbidden-ops: dclReverse, dclHighRisk)
             console.log(chalk.blue(`\n[VALIDATE] ${label} (${dbType})...`));
             const validateStart = Date.now();
 
-            // DCL validation via RepeatableRunner
-            const { RepeatableRunner } = await import('./core/repeatable-runner.js');
             const runner = new RepeatableRunner({
               checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
             });
@@ -1335,13 +1335,29 @@ program
 
             let validateSuccess = true;
             let validateError = null;
+            let dclFiles = [];
 
             try {
-              const files = await runner.getRepeatableFiles(config.migrationsDir);
-              if (files.length === 0) {
+              dclFiles = await runner.getRepeatableFiles(config.migrationsDir);
+              if (dclFiles.length === 0) {
                 console.log(chalk.yellow(`   ⚠️  No DCL migrations found`));
               } else {
-                console.log(chalk.gray(`   ✅ ${files.length} DCL migration(s) found`));
+                // Content validate via adapter (dclReverse + dclHighRisk rules)
+                const validateResult = await adapter.validate();
+                if (validateResult.valid) {
+                  console.log(chalk.gray(`   ✅ ${dclFiles.length} DCL migration(s) found, content valid`));
+                } else {
+                  validateSuccess = false;
+                  const errCount = validateResult.results.filter(r => !r.valid).length;
+                  validateError = `${errCount} file(s) failed content validation`;
+                  console.log(chalk.red(`   ❌ ${validateError}`));
+                  for (const r of validateResult.results.filter(r => !r.valid)) {
+                    console.log(chalk.red(`      [ERROR] ${r.file}`));
+                    for (const op of (r.forbiddenOps || [])) {
+                      console.log(chalk.red(`         ❌ [${op.code}] ${op.message}`));
+                    }
+                  }
+                }
               }
             } catch (error) {
               validateSuccess = false;
@@ -1359,36 +1375,49 @@ program
             });
 
             if (!validateSuccess) {
-              continue; // Skip test if validation fails
+              continue; // Skip idempotency test if content validation fails
             }
 
-            // Run DCL 3 times to verify idempotency
-            console.log(chalk.blue(`\n[TEST] ${label} (${dbType}) Idempotency (3 runs)...`));
-            const testStart = Date.now();
+            // Step 2: DCLIdempotentChecker — per-file state comparison (run×2 + diff)
+            console.log(chalk.blue(`\n[TEST] ${label} (${dbType}) DCL Idempotency...`));
 
-            let testSuccess = true;
-            let testError = null;
+            const checker = new DCLIdempotentChecker({ verbose: false });
 
-            try {
-              for (let i = 1; i <= 3; i++) {
-                console.log(chalk.gray(`   Run ${i}/3...`));
-                await runner.run(context);
+            for (const file of dclFiles) {
+              const fileStart = Date.now();
+              console.log(chalk.gray(`   📄 ${file.fileName}`));
+
+              const executeScript = async () => {
+                if (adapter.dbType === 'mariadb') {
+                  await adapter.connection.query(file.content);
+                } else if (adapter.dbType === 'mongodb') {
+                  const mod = await import(`file://${file.filePath}`);
+                  if (typeof mod.up === 'function') {
+                    await mod.up(adapter.db, adapter.client);
+                  }
+                }
+              };
+
+              const idempotencyResult = await checker.verify(context, executeScript, {
+                database: config.database || config.mongodb?.databaseName,
+                scriptName: file.fileName
+              });
+
+              if (idempotencyResult.success) {
+                console.log(chalk.green(`      ✅ IDEMPOTENT`));
+              } else {
+                console.log(chalk.red(`      ❌ NOT IDEMPOTENT: ${idempotencyResult.error}`));
               }
-              console.log(chalk.green(`   ✅ Idempotency verified`));
-            } catch (error) {
-              testSuccess = false;
-              testError = error.message;
-              console.log(chalk.red(`   ❌ Idempotency failed: ${error.message}`));
-            }
 
-            reporter.addResult({
-              database: label,
-              dbType,
-              testType: 'dcl-idempotency',
-              success: testSuccess,
-              duration: Date.now() - testStart,
-              error: testError
-            });
+              reporter.addResult({
+                database: `${label} [${file.fileName}]`,
+                dbType,
+                testType: 'dcl-idempotency',
+                success: idempotencyResult.success,
+                duration: Date.now() - fileStart,
+                error: idempotencyResult.success ? null : idempotencyResult.error
+              });
+            }
 
           } else {
             // ═══════════════════════════════════════════════════════
@@ -1419,6 +1448,53 @@ program
               duration: testResult.duration,
               error: testResult.error || null
             });
+
+            // ═══════════════════════════════════════════════════════
+            // DDL: Sanity Check (optional, requires --sanity-check flag)
+            // ═══════════════════════════════════════════════════════
+            if (options.sanityCheck && typeof adapter.upWithSanityCheck === 'function') {
+              console.log(chalk.blue(`\n[SANITY] ${label} (${dbType}) PreCheck/PostCheck...`));
+              console.log(chalk.cyan(`   Sanity Check: ENABLED`));
+
+              // Reset DB to clean state (down all), then re-run with sanity checks
+              const statusAfterTest = await adapter.status();
+              const appliedCount = statusAfterTest.applied.length;
+              if (appliedCount > 0) {
+                await adapter.down(appliedCount);
+              }
+
+              const sanityStart = Date.now();
+              const sanityRunResult = await adapter.upWithSanityCheck({ verbose: false });
+
+              // Report per-migration sanity results
+              for (const sr of (sanityRunResult.sanityResults || [])) {
+                const skipped = sr.skipped === true;
+                if (skipped) {
+                  console.log(chalk.gray(`   ⏭️  ${sr.file}: SKIPPED (no sanity blocks)`));
+                } else if (sr.success) {
+                  console.log(chalk.green(`   ✅ ${sr.file}: PASSED`));
+                } else {
+                  console.log(chalk.red(`   ❌ ${sr.file}: FAILED — ${sr.error}`));
+                  if (sr.rolledBack) console.log(chalk.yellow(`      ↩️  Auto-rolled back`));
+                }
+
+                if (!skipped) {
+                  reporter.addResult({
+                    database: `${label} [${sr.file}]`,
+                    dbType,
+                    testType: 'sanity-check',
+                    success: sr.success,
+                    duration: Date.now() - sanityStart,
+                    error: sr.success ? null : sr.error
+                  });
+                }
+              }
+
+              // Overall sanity summary if no per-file results (e.g. all skipped)
+              if ((sanityRunResult.sanityResults || []).filter(sr => !sr.skipped).length === 0) {
+                console.log(chalk.yellow(`   ⚠️  No sanity blocks found in any migration (add -- +sanity PreCheck/PostCheck sections)`));
+              }
+            }
           }
 
         } catch (error) {
