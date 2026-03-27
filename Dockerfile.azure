@@ -5,7 +5,7 @@
 
 FROM node:20-alpine
 
-RUN apk add --no-cache bash curl mysql-client mongodb-tools python3 \
+RUN apk add --no-cache bash curl mysql-client mongodb-tools python3 py3-yaml \
  && KUBECTL_VERSION=$(curl -sL https://dl.k8s.io/release/stable.txt) \
  && curl -sLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
  && chmod +x /usr/local/bin/kubectl
