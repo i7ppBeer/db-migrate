@@ -1289,7 +1289,9 @@ program
         continue;
       }
 
-      if (baseConfig.migrationsDir && !path.isAbsolute(baseConfig.migrationsDir)) {
+      if (!baseConfig.migrationsDir) {
+        baseConfig.migrationsDir = path.resolve(path.dirname(configPath), 'migrations');
+      } else if (!path.isAbsolute(baseConfig.migrationsDir)) {
         baseConfig.migrationsDir = path.resolve(path.dirname(configPath), baseConfig.migrationsDir);
       }
       baseConfig.type = dbType;

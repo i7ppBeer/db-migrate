@@ -119,7 +119,7 @@ services:
     volumes:
       - ./databases:/app/databases:ro
       - ./reports:/app/reports
-    command: ["test-all", "-o", "/app/reports"]
+    command: ["test-all", "-o", "/app/reports", "--pattern", "databases/**/config.js"]
     networks:
       - migrate-network
 

@@ -1129,10 +1129,18 @@ export class MariaDBAdapter extends BaseAdapter {
     // DCL statements (CREATE USER, GRANT, REVOKE, FLUSH PRIVILEGES, etc.) are not
     // supported by node-sql-parser — skip syntax check for files containing them
     const isDCL = /\b(?:CREATE\s+USER|DROP\s+USER|ALTER\s+USER|GRANT\s+|REVOKE\s+|FLUSH\s+PRIVILEGES|SET\s+PASSWORD\s+FOR)\b/i.test(sqlToCheck);
+    // ENUM/SET column types and VALUES() function (ON DUPLICATE KEY UPDATE) are valid MariaDB
+    // syntax but not supported by node-sql-parser
+    const hasEnumOrSet = /\bENUM\s*\(|\bSET\s*\(|\bVALUES\s*\(\s*\w/i.test(sqlToCheck);
     if (isDCL) {
       warnings.push({
         type: 'syntax-check-skipped',
         message: '⚠️ SQL syntax check skipped: DCL statements detected (CREATE USER/GRANT/REVOKE — not supported by parser)'
+      });
+    } else if (hasEnumOrSet) {
+      warnings.push({
+        type: 'syntax-check-skipped',
+        message: '⚠️ SQL syntax check skipped: ENUM/SET column type detected (not supported by parser)'
       });
     } else {
       checkSQL(sqlToCheck, 'Up', 'SQL_SYNTAX_ERROR');
@@ -1140,7 +1148,7 @@ export class MariaDBAdapter extends BaseAdapter {
 
     // === 2. Check Down section ===
     const downSQL = this.extractSection(content, 'Down');
-    if (downSQL && !isDCL) {
+    if (downSQL && !isDCL && !hasEnumOrSet) {
       checkSQL(downSQL, 'Down', 'SQL_SYNTAX_ERROR_DOWN');
     }
 
@@ -1175,6 +1183,14 @@ export class MariaDBAdapter extends BaseAdapter {
       const statements = rawBuf.join('\n').split(';').map(s => s.trim()).filter(s => s.length > 0);
 
       for (const stmt of statements) {
+        // Skip statements using DATABASE() — not supported by node-sql-parser
+        if (/\bDATABASE\s*\(\)/i.test(stmt)) {
+          warnings.push({
+            type: 'syntax-check-skipped',
+            message: `⚠️ Sanity ${section} SQL syntax check skipped: DATABASE() function not supported by parser`
+          });
+          continue;
+        }
         try {
           const parser = new SQLParser();
           parser.astify(stmt, { database: 'MariaDB' });

@@ -740,8 +740,9 @@ export async function down(db, client) {
       return { errors, warnings };
     }
 
-    // Strip ESM export syntax and parse as a function body to catch syntax errors early.
+    // Strip ESM export/import syntax and parse as a function body to catch syntax errors early.
     const parseTarget = content
+      .replace(/^\s*import\s+.*?;?\s*$/gm, '')
       .replace(/^\s*export\s+default\s+/gm, '')
       .replace(/^\s*export\s+(async\s+function|function|const|let|var|class)\s+/gm, '$1 ')
       .replace(/^\s*export\s*\{\s*[^}]+\s*\};?\s*$/gm, '');

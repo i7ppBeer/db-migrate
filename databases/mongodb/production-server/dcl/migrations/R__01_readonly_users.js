@@ -1,9 +1,11 @@
+// @allow-forbidden: true
 /**
  * R__01_readonly_users.js
  * DCL Repeatable Migration: Read-Only Users
  * 
  * This script is idempotent - safe to run multiple times
  * Will be re-executed when checksum changes
+ * updateUser is used for roles-only update (no password change)
  */
 
 export async function up(db, client) {
@@ -47,26 +49,24 @@ export async function up(db, client) {
 
 /**
  * Helper: Create or update user (idempotent)
+ * - User exists: update roles only (preserve password)
+ * - User not exists: create with pwd + roles
  */
 async function createOrUpdateUser(adminDb, userSpec) {
-  try {
-    // Try to update existing user
+  const result = await adminDb.command({ usersInfo: userSpec.user });
+  if (result.users.length > 0) {
+    // User exists, update roles only
     await adminDb.command({
       updateUser: userSpec.user,
+      roles: userSpec.roles
+    });
+  } else {
+    // User not exists, create with pwd + roles
+    await adminDb.command({
+      createUser: userSpec.user,
       pwd: userSpec.pwd,
       roles: userSpec.roles
     });
-  } catch (error) {
-    if (error.codeName === 'UserNotFound') {
-      // User doesn't exist, create it
-      await adminDb.command({
-        createUser: userSpec.user,
-        pwd: userSpec.pwd,
-        roles: userSpec.roles
-      });
-    } else {
-      throw error;
-    }
   }
 }
 

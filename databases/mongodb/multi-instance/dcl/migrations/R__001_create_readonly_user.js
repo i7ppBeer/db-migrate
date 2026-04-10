@@ -1,34 +1,27 @@
+// @allow-forbidden: true
 /**
  * DCL: Create application read-only user
  * Repeatable migration - re-applied when checksum changes
  * Must be idempotent (safe to run multiple times)
+ * updateUser is used for roles-only update (no password change)
  */
 
 export async function up(db, client) {
   const adminDb = client.db('admin');
-  
-  // Check if user exists, drop and recreate for idempotency
-  try {
-    await adminDb.command({
-      usersInfo: { user: 'app_readonly', db: 'admin' }
-    }).then(result => {
-      if (result.users.length > 0) {
-        return adminDb.command({ dropUser: 'app_readonly' });
-      }
-    });
-  } catch (e) {
-    // User doesn't exist, continue
+  const username = 'app_readonly';
+  const roles = [
+    { role: 'read', db: 'test_multi_primary' },
+    { role: 'read', db: 'test_multi_secondary' }
+  ];
+
+  const result = await adminDb.command({ usersInfo: username });
+  if (result.users.length > 0) {
+    // User exists, update roles only
+    await adminDb.command({ updateUser: username, roles });
+    console.log('[DCL] Updated app_readonly roles');
+  } else {
+    // User not exists, create with pwd + roles
+    await adminDb.command({ createUser: username, pwd: 'readonly_pass', roles });
+    console.log('[DCL] Created app_readonly user');
   }
-  
-  // Create read-only user
-  await adminDb.command({
-    createUser: 'app_readonly',
-    pwd: 'readonly_pass',
-    roles: [
-      { role: 'read', db: 'test_multi_primary' },
-      { role: 'read', db: 'test_multi_secondary' }
-    ]
-  });
-  
-  console.log('[DCL] Created app_readonly user');
 }
