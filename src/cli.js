@@ -1269,7 +1269,7 @@ program
     // Run tests for each config file
     for (const configPath of configFiles) {
       const relativePath = path.relative(process.cwd(), configPath);
-      const dbType = configPath.includes('mongodb') ? 'mongodb' : 'mariadb';
+      let dbType = configPath.includes('mongodb') ? 'mongodb' : 'mariadb';
 
       // Detect if this is a DCL or DDL config
       const isDCL = configPath.includes('/dcl/');
@@ -1294,7 +1294,12 @@ program
       } else if (!path.isAbsolute(baseConfig.migrationsDir)) {
         baseConfig.migrationsDir = path.resolve(path.dirname(configPath), baseConfig.migrationsDir);
       }
-      baseConfig.type = dbType;
+      // Prefer type from config.js; fall back to path-based detection
+      if (baseConfig.type) {
+        dbType = baseConfig.type;
+      } else {
+        baseConfig.type = dbType;
+      }
 
       // Expand multi-instance configs into individual per-instance runs
       const instanceList = (baseConfig.instances && Array.isArray(baseConfig.instances))
