@@ -8,7 +8,7 @@
  * updateUser is used for roles-only update (no password change)
  */
 
-export async function up(db, client) {
+export async function up(db, client, { createOrUpdateUser } = {}) {
   const adminDb = client.db('admin');
   
   // ============================================
@@ -16,7 +16,7 @@ export async function up(db, client) {
   // ============================================
   await createOrUpdateUser(adminDb, {
     user: 'ecommerce_app',
-    pwd: 'ecommerce_app_secure_pass_123',
+    pwd: 'CHANGE_ME_ON_FIRST_LOGIN',
     roles: [
       { role: 'readWrite', db: 'ecommerce' }
     ]
@@ -27,7 +27,7 @@ export async function up(db, client) {
   // ============================================
   await createOrUpdateUser(adminDb, {
     user: 'analytics_app',
-    pwd: 'analytics_app_secure_pass_456',
+    pwd: 'CHANGE_ME_ON_FIRST_LOGIN',
     roles: [
       { role: 'readWrite', db: 'analytics' }
     ]
@@ -38,39 +38,17 @@ export async function up(db, client) {
   // ============================================
   await createOrUpdateUser(adminDb, {
     user: 'logging_app',
-    pwd: 'logging_app_secure_pass_789',
+    pwd: 'CHANGE_ME_ON_FIRST_LOGIN',
     roles: [
       { role: 'readWrite', db: 'logging' },
       // Logging app might need to read from other DBs for correlation
       { role: 'read', db: 'ecommerce' },
-      { role: 'read', db: 'analytics' }
+      { role: 'read', db: 'analytics' },
+      { role: 'read', db: 'reporting' }
     ]
   });
 
   console.log('   ✅ Read-write users created/updated');
-}
-
-/**
- * Helper: Create or update user (idempotent)
- * - User exists: update roles only (preserve password)
- * - User not exists: create with pwd + roles
- */
-async function createOrUpdateUser(adminDb, userSpec) {
-  const result = await adminDb.command({ usersInfo: userSpec.user });
-  if (result.users.length > 0) {
-    // User exists, update roles only
-    await adminDb.command({
-      updateUser: userSpec.user,
-      roles: userSpec.roles
-    });
-  } else {
-    // User not exists, create with pwd + roles
-    await adminDb.command({
-      createUser: userSpec.user,
-      pwd: userSpec.pwd,
-      roles: userSpec.roles
-    });
-  }
 }
 
 // No down migration for repeatable DCL

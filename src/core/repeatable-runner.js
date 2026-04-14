@@ -23,6 +23,35 @@ import path from 'path';
 import crypto from 'crypto';
 import os from 'os';
 
+/**
+ * Built-in helpers passed as the third argument to MongoDB DCL up(db, client, helpers).
+ * Migrations can destructure what they need without any imports:
+ *   export async function up(db, client, { createOrUpdateUser }) { ... }
+ */
+const mongodbHelpers = {
+  /**
+   * Create or update a MongoDB user idempotently.
+   * - User exists : update roles and password
+   * - User absent : create with pwd + roles
+   */
+  async createOrUpdateUser(adminDb, userSpec) {
+    const result = await adminDb.command({ usersInfo: userSpec.user });
+    if (result.users.length > 0) {
+      await adminDb.command({
+        updateUser: userSpec.user,
+        pwd: userSpec.pwd,
+        roles: userSpec.roles
+      });
+    } else {
+      await adminDb.command({
+        createUser: userSpec.user,
+        pwd: userSpec.pwd,
+        roles: userSpec.roles
+      });
+    }
+  }
+};
+
 export class RepeatableRunner {
   constructor(config) {
     this.config = config;
@@ -279,9 +308,12 @@ export class RepeatableRunner {
     } else {
       const isJS = originalContent.includes('export async function up');
       if (isJS) {
-        // JS: scan line by line for:  const username = 'app_xxx';
+        // JS: scan line by line for:
+        //   const username = 'app_xxx';   (single-var style)
+        //   user: 'app_xxx',              (object property style)
         for (const line of originalContent.split('\n')) {
-          const m = line.match(/const\s+username\s*=\s*['"']([^'"']+)['"']/);
+          const m = line.match(/const\s+username\s*=\s*['"']([^'"']+)['"']/) ||
+                    line.match(/\buser\s*:\s*['"]([^'"]+)['"]/);
           if (m) usernames.push(m[1]);
         }
       } else {
@@ -749,7 +781,7 @@ export class RepeatableRunner {
           throw new Error('Migration must export an "up" function');
         }
 
-        const upResult = await moduleToRun.up(db, client);
+        const upResult = await moduleToRun.up(db, client, mongodbHelpers);
 
         // Best-effort cleanup of temp file
         if (tempFilePath) await fs.unlink(tempFilePath).catch(() => {});

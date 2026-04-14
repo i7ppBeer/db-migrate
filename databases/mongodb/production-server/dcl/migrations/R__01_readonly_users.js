@@ -8,7 +8,7 @@
  * updateUser is used for roles-only update (no password change)
  */
 
-export async function up(db, client) {
+export async function up(db, client, { createOrUpdateUser } = {}) {
   const adminDb = client.db('admin');
   
   // ============================================
@@ -16,7 +16,7 @@ export async function up(db, client) {
   // ============================================
   await createOrUpdateUser(adminDb, {
     user: 'ecommerce_readonly',
-    pwd: 'readonly_secure_password_123',
+    pwd: 'CHANGE_ME_ON_FIRST_LOGIN',
     roles: [
       { role: 'read', db: 'ecommerce' }
     ]
@@ -27,7 +27,7 @@ export async function up(db, client) {
   // ============================================
   await createOrUpdateUser(adminDb, {
     user: 'analytics_readonly',
-    pwd: 'analytics_readonly_pass_456',
+    pwd: 'CHANGE_ME_ON_FIRST_LOGIN',
     roles: [
       { role: 'read', db: 'analytics' }
     ]
@@ -38,36 +38,13 @@ export async function up(db, client) {
   // ============================================
   await createOrUpdateUser(adminDb, {
     user: 'logging_readonly',
-    pwd: 'logging_readonly_pass_789',
+    pwd: 'CHANGE_ME_ON_FIRST_LOGIN',
     roles: [
       { role: 'read', db: 'logging' }
     ]
   });
 
   console.log('   ✅ Read-only users created/updated');
-}
-
-/**
- * Helper: Create or update user (idempotent)
- * - User exists: update roles only (preserve password)
- * - User not exists: create with pwd + roles
- */
-async function createOrUpdateUser(adminDb, userSpec) {
-  const result = await adminDb.command({ usersInfo: userSpec.user });
-  if (result.users.length > 0) {
-    // User exists, update roles only
-    await adminDb.command({
-      updateUser: userSpec.user,
-      roles: userSpec.roles
-    });
-  } else {
-    // User not exists, create with pwd + roles
-    await adminDb.command({
-      createUser: userSpec.user,
-      pwd: userSpec.pwd,
-      roles: userSpec.roles
-    });
-  }
 }
 
 // No down migration for repeatable DCL

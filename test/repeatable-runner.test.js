@@ -27,7 +27,8 @@ class TestableRepeatableRunner extends RepeatableRunner {
       const isJS = originalContent.includes('export async function up');
       if (isJS) {
         for (const line of originalContent.split('\n')) {
-          const m = line.match(/const\s+username\s*=\s*['"']([^'"']+)['"']/);
+          const m = line.match(/const\s+username\s*=\s*['"']([^'"']+)['"']/) ||
+                    line.match(/\buser\s*:\s*['"]([^'"]+)['"]/);
           if (m) usernames.push({ name: m[1], isReset: false });
         }
       } else {
@@ -377,5 +378,51 @@ describe('Repeatable Migration File Naming', () => {
     for (const name of invalidNames) {
       expect(isRepeatableFile(name)).toBe(false);
     }
+  });
+});
+
+describe('saveGeneratedPasswords — JS object property style (user: "xxx")', () => {
+  let runner;
+  beforeEach(async () => {
+    runner = new TestableRepeatableRunner({ checksumTable: 'test_dcl' });
+    await fsNative.writeFile(SECRET_FILE, '', 'utf-8');
+  });
+  afterEach(async () => {
+    await fsNative.unlink(SECRET_FILE).catch(() => {});
+  });
+
+  it('should extract usernames from object property style and pair passwords positionally', async () => {
+    const js = [
+      `export async function up(db, client) {`,
+      `  await createOrUpdateUser(adminDb, {`,
+      `    user: 'ecommerce_app',`,
+      `    pwd: 'CHANGE_ME_ON_FIRST_LOGIN',`,
+      `  });`,
+      `  await createOrUpdateUser(adminDb, {`,
+      `    user: 'analytics_app',`,
+      `    pwd: 'CHANGE_ME_ON_FIRST_LOGIN',`,
+      `  });`,
+      `}`,
+    ].join('\n');
+
+    await runner.saveGeneratedPasswords(js, ['pw_ecommerce', 'pw_analytics'], false);
+
+    const written = await readSecretFile();
+    expect(written).toContain('ecommerce_app=pw_ecommerce');
+    expect(written).toContain('analytics_app=pw_analytics');
+  });
+
+  it('should still support const username = "xxx" style', async () => {
+    const js = [
+      `export async function up(db, client) {`,
+      `  const username = 'legacy_user';`,
+      `  // pwd: 'CHANGE_ME_ON_FIRST_LOGIN'`,
+      `}`,
+    ].join('\n');
+
+    await runner.saveGeneratedPasswords(js, ['pw_legacy'], false);
+
+    const written = await readSecretFile();
+    expect(written).toContain('legacy_user=pw_legacy');
   });
 });
