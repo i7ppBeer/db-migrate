@@ -28,7 +28,7 @@ import os from 'os';
  * Migrations can destructure what they need without any imports:
  *   export async function up(db, client, { createOrUpdateUser }) { ... }
  */
-const mongodbHelpers = {
+export const mongodbHelpers = {
   /**
    * Create or update a MongoDB user idempotently.
    * - User exists : update roles and password

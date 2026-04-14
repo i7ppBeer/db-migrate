@@ -11,10 +11,12 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { createAdapter, createAdapters, loadConfig } from './adapters/index.js';
 import { Reporter } from './core/reporter.js';
-import { RepeatableRunner } from './core/repeatable-runner.js';
+import { RepeatableRunner, mongodbHelpers } from './core/repeatable-runner.js';
 import { DCLIdempotentChecker } from './core/dcl-idempotent-checker.js';
 import fs from 'fs/promises';
 import path from 'path';
+import os from 'os';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1738,9 +1740,19 @@ program
             // Use query instead of execute for multiple statements
             await adapter.connection.query(file.content);
           } else if (adapter.dbType === 'mongodb') {
-            const module = await import(`file://${file.filePath}`);
-            if (typeof module.up === 'function') {
-              await module.up(adapter.db, adapter.client);
+            const { resolved, generated } = runner.resolvePlaceholderPasswords(file.content, file.fileName);
+            let mod;
+            if (generated) {
+              const baseName = file.fileName.replace(/\.js$/, '.mjs');
+              const tmpPath = path.join(os.tmpdir(), `dcl-verify-${crypto.randomBytes(8).toString('hex')}-${baseName}`);
+              await fs.writeFile(tmpPath, resolved, 'utf-8');
+              mod = await import(`file://${tmpPath}`);
+              await fs.unlink(tmpPath).catch(() => {});
+            } else {
+              mod = await import(`file://${file.filePath}?t=${Date.now()}`);
+            }
+            if (typeof mod.up === 'function') {
+              await mod.up(adapter.db, adapter.client, mongodbHelpers);
             }
           }
         };
