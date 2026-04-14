@@ -794,9 +794,19 @@ program
                 if (adapter.dbType === 'mariadb') {
                   await adapter.connection.query(file.content);
                 } else if (adapter.dbType === 'mongodb') {
-                  const module = await import(`file://${file.filePath}`);
+                  const { resolved, generated } = runner.resolvePlaceholderPasswords(file.content, file.fileName);
+                  let module;
+                  if (generated) {
+                    const baseName = file.fileName.replace(/\.js$/, '.mjs');
+                    const tmpPath = path.join(os.tmpdir(), `validate-all-dcl-${crypto.randomBytes(8).toString('hex')}-${baseName}`);
+                    await fs.writeFile(tmpPath, resolved, 'utf-8');
+                    module = await import(`file://${tmpPath}`);
+                    await fs.unlink(tmpPath).catch(() => {});
+                  } else {
+                    module = await import(`file://${file.filePath}?t=${Date.now()}`);
+                  }
                   if (typeof module.up === 'function') {
-                    await module.up(adapter.db, adapter.client);
+                    await module.up(adapter.db, adapter.client, mongodbHelpers);
                   }
                 }
               };
@@ -1400,9 +1410,19 @@ program
                 if (adapter.dbType === 'mariadb') {
                   await adapter.connection.query(file.content);
                 } else if (adapter.dbType === 'mongodb') {
-                  const mod = await import(`file://${file.filePath}`);
+                  const { resolved, generated } = runner.resolvePlaceholderPasswords(file.content, file.fileName);
+                  let mod;
+                  if (generated) {
+                    const baseName = file.fileName.replace(/\.js$/, '.mjs');
+                    const tmpPath = path.join(os.tmpdir(), `validate-all-${crypto.randomBytes(8).toString('hex')}-${baseName}`);
+                    await fs.writeFile(tmpPath, resolved, 'utf-8');
+                    mod = await import(`file://${tmpPath}`);
+                    await fs.unlink(tmpPath).catch(() => {});
+                  } else {
+                    mod = await import(`file://${file.filePath}?t=${Date.now()}`);
+                  }
                   if (typeof mod.up === 'function') {
-                    await mod.up(adapter.db, adapter.client);
+                    await mod.up(adapter.db, adapter.client, mongodbHelpers);
                   }
                 }
               };
@@ -2000,9 +2020,19 @@ program
             if (adapter.dbType === 'mariadb') {
               await adapter.connection.query(file.content);
             } else if (adapter.dbType === 'mongodb') {
-              const module = await import(`file://${file.filePath}`);
+              const { resolved, generated } = runner.resolvePlaceholderPasswords(file.content, file.fileName);
+              let module;
+              if (generated) {
+                const baseName = file.fileName.replace(/\.js$/, '.mjs');
+                const tmpPath = path.join(os.tmpdir(), `dcl-verify-all-${crypto.randomBytes(8).toString('hex')}-${baseName}`);
+                await fs.writeFile(tmpPath, resolved, 'utf-8');
+                module = await import(`file://${tmpPath}`);
+                await fs.unlink(tmpPath).catch(() => {});
+              } else {
+                module = await import(`file://${file.filePath}?t=${Date.now()}`);
+              }
               if (typeof module.up === 'function') {
-                await module.up(adapter.db, adapter.client);
+                await module.up(adapter.db, adapter.client, mongodbHelpers);
               }
             }
           };
