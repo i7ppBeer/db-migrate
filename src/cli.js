@@ -786,7 +786,21 @@ program
             let allPassed = true;
             let passedCount = 0;
             let failedCount = 0;
-            
+
+            // Scaffold: auto-create placeholder DB/tables for table-level GRANTs
+            if (adapter.dbType === 'mariadb' && files.length > 0) {
+              const { DCLScaffold } = await import('./core/dcl-scaffold.js');
+              const scaffold = new DCLScaffold();
+              const scaffoldResult = await scaffold.scaffoldForDCL(
+                adapter.connection,
+                files.map(f => f.content),
+                { verbose: false }
+              );
+              if (scaffoldResult.tables.length > 0) {
+                console.log(chalk.gray(`   [scaffold] Created ${scaffoldResult.tables.length} placeholder table(s): ${scaffoldResult.tables.join(', ')}`));
+              }
+            }
+
             for (const file of files) {
               console.log(chalk.blue(`📄 ${file.fileName}`));
               
@@ -1400,6 +1414,20 @@ program
             // Step 2: DCLIdempotentChecker — per-file state comparison (run×2 + diff)
             console.log(chalk.blue(`\n[TEST] ${label} (${dbType}) DCL Idempotency...`));
 
+            // Scaffold: auto-create placeholder DB/tables for table-level GRANTs
+            if (adapter.dbType === 'mariadb' && dclFiles.length > 0) {
+              const { DCLScaffold } = await import('./core/dcl-scaffold.js');
+              const scaffold = new DCLScaffold();
+              const scaffoldResult = await scaffold.scaffoldForDCL(
+                adapter.connection,
+                dclFiles.map(f => f.content),
+                { verbose: false }
+              );
+              if (scaffoldResult.tables.length > 0) {
+                console.log(chalk.gray(`   [scaffold] Created ${scaffoldResult.tables.length} placeholder table(s): ${scaffoldResult.tables.join(', ')}`));
+              }
+            }
+
             const checker = new DCLIdempotentChecker({ verbose: false });
 
             for (const file of dclFiles) {
@@ -1751,7 +1779,21 @@ program
       
       const files = await runner.getRepeatableFiles(migrationsDir);
       let allPassed = true;
-      
+
+      // Scaffold: auto-create placeholder DB/tables for table-level GRANTs
+      if (adapter.dbType === 'mariadb' && files.length > 0) {
+        const { DCLScaffold } = await import('./core/dcl-scaffold.js');
+        const scaffold = new DCLScaffold();
+        const scaffoldResult = await scaffold.scaffoldForDCL(
+          adapter.connection,
+          files.map(f => f.content),
+          { verbose: false }
+        );
+        if (scaffoldResult.tables.length > 0) {
+          console.log(chalk.gray(`   [scaffold] Created ${scaffoldResult.tables.length} placeholder table(s): ${scaffoldResult.tables.join(', ')}`));
+        }
+      }
+
       for (const file of files) {
         console.log(chalk.blue(`\n📄 ${file.fileName}`));
         
