@@ -493,6 +493,13 @@ export class MongoDBAdapter extends BaseAdapter {
 
   async create(name) {
     try {
+      // migrate-mongo.create() needs config set (normally done in connect(), but create doesn't need a DB connection)
+      migrateMongo.config.set({
+        ...this.config,
+        changelogCollectionName: this.config.changelogCollection || this.config.changelogCollectionName || 'changelog',
+        moduleSystem: 'esm'
+      });
+
       const fileName = await migrateMongo.create(name);
 
       // Enrich generated template with sanity check scaffolding for better authoring parity.
