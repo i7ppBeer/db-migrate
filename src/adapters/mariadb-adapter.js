@@ -55,20 +55,22 @@ export class MariaDBAdapter extends BaseAdapter {
         // DDL mode: forbid user/permission management (must live in DCL repeatable project)
         ...(isRepeatable ? {
           // DDL structural operations — absolutely not allowed in DCL (no bypass)
+          // All patterns use (?:^|;)\s* to match only statement-start positions,
+          // preventing false positives from GRANT privilege names (e.g. GRANT CREATE TABLE, ALTER ROUTINE, TRIGGER ON ...).
           dclReverse: [
-            { pattern: /\bCREATE\s+TABLE\b/i,              code: 'CREATE_TABLE_IN_DCL',     message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
-            { pattern: /\bALTER\s+TABLE\b/i,               code: 'ALTER_TABLE_IN_DCL',      message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
-            { pattern: /\bDROP\s+TABLE\b/i,                code: 'DROP_TABLE_IN_DCL',       message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
-            { pattern: /\bCREATE\s+(?:UNIQUE\s+)?INDEX\b/i, code: 'CREATE_INDEX_IN_DCL',   message: '🔴 DDL: Index management should be in DDL project (Versioned) / 索引管理應在 DDL 專案' },
-            { pattern: /\bDROP\s+INDEX\b/i,                code: 'DROP_INDEX_IN_DCL',       message: '🔴 DDL: Index management should be in DDL project (Versioned) / 索引管理應在 DDL 專案' },
-            { pattern: /\bCREATE\s+(?:OR\s+REPLACE\s+)?VIEW\b/i, code: 'CREATE_VIEW_IN_DCL', message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
-            { pattern: /\bALTER\s+VIEW\b/i,                code: 'ALTER_VIEW_IN_DCL',       message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
-            { pattern: /\bDROP\s+VIEW\b/i,                 code: 'DROP_VIEW_IN_DCL',        message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
-            { pattern: /\bCREATE\s+(?:DEFINER\s*=\S+\s+)?(?:PROCEDURE|FUNCTION)\b/i, code: 'CREATE_ROUTINE_IN_DCL', message: '🔴 DDL: Routine management should be in DDL project (Versioned) / 程序管理應在 DDL 專案' },
-            { pattern: /\bDROP\s+(?:PROCEDURE|FUNCTION)\b/i, code: 'DROP_ROUTINE_IN_DCL',  message: '🔴 DDL: Routine management should be in DDL project (Versioned) / 程序管理應在 DDL 專案' },
-            { pattern: /\bCREATE\s+(?:DEFINER\s*=\S+\s+)?TRIGGER\b/i, code: 'CREATE_TRIGGER_IN_DCL', message: '🔴 DDL: Trigger management should be in DDL project (Versioned) / 觸發器管理應在 DDL 專案' },
-            { pattern: /\bDROP\s+TRIGGER\b/i,              code: 'DROP_TRIGGER_IN_DCL',     message: '🔴 DDL: Trigger management should be in DDL project (Versioned) / 觸發器管理應在 DDL 專案' },
-            { pattern: /\bRENAME\s+TABLE\b/i,              code: 'RENAME_TABLE_IN_DCL',     message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' }
+            { pattern: /(?:^|;)\s*CREATE\s+TABLE\b/i,              code: 'CREATE_TABLE_IN_DCL',     message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /(?:^|;)\s*ALTER\s+TABLE\b/i,               code: 'ALTER_TABLE_IN_DCL',      message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /(?:^|;)\s*DROP\s+TABLE\b/i,                code: 'DROP_TABLE_IN_DCL',       message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /(?:^|;)\s*CREATE\s+(?:UNIQUE\s+)?INDEX\b/i, code: 'CREATE_INDEX_IN_DCL',   message: '🔴 DDL: Index management should be in DDL project (Versioned) / 索引管理應在 DDL 專案' },
+            { pattern: /(?:^|;)\s*DROP\s+INDEX\b/i,                code: 'DROP_INDEX_IN_DCL',       message: '🔴 DDL: Index management should be in DDL project (Versioned) / 索引管理應在 DDL 專案' },
+            { pattern: /(?:^|;)\s*CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\b/i, code: 'CREATE_VIEW_IN_DCL', message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /(?:^|;)\s*ALTER\s+VIEW\b/i,                code: 'ALTER_VIEW_IN_DCL',       message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /(?:^|;)\s*DROP\s+VIEW\b/i,                 code: 'DROP_VIEW_IN_DCL',        message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' },
+            { pattern: /(?:^|;)\s*CREATE\s+(?:DEFINER\s*=\S+\s+)?(?:PROCEDURE|FUNCTION)\b/i, code: 'CREATE_ROUTINE_IN_DCL', message: '🔴 DDL: Routine management should be in DDL project (Versioned) / 程序管理應在 DDL 專案' },
+            { pattern: /(?:^|;)\s*DROP\s+(?:PROCEDURE|FUNCTION)\b/i, code: 'DROP_ROUTINE_IN_DCL',  message: '🔴 DDL: Routine management should be in DDL project (Versioned) / 程序管理應在 DDL 專案' },
+            { pattern: /(?:^|;)\s*CREATE\s+(?:DEFINER\s*=\S+\s+)?TRIGGER\b/i, code: 'CREATE_TRIGGER_IN_DCL', message: '🔴 DDL: Trigger management should be in DDL project (Versioned) / 觸發器管理應在 DDL 專案' },
+            { pattern: /(?:^|;)\s*DROP\s+TRIGGER\b/i,              code: 'DROP_TRIGGER_IN_DCL',     message: '🔴 DDL: Trigger management should be in DDL project (Versioned) / 觸發器管理應在 DDL 專案' },
+            { pattern: /(?:^|;)\s*RENAME\s+TABLE\b/i,              code: 'RENAME_TABLE_IN_DCL',     message: '🔴 DDL: Schema changes should be in DDL project (Versioned) / 結構變更應在 DDL 專案' }
           ],
           // High-risk DCL ops: irreversible or credential-sensitive — require -- @allow-forbidden: true
           dclHighRisk: [

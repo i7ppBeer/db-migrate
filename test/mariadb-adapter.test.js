@@ -742,6 +742,25 @@ REVOKE SELECT ON mydb.* FROM 'app'@'%';
         expect(result.forbiddenOps.some(op => op.code === 'CREATE_VIEW_IN_DCL')).toBe(true);
       });
 
+      it('should NOT flag GRANT CREATE VIEW as CREATE_VIEW_IN_DCL', () => {
+        const sql = `GRANT CREATE VIEW ON *.* TO 'app_user'@'%';\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_grant.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_VIEW_IN_DCL')).toBe(false);
+      });
+
+      it('should NOT flag GRANT CREATE ROUTINE as CREATE_ROUTINE_IN_DCL', () => {
+        const sql = `GRANT CREATE ROUTINE ON mydb.* TO 'app_user'@'%';\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_grant.sql');
+        expect(result.forbiddenOps.some(op => op.code === 'CREATE_ROUTINE_IN_DCL')).toBe(false);
+      });
+
+      it('should NOT flag GRANT with multiple DDL-named privileges', () => {
+        const sql = `GRANT SELECT, CREATE, ALTER, DROP, INDEX, CREATE VIEW, CREATE ROUTINE, ALTER ROUTINE, TRIGGER ON mydb.* TO 'app_user'@'%';\n`;
+        const result = dclAdapter.validateContent(sql, 'R__001_grant.sql');
+        const dclReverseCodes = ['CREATE_TABLE_IN_DCL','ALTER_TABLE_IN_DCL','DROP_TABLE_IN_DCL','CREATE_INDEX_IN_DCL','DROP_INDEX_IN_DCL','CREATE_VIEW_IN_DCL','ALTER_VIEW_IN_DCL','DROP_VIEW_IN_DCL','CREATE_ROUTINE_IN_DCL','DROP_ROUTINE_IN_DCL','CREATE_TRIGGER_IN_DCL','DROP_TRIGGER_IN_DCL','RENAME_TABLE_IN_DCL'];
+        expect(result.forbiddenOps.filter(op => dclReverseCodes.includes(op.code))).toHaveLength(0);
+      });
+
       it('should forbid DROP VIEW in DCL migration (expanded dclReverse)', () => {
         const sql = `DROP VIEW v_users;\n`;
         const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
