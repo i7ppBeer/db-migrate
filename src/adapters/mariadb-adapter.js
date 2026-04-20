@@ -998,13 +998,20 @@ export class MariaDBAdapter extends BaseAdapter {
     try {
       const migrationsDir = this.config.migrationsDir;
       const files = await fs.readdir(migrationsDir);
-      const migrationFiles = files.filter(f => f.endsWith('.sql'));
+      // Sort with numeric collation so V2__ < V10__ (not lexicographic V10 < V2)
+      const migrationFiles = files
+        .filter(f => f.endsWith('.sql'))
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+
+      const filesData = [];
 
       for (const file of migrationFiles) {
         const filePath = path.join(migrationsDir, file);
         const content = await fs.readFile(filePath, 'utf-8');
         const fileResult = this.validateContent(content, file, options);
-        
+
+        filesData.push({ fileName: file, content });
+
         results.results.push({
           file,
           ...fileResult
@@ -1013,6 +1020,25 @@ export class MariaDBAdapter extends BaseAdapter {
         if (!fileResult.valid) {
           results.valid = false;
         }
+      }
+
+      // Cross-file FK dependency check (DDL mode only; repeatable returns [])
+      const crossFKErrors = this.validateCrossFileFKDependencies(filesData);
+      for (const { fileName, errors: fkErrors } of crossFKErrors) {
+        const fileResult = results.results.find(r => r.file === fileName);
+        if (fileResult) {
+          fileResult.errors.push(...fkErrors);
+          fileResult.summary.structural += fkErrors.length;
+          if (!fileResult.valid) {
+            // already invalid — keep
+          } else {
+            fileResult.valid = false;
+            results.valid = false;
+          }
+        }
+      }
+      if (crossFKErrors.length > 0) {
+        results.valid = false;
       }
     } catch (error) {
       results.valid = false;
@@ -1280,6 +1306,23 @@ export class MariaDBAdapter extends BaseAdapter {
       createdTables.length > 0 && 
       droppedTablesInDown.every(d => createdTables.map(t => t.toLowerCase()).includes(d.toLowerCase()));
 
+    // === 2c. DDL only: Check FK references against tables dropped in the same UP section ===
+    if (this.config.mode !== 'repeatable') {
+      const fkRefs = this.extractFKReferences(upSQL);
+      const droppedInUpSet = new Set(droppedTablesInUp.map(t => t.toLowerCase()));
+
+      for (const fk of fkRefs) {
+        if (droppedInUpSet.has(fk.referencedTable)) {
+          const nameLabel = fk.constraintName ? ` '${fk.constraintName}'` : '';
+          errors.push({
+            type: 'fk-dropped-table',
+            code: 'FK_REFERENCES_DROPPED_TABLE',
+            message: `🔴 FOREIGN KEY${nameLabel} references '${fk.referencedTable}' which is dropped in the same migration UP section`
+          });
+        }
+      }
+    }
+
     // === 3. Check FORBIDDEN operations ===
     for (const category of Object.keys(rules.forbidden)) {
       for (const rule of rules.forbidden[category]) {
@@ -1469,28 +1512,180 @@ export class MariaDBAdapter extends BaseAdapter {
 
   extractCreatedTables(sql) {
     const tables = [];
-    // Remove comments first
+    // Remove comments
     const cleanSQL = sql.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
-    // Match: CREATE TABLE table_name or CREATE TABLE IF NOT EXISTS table_name
-    const regex = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"]?(\w+)[`"]?/gi;
+    // CREATE [OR REPLACE] TABLE [IF NOT EXISTS] [schema.]table  (Bug 2 + 4)
+    const createRegex = /CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[`"]?[\w$]+[`"]?\.)?\s*[`"]?([\w$]+)[`"]?/gi;
     let match;
-    while ((match = regex.exec(cleanSQL)) !== null) {
+    while ((match = createRegex.exec(cleanSQL)) !== null) {
       tables.push(match[1]);
+    }
+    // RENAME TABLE old TO new [, old2 TO new2] — new names become "created"  (Bug 3)
+    const renameRegex = /RENAME\s+TABLE\s+(.+?)(?:;|$)/gi;
+    let renameMatch;
+    while ((renameMatch = renameRegex.exec(cleanSQL)) !== null) {
+      for (const part of renameMatch[1].split(',')) {
+        const toMatch = part.match(/\bTO\s+(?:[`"]?[\w$]+[`"]?\.)?[`"]?([\w$]+)[`"]?/i);
+        if (toMatch) tables.push(toMatch[1]);
+      }
     }
     return tables;
   }
 
   extractDroppedTables(sql) {
     const tables = [];
-    // Remove comments first
-    const cleanSQL = sql.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
-    // Match: DROP TABLE table_name or DROP TABLE IF EXISTS table_name
-    const regex = /DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?[`"]?(\w+)[`"]?/gi;
-    let match;
-    while ((match = regex.exec(cleanSQL)) !== null) {
-      tables.push(match[1]);
+    // Strip routine bodies first to avoid counting DROP TABLE inside procedures  (Bug 5)
+    const cleanSQL = this._stripRoutineBodies(sql)
+      .replace(/--.*$/gm, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '');
+    // DROP TABLE [IF EXISTS] tbl1 [, tbl2, tbl3] — may be schema-qualified  (Bug 1 + 2)
+    const dropStmtRegex = /DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?((?:[`"]?[\w$]+[`"]?\.)?[`"]?[\w$]+[`"]?(?:\s*,\s*(?:[`"]?[\w$]+[`"]?\.)?[`"]?[\w$]+[`"]?)*)/gi;
+    let stmtMatch;
+    while ((stmtMatch = dropStmtRegex.exec(cleanSQL)) !== null) {
+      for (const entry of stmtMatch[1].split(',')) {
+        const m = entry.trim().match(/(?:[`"]?[\w$]+[`"]?\.)?[`"]?([\w$]+)[`"]?/);
+        if (m) tables.push(m[1]);
+      }
     }
     return tables;
+  }
+
+  _stripRoutineBodies(sql) {
+    if (!sql) return sql;
+    // Strip CREATE PROCEDURE/FUNCTION/TRIGGER/EVENT bodies so that DDL statements
+    // inside routine bodies are not mistaken for migration-level DDL.  (Bug 5)
+    // Compound-statement END always has a trailing keyword (IF, WHILE, LOOP, CASE, REPEAT).
+    // Only the routine-closing END stands alone (followed by ; or $$ or whitespace/EOF).
+    return sql.replace(
+      /\bCREATE\b(?:\s+(?:DEFINER\s*=\s*\S+|OR\s+REPLACE))*\s+(?:PROCEDURE|FUNCTION|TRIGGER|EVENT)\b[^;]{0,2000}?\bBEGIN\b[\s\S]{0,10000}?\bEND\b(?!\s*(?:IF|WHILE|LOOP|CASE|REPEAT)\b)/gi,
+      '-- [routine stripped]'
+    );
+  }
+
+  /**
+   * Extract all FOREIGN KEY references from SQL.
+   * Supports all MariaDB FK syntax variants:
+   *   - Named inline:    CONSTRAINT `fk_name` FOREIGN KEY (col) REFERENCES tbl(id)
+   *   - Unnamed inline:  FOREIGN KEY (col) REFERENCES tbl(id) ON DELETE CASCADE
+   *   - ALTER TABLE ADD CONSTRAINT fk FOREIGN KEY (col) REFERENCES tbl(id)
+   *   - ALTER TABLE ADD FOREIGN KEY (col) REFERENCES tbl(id)
+   *   - Schema-qualified: REFERENCES `other_db`.`tbl`(id)  → schema stripped
+   *   - Self-referential: REFERENCES same_table(id)
+   *   - Multi-column FK: FOREIGN KEY (a, b) REFERENCES tbl(x, y)
+   *   - Multi-line formatted FKs
+   *
+   * ON DELETE / ON UPDATE order-independent (each captured separately).
+   *
+   * @param {string} sql - SQL content (UP section or full file)
+   * @returns {{ constraintName: string|null, referencedTable: string,
+   *             referencedSchema: string|null, onDelete: string|null, onUpdate: string|null }[]}
+   */
+  extractFKReferences(sql) {
+    if (!sql) return [];
+
+    // Strip comments and single-quoted string literals to avoid false positives.
+    // Double-quoted strings are kept because MariaDB uses them as identifiers (ANSI mode)
+    // when they appear in CONSTRAINT "name" syntax.
+    const cleanSQL = sql
+      .replace(/--.*$/gm, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/'(?:[^'\\]|\\.)*'/g, "'__STR__'");
+
+    const fks = [];
+
+    // Groups: 1=quoted constraint name (allows hyphens), 2=unquoted constraint name,
+    //         3=referencedSchema (optional), 4=referencedTable, 5=ON clause  (Bug 6)
+    const fkRegex = /(?:CONSTRAINT\s+(?:[`"]([^`"]+)[`"]|(\w+))\s+)?FOREIGN\s+KEY\s*\([^)]+\)\s+REFERENCES\s+(?:[`"]?(\w+)[`"]?\.)?[`"]?(\w+)[`"]?\s*(?:\([^)]+\))?\s*((?:ON\s+(?:DELETE|UPDATE)\s+(?:NO\s+ACTION|SET\s+(?:NULL|DEFAULT)|CASCADE|RESTRICT)\s*)*)/gi;
+
+    let match;
+    while ((match = fkRegex.exec(cleanSQL)) !== null) {
+      const actionClause = match[5] || '';
+
+      // Extract ON DELETE and ON UPDATE independently (order-insensitive)
+      const onDeleteMatch = actionClause.match(/ON\s+DELETE\s+(NO\s+ACTION|SET\s+NULL|SET\s+DEFAULT|CASCADE|RESTRICT)/i);
+      const onUpdateMatch = actionClause.match(/ON\s+UPDATE\s+(NO\s+ACTION|SET\s+NULL|SET\s+DEFAULT|CASCADE|RESTRICT)/i);
+
+      fks.push({
+        constraintName: match[1] || match[2] || null,
+        referencedSchema: match[3] ? match[3].replace(/[`"]/g, '') : null,
+        referencedTable: match[4].replace(/[`"]/g, '').toLowerCase(),
+        onDelete: onDeleteMatch ? onDeleteMatch[1].toUpperCase().replace(/\s+/g, ' ').trim() : null,
+        onUpdate: onUpdateMatch ? onUpdateMatch[1].toUpperCase().replace(/\s+/g, ' ').trim() : null
+      });
+    }
+
+    return fks;
+  }
+
+  /**
+   * Validate FK dependencies across multiple migration files (DDL mode only).
+   * Files must be provided in execution order (sorted lexicographically by caller).
+   *
+   * Detects: FK referencing a table that has not yet been created in any prior migration.
+   * Self-referential FKs (table references itself) are allowed.
+   * Schema-qualified references (db.table) strip the schema and check only table name.
+   * Tables dropped in a file are removed from the available set for subsequent files.
+   *
+   * @param {{ fileName: string, content: string }[]} filesData - sorted migration files
+   * @returns {{ fileName: string, errors: { type: string, code: string, message: string }[] }[]}
+   */
+  validateCrossFileFKDependencies(filesData) {
+    if (!filesData || filesData.length === 0) return [];
+    if (this.config.mode === 'repeatable') return [];
+
+    const allCreatedTables = new Set(); // lowercase table names created in prior files
+    const crossErrors = [];
+
+    for (const { fileName, content } of filesData) {
+      const upSQL = this.extractSection(content, 'Up') || content;
+
+      const createdNow = this.extractCreatedTables(upSQL).map(t => t.toLowerCase());
+      let droppedNow = this.extractDroppedTables(upSQL).map(t => t.toLowerCase());
+      const fkRefs = this.extractFKReferences(upSQL);
+
+      // RENAME TABLE old TO new — treat old name as dropped for cross-file tracking  (Bug 3)
+      const cleanUpSQL = upSQL.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      const renameRe = /RENAME\s+TABLE\s+(.+?)(?:;|$)/gi;
+      let renameMx;
+      while ((renameMx = renameRe.exec(cleanUpSQL)) !== null) {
+        for (const part of renameMx[1].split(',')) {
+          const fromMx = part.match(/(?:[`"]?[\w$]+[`"]?\.)?[`"]?([\w$]+)[`"]?\s+TO\s+/i);
+          if (fromMx) droppedNow.push(fromMx[1].toLowerCase());
+        }
+      }
+
+      // Tables dropped in this file are no longer available to subsequent files
+      for (const t of droppedNow) {
+        allCreatedTables.delete(t);
+      }
+
+      // Available = all previously seen tables + tables created in THIS file (same-file self-ref OK)
+      const availableNow = new Set([...allCreatedTables, ...createdNow]);
+
+      const fileErrors = [];
+      for (const fk of fkRefs) {
+        const ref = fk.referencedTable; // already lowercased
+        if (!availableNow.has(ref)) {
+          const nameLabel = fk.constraintName ? ` '${fk.constraintName}'` : '';
+          fileErrors.push({
+            type: 'fk-unresolved-reference',
+            code: 'FK_UNRESOLVED_REFERENCE',
+            message: `🔴 FOREIGN KEY${nameLabel} references '${fk.referencedTable}' which has not been created in any preceding migration`
+          });
+        }
+      }
+
+      if (fileErrors.length > 0) {
+        crossErrors.push({ fileName, errors: fileErrors });
+      }
+
+      // After processing this file, its created tables are available to subsequent files
+      for (const t of createdNow) {
+        allCreatedTables.add(t);
+      }
+    }
+
+    return crossErrors;
   }
 
   extractSection(content, section) {

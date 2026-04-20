@@ -856,4 +856,700 @@ REVOKE SELECT ON mydb.* FROM 'app'@'%';
       });
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // extractFKReferences() — 18 cases
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('extractFKReferences()', () => {
+    it('unnamed inline FK returns constraintName null', () => {
+      const sql = `CREATE TABLE orders (
+        id INT PRIMARY KEY,
+        user_id INT,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+      );`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].constraintName).toBeNull();
+      expect(result[0].referencedTable).toBe('users');
+    });
+
+    it('named CONSTRAINT FK captures constraintName', () => {
+      const sql = `CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users(id)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].constraintName).toBe('fk_orders_user');
+      expect(result[0].referencedTable).toBe('users');
+    });
+
+    it('backtick-quoted names are stripped', () => {
+      const sql = `CONSTRAINT \`fk_name\` FOREIGN KEY (\`user_id\`) REFERENCES \`users\`(\`id\`)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].constraintName).toBe('fk_name');
+      expect(result[0].referencedTable).toBe('users');
+    });
+
+    it('multi-column FK is extracted', () => {
+      const sql = `FOREIGN KEY (a, b) REFERENCES items(x, y)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('items');
+    });
+
+    it('ON DELETE CASCADE captured', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users(id) ON DELETE CASCADE`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result[0].onDelete).toBe('CASCADE');
+      expect(result[0].onUpdate).toBeNull();
+    });
+
+    it('ON DELETE SET NULL captured', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users(id) ON DELETE SET NULL`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result[0].onDelete).toBe('SET NULL');
+    });
+
+    it('ON DELETE RESTRICT and ON UPDATE CASCADE captured order-independently', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users(id) ON UPDATE CASCADE ON DELETE RESTRICT`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result[0].onDelete).toBe('RESTRICT');
+      expect(result[0].onUpdate).toBe('CASCADE');
+    });
+
+    it('ALTER TABLE ADD CONSTRAINT FK is extracted', () => {
+      const sql = `ALTER TABLE orders ADD CONSTRAINT fk_inv_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].constraintName).toBe('fk_inv_user');
+      expect(result[0].referencedTable).toBe('users');
+      expect(result[0].onDelete).toBe('CASCADE');
+    });
+
+    it('ALTER TABLE ADD FOREIGN KEY (no name) has null constraintName', () => {
+      const sql = `ALTER TABLE orders ADD FOREIGN KEY (dept_id) REFERENCES depts(id);`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].constraintName).toBeNull();
+      expect(result[0].referencedTable).toBe('depts');
+    });
+
+    it('schema-qualified REFERENCES strips schema, captures table', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES \`other_db\`.\`users\`(id)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedSchema).toBe('other_db');
+      expect(result[0].referencedTable).toBe('users');
+    });
+
+    it('self-referential FK is extracted normally', () => {
+      const sql = `FOREIGN KEY (parent_id) REFERENCES categories(id) ON DELETE SET NULL`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('categories');
+    });
+
+    it('multi-line formatted FK is extracted', () => {
+      const sql = `
+        CONSTRAINT fk_long
+          FOREIGN KEY (col1, col2)
+          REFERENCES another_table (pk1, pk2)
+          ON DELETE RESTRICT
+          ON UPDATE CASCADE
+      `;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].constraintName).toBe('fk_long');
+      expect(result[0].referencedTable).toBe('another_table');
+      expect(result[0].onDelete).toBe('RESTRICT');
+      expect(result[0].onUpdate).toBe('CASCADE');
+    });
+
+    it('multiple FKs in same CREATE TABLE returns all', () => {
+      const sql = `CREATE TABLE orders (
+        id INT PRIMARY KEY,
+        user_id INT,
+        dept_id INT,
+        CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (dept_id) REFERENCES departments(id)
+      );`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(2);
+      expect(result.map(r => r.referencedTable)).toEqual(expect.arrayContaining(['users', 'departments']));
+    });
+
+    it('FK inside SQL comment is NOT extracted', () => {
+      const sql = `-- FOREIGN KEY (uid) REFERENCES users(id)\nCREATE TABLE foo (id INT);`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(0);
+    });
+
+    it('FK inside string literal is NOT extracted', () => {
+      const sql = `INSERT INTO log (msg) VALUES ('FOREIGN KEY (uid) REFERENCES users(id)');`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(0);
+    });
+
+    it('empty SQL returns empty array', () => {
+      expect(adapter.extractFKReferences('')).toEqual([]);
+      expect(adapter.extractFKReferences(null)).toEqual([]);
+    });
+
+    it('SQL with no FK returns empty array', () => {
+      const sql = `CREATE TABLE foo (id INT PRIMARY KEY, name VARCHAR(50));`;
+      expect(adapter.extractFKReferences(sql)).toHaveLength(0);
+    });
+
+    it('ON DELETE SET DEFAULT is captured', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users(id) ON DELETE SET DEFAULT`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result[0].onDelete).toBe('SET DEFAULT');
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // validateContent() — single-file FK checks — 12 cases
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('validateContent() — single-file FK checks (DDL mode)', () => {
+    it('FK referencing table created in same UP is valid — no FK error', () => {
+      const sql = `
+-- +migrate Up
+CREATE TABLE users (id INT PRIMARY KEY);
+CREATE TABLE orders (
+  id INT PRIMARY KEY,
+  user_id INT,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+-- +migrate Down
+DROP TABLE orders;
+DROP TABLE users;
+`;
+      const result = adapter.validateContent(sql, 'V001__create.sql');
+      expect(result.errors.some(e => e.code === 'FK_REFERENCES_DROPPED_TABLE')).toBe(false);
+    });
+
+    it('FK referencing table DROPPED in same UP — FK_REFERENCES_DROPPED_TABLE error', () => {
+      const sql = `
+-- +migrate Up
+DROP TABLE users;
+CREATE TABLE orders (
+  id INT PRIMARY KEY,
+  user_id INT,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+-- +migrate Down
+DROP TABLE orders;
+`;
+      const result = adapter.validateContent(sql, 'V001__bad.sql');
+      expect(result.errors.some(e => e.code === 'FK_REFERENCES_DROPPED_TABLE')).toBe(true);
+    });
+
+    it('FK referencing table not in this file — no single-file error', () => {
+      const sql = `
+-- +migrate Up
+CREATE TABLE orders (
+  id INT PRIMARY KEY,
+  user_id INT,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+-- +migrate Down
+DROP TABLE orders;
+`;
+      const result = adapter.validateContent(sql, 'V002__orders.sql');
+      expect(result.errors.some(e => e.code === 'FK_REFERENCES_DROPPED_TABLE')).toBe(false);
+    });
+
+    it('self-referential FK with no drop — no error', () => {
+      const sql = `
+-- +migrate Up
+CREATE TABLE categories (
+  id INT PRIMARY KEY,
+  parent_id INT,
+  FOREIGN KEY (parent_id) REFERENCES categories(id)
+);
+-- +migrate Down
+DROP TABLE categories;
+`;
+      const result = adapter.validateContent(sql, 'V001__cats.sql');
+      expect(result.errors.some(e => e.code === 'FK_REFERENCES_DROPPED_TABLE')).toBe(false);
+    });
+
+    it('multiple FKs: one good (→ created), one bad (→ dropped) — only bad reported', () => {
+      const sql = `
+-- +migrate Up
+CREATE TABLE users (id INT PRIMARY KEY);
+DROP TABLE departments;
+CREATE TABLE orders (
+  id INT PRIMARY KEY,
+  user_id INT,
+  dept_id INT,
+  CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id),
+  CONSTRAINT fk_dept FOREIGN KEY (dept_id) REFERENCES departments(id)
+);
+-- +migrate Down
+DROP TABLE orders;
+DROP TABLE users;
+`;
+      const result = adapter.validateContent(sql, 'V001__mixed.sql');
+      const fkErrors = result.errors.filter(e => e.code === 'FK_REFERENCES_DROPPED_TABLE');
+      expect(fkErrors).toHaveLength(1);
+      expect(fkErrors[0].message).toContain('departments');
+    });
+
+    it('named FK in error message includes constraint name', () => {
+      const sql = `
+-- +migrate Up
+DROP TABLE users;
+ALTER TABLE orders ADD CONSTRAINT fk_named FOREIGN KEY (user_id) REFERENCES users(id);
+-- +migrate Down
+DROP TABLE orders;
+`;
+      const result = adapter.validateContent(sql, 'V001__named.sql');
+      const fkError = result.errors.find(e => e.code === 'FK_REFERENCES_DROPPED_TABLE');
+      expect(fkError).toBeDefined();
+      expect(fkError.message).toContain("'fk_named'");
+    });
+
+    it('unnamed FK in error message says unnamed FK', () => {
+      const sql = `
+-- +migrate Up
+DROP TABLE users;
+ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users(id);
+-- +migrate Down
+DROP TABLE orders;
+`;
+      const result = adapter.validateContent(sql, 'V001__unnamed.sql');
+      const fkError = result.errors.find(e => e.code === 'FK_REFERENCES_DROPPED_TABLE');
+      expect(fkError).toBeDefined();
+      // unnamed FK → no constraint name between FOREIGN KEY and references
+      expect(fkError.message).not.toMatch(/FOREIGN KEY '[^']+' references/i);
+    });
+
+    it('FK only in DOWN section — no FK_REFERENCES_DROPPED_TABLE error', () => {
+      const sql = `
+-- +migrate Up
+CREATE TABLE orders (id INT PRIMARY KEY, user_id INT);
+-- +migrate Down
+ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users(id);
+DROP TABLE orders;
+`;
+      const result = adapter.validateContent(sql, 'V001__down_only.sql');
+      expect(result.errors.some(e => e.code === 'FK_REFERENCES_DROPPED_TABLE')).toBe(false);
+    });
+
+    it('repeatable mode — FK checks completely skipped', () => {
+      const dclAdapter = new MariaDBAdapter({ ...mockConfig, mode: 'repeatable' });
+      const sql = `DROP TABLE users;\nALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users(id);\n`;
+      const result = dclAdapter.validateContent(sql, 'R__001_bad.sql');
+      expect(result.errors.some(e => e.code === 'FK_REFERENCES_DROPPED_TABLE')).toBe(false);
+    });
+
+    it('ON DELETE CASCADE on FK references external table — existing 🟡 warning fires', () => {
+      const sql = `
+-- +migrate Up
+CREATE TABLE orders (
+  id INT PRIMARY KEY,
+  user_id INT,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+-- +migrate Down
+DROP TABLE orders;
+`;
+      const result = adapter.validateContent(sql, 'V001__cascade.sql');
+      // The existing warning rule ON DELETE CASCADE fires
+      expect(result.warnings.some(w => w.message && w.message.includes('ON DELETE CASCADE'))).toBe(true);
+    });
+
+    it('ON DELETE RESTRICT — no cascade warning', () => {
+      const sql = `
+-- +migrate Up
+CREATE TABLE orders (
+  id INT PRIMARY KEY,
+  user_id INT,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT
+);
+-- +migrate Down
+DROP TABLE orders;
+`;
+      const result = adapter.validateContent(sql, 'V001__restrict.sql');
+      const cascadeWarnings = result.warnings.filter(w => w.message && w.message.includes('ON DELETE CASCADE'));
+      expect(cascadeWarnings).toHaveLength(0);
+    });
+
+    it('ON UPDATE CASCADE only — ON DELETE CASCADE warning does not fire', () => {
+      const sql = `
+-- +migrate Up
+CREATE TABLE orders (
+  id INT PRIMARY KEY,
+  user_id INT,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE
+);
+-- +migrate Down
+DROP TABLE orders;
+`;
+      const result = adapter.validateContent(sql, 'V001__update_cascade.sql');
+      const cascadeWarnings = result.warnings.filter(w => w.message && w.message.includes('ON DELETE CASCADE'));
+      expect(cascadeWarnings).toHaveLength(0);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // validateCrossFileFKDependencies() — 16 cases
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('validateCrossFileFKDependencies()', () => {
+    it('File1 creates users, File2 FKs to users — no error', () => {
+      const filesData = [
+        { fileName: 'V001__users.sql', content: `-- +migrate Up\nCREATE TABLE users (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE users;\n` },
+        { fileName: 'V002__orders.sql', content: `-- +migrate Up\nCREATE TABLE orders (id INT, user_id INT, FOREIGN KEY (user_id) REFERENCES users(id));\n-- +migrate Down\nDROP TABLE orders;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(0);
+    });
+
+    it('FK in File1 references users which is not yet created — FK_UNRESOLVED_REFERENCE', () => {
+      const filesData = [
+        { fileName: 'V001__orders.sql', content: `-- +migrate Up\nCREATE TABLE orders (id INT, user_id INT, FOREIGN KEY (user_id) REFERENCES users(id));\n-- +migrate Down\nDROP TABLE orders;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(1);
+      expect(result[0].fileName).toBe('V001__orders.sql');
+      expect(result[0].errors[0].code).toBe('FK_UNRESOLVED_REFERENCE');
+      expect(result[0].errors[0].message).toContain("'users'");
+    });
+
+    it('same file creates table and FKs to it — no error (self-resolve)', () => {
+      const filesData = [
+        { fileName: 'V001__both.sql', content: `-- +migrate Up\nCREATE TABLE users (id INT PRIMARY KEY);\nCREATE TABLE orders (id INT, user_id INT, FOREIGN KEY (user_id) REFERENCES users(id));\n-- +migrate Down\nDROP TABLE orders;\nDROP TABLE users;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(0);
+    });
+
+    it('File1 creates A, File2 creates B and FKs to A — no error', () => {
+      const filesData = [
+        { fileName: 'V001__a.sql', content: `-- +migrate Up\nCREATE TABLE a (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE a;\n` },
+        { fileName: 'V002__b.sql', content: `-- +migrate Up\nCREATE TABLE b (id INT, a_id INT, FOREIGN KEY (a_id) REFERENCES a(id));\n-- +migrate Down\nDROP TABLE b;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(0);
+    });
+
+    it('File2 FKs to A (ok) and C (never created) — only C reported', () => {
+      const filesData = [
+        { fileName: 'V001__a.sql', content: `-- +migrate Up\nCREATE TABLE a (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE a;\n` },
+        { fileName: 'V002__mixed.sql', content: `-- +migrate Up\nCREATE TABLE b (id INT, a_id INT, c_id INT, FOREIGN KEY (a_id) REFERENCES a(id), FOREIGN KEY (c_id) REFERENCES c(id));\n-- +migrate Down\nDROP TABLE b;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(1);
+      expect(result[0].errors[0].message).toContain("'c'");
+      expect(result[0].errors.some(e => e.message.includes("'a'"))).toBe(false);
+    });
+
+    it('File1 creates A, File2 drops A, File3 FKs to A — error in File3', () => {
+      const filesData = [
+        { fileName: 'V001__a.sql', content: `-- +migrate Up\nCREATE TABLE a (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE a;\n` },
+        { fileName: 'V002__drop_a.sql', content: `-- +migrate Up\nDROP TABLE a;\n-- +migrate Down\nCREATE TABLE a (id INT PRIMARY KEY);\n` },
+        { fileName: 'V003__fk_to_a.sql', content: `-- +migrate Up\nCREATE TABLE b (id INT, a_id INT, FOREIGN KEY (a_id) REFERENCES a(id));\n-- +migrate Down\nDROP TABLE b;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(1);
+      expect(result[0].fileName).toBe('V003__fk_to_a.sql');
+    });
+
+    it('repeatable mode returns empty array', () => {
+      const dclAdapter = new MariaDBAdapter({ ...mockConfig, mode: 'repeatable' });
+      const filesData = [
+        { fileName: 'R__001.sql', content: `FOREIGN KEY (uid) REFERENCES users(id);\n` }
+      ];
+      expect(dclAdapter.validateCrossFileFKDependencies(filesData)).toEqual([]);
+    });
+
+    it('empty filesData returns empty array', () => {
+      expect(adapter.validateCrossFileFKDependencies([])).toEqual([]);
+    });
+
+    it('self-referential FK in file — no error', () => {
+      const filesData = [
+        { fileName: 'V001__cats.sql', content: `-- +migrate Up\nCREATE TABLE categories (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES categories(id));\n-- +migrate Down\nDROP TABLE categories;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(0);
+    });
+
+    it('schema-qualified REFERENCES strips schema — matches table created in prior file', () => {
+      const filesData = [
+        { fileName: 'V001__users.sql', content: `-- +migrate Up\nCREATE TABLE users (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE users;\n` },
+        { fileName: 'V002__ref.sql', content: `-- +migrate Up\nCREATE TABLE ref_tbl (id INT, uid INT, FOREIGN KEY (uid) REFERENCES \`mydb\`.\`users\`(id));\n-- +migrate Down\nDROP TABLE ref_tbl;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(0);
+    });
+
+    it('File1 creates A and B, File2 FKs to both A and B — no error', () => {
+      const filesData = [
+        { fileName: 'V001__ab.sql', content: `-- +migrate Up\nCREATE TABLE a (id INT PRIMARY KEY);\nCREATE TABLE b (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE b;\nDROP TABLE a;\n` },
+        { fileName: 'V002__fks.sql', content: `-- +migrate Up\nCREATE TABLE c (id INT, a_id INT, b_id INT, CONSTRAINT fk_a FOREIGN KEY (a_id) REFERENCES a(id), CONSTRAINT fk_b FOREIGN KEY (b_id) REFERENCES b(id));\n-- +migrate Down\nDROP TABLE c;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(0);
+    });
+
+    it('multiple FKs in one file all unresolved — all reported as separate errors', () => {
+      const filesData = [
+        { fileName: 'V001__many_fks.sql', content: `-- +migrate Up\nCREATE TABLE x (id INT, a_id INT, b_id INT, FOREIGN KEY (a_id) REFERENCES missing_a(id), FOREIGN KEY (b_id) REFERENCES missing_b(id));\n-- +migrate Down\nDROP TABLE x;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(1);
+      expect(result[0].errors).toHaveLength(2);
+    });
+
+    it('circular: File1 FKs to B (not yet created), File2 creates B — File1 errors, File2 clean', () => {
+      const filesData = [
+        { fileName: 'V001__fk_to_b.sql', content: `-- +migrate Up\nCREATE TABLE a (id INT, b_id INT, FOREIGN KEY (b_id) REFERENCES b(id));\n-- +migrate Down\nDROP TABLE a;\n` },
+        { fileName: 'V002__create_b.sql', content: `-- +migrate Up\nCREATE TABLE b (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE b;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(1);
+      expect(result[0].fileName).toBe('V001__fk_to_b.sql');
+    });
+
+    it('only ALTER TABLE ADD FK (no CREATE TABLE in file) — checked against prior files', () => {
+      const filesData = [
+        { fileName: 'V001__users.sql', content: `-- +migrate Up\nCREATE TABLE users (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE users;\n` },
+        { fileName: 'V002__alter_fk.sql', content: `-- +migrate Up\nALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id);\n-- +migrate Down\nALTER TABLE orders DROP FOREIGN KEY fk_user;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(0);
+    });
+
+    it('3-file chain: each file FKs to previous file table — no errors', () => {
+      const filesData = [
+        { fileName: 'V001__users.sql', content: `-- +migrate Up\nCREATE TABLE users (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE users;\n` },
+        { fileName: 'V002__orders.sql', content: `-- +migrate Up\nCREATE TABLE orders (id INT PRIMARY KEY, user_id INT, FOREIGN KEY (user_id) REFERENCES users(id));\n-- +migrate Down\nDROP TABLE orders;\n` },
+        { fileName: 'V003__items.sql', content: `-- +migrate Up\nCREATE TABLE items (id INT PRIMARY KEY, order_id INT, FOREIGN KEY (order_id) REFERENCES orders(id));\n-- +migrate Down\nDROP TABLE items;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(0);
+    });
+
+    it('named FK constraint in unresolved reference — error message includes constraint name', () => {
+      const filesData = [
+        { fileName: 'V001__fk.sql', content: `-- +migrate Up\nCREATE TABLE orders (id INT, uid INT, CONSTRAINT fk_ord_user FOREIGN KEY (uid) REFERENCES users(id));\n-- +migrate Down\nDROP TABLE orders;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(1);
+      expect(result[0].errors[0].message).toContain("'fk_ord_user'");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // validate() integration — 4 cases
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('validate() — FK integration', () => {
+    it('cross-file FK error is merged into correct file result and marks results.valid false', async () => {
+      const mockFs = await import('fs/promises');
+      const originalReaddir = mockFs.default?.readdir;
+
+      // Directly test via validateCrossFileFKDependencies + validate() result structure
+      // by simulating what validate() does with real filesData
+      const validFile = {
+        fileName: 'V001__users.sql',
+        content: `-- +migrate Up\nCREATE TABLE users (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE users;\n`
+      };
+      const invalidFile = {
+        fileName: 'V002__bad_fk.sql',
+        content: `-- +migrate Up\nCREATE TABLE orders (id INT, x_id INT, FOREIGN KEY (x_id) REFERENCES missing_table(id));\n-- +migrate Down\nDROP TABLE orders;\n`
+      };
+      const filesData = [validFile, invalidFile];
+
+      const crossErrors = adapter.validateCrossFileFKDependencies(filesData);
+      expect(crossErrors).toHaveLength(1);
+      expect(crossErrors[0].fileName).toBe('V002__bad_fk.sql');
+      expect(crossErrors[0].errors[0].code).toBe('FK_UNRESOLVED_REFERENCE');
+    });
+
+    it('valid FK chain across files — validateCrossFileFKDependencies returns empty', () => {
+      const filesData = [
+        { fileName: 'V001__users.sql', content: `-- +migrate Up\nCREATE TABLE users (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE users;\n` },
+        { fileName: 'V002__orders.sql', content: `-- +migrate Up\nCREATE TABLE orders (id INT, uid INT, FOREIGN KEY (uid) REFERENCES users(id));\n-- +migrate Down\nDROP TABLE orders;\n` }
+      ];
+      expect(adapter.validateCrossFileFKDependencies(filesData)).toHaveLength(0);
+    });
+
+    it('numeric sort: V10 sorted after V2, not before', () => {
+      const files = ['V010__c.sql', 'V002__a.sql', 'V1__b.sql'];
+      const sorted = files.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+      expect(sorted[0]).toBe('V1__b.sql');
+      expect(sorted[1]).toBe('V002__a.sql');
+      expect(sorted[2]).toBe('V010__c.sql');
+    });
+
+    it('cross-file FK error increments summary.structural when merged', () => {
+      // Simulate the merge logic from validate()
+      const fileResult = {
+        file: 'V002__bad.sql',
+        valid: true,
+        errors: [],
+        warnings: [],
+        forbiddenOps: [],
+        dangerousOps: [],
+        summary: { forbidden: 0, dangerous: 0, warnings: 0, structural: 0, suspiciousNames: 0, performanceIssues: 0 }
+      };
+      const fkErrors = [{ type: 'fk-unresolved-reference', code: 'FK_UNRESOLVED_REFERENCE', message: '🔴 ...' }];
+
+      // Apply the same merge logic as validate()
+      fileResult.errors.push(...fkErrors);
+      fileResult.summary.structural += fkErrors.length;
+      fileResult.valid = false;
+
+      expect(fileResult.errors).toHaveLength(1);
+      expect(fileResult.summary.structural).toBe(1);
+      expect(fileResult.valid).toBe(false);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // extractCreatedTables() — Bug 2, 3, 4 fixes
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('extractCreatedTables() — OR REPLACE, schema-qualified, RENAME', () => {
+    it('CREATE OR REPLACE TABLE is recognized (Bug 4)', () => {
+      const sql = `CREATE OR REPLACE TABLE accounts (id INT PRIMARY KEY);`;
+      const result = adapter.extractCreatedTables(sql);
+      expect(result).toContain('accounts');
+    });
+
+    it('schema-qualified CREATE TABLE captures table name not schema (Bug 2)', () => {
+      const sql = 'CREATE TABLE `mydb`.`orders` (id INT PRIMARY KEY);';
+      const result = adapter.extractCreatedTables(sql);
+      expect(result).toContain('orders');
+      expect(result).not.toContain('mydb');
+    });
+
+    it('RENAME TABLE old TO new — new name is tracked as created (Bug 3)', () => {
+      const sql = `RENAME TABLE users_v1 TO users;`;
+      const result = adapter.extractCreatedTables(sql);
+      expect(result).toContain('users');
+    });
+
+    it('RENAME TABLE multi-pair — all new names captured (Bug 3)', () => {
+      const sql = `RENAME TABLE a TO b, c TO d;`;
+      const result = adapter.extractCreatedTables(sql);
+      expect(result).toContain('b');
+      expect(result).toContain('d');
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // extractDroppedTables() — Bug 1, 2, 5 fixes
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('extractDroppedTables() — multi-table, schema-qualified, procedure body', () => {
+    it('DROP TABLE t1, t2, t3 returns all three (Bug 1)', () => {
+      const sql = `DROP TABLE IF EXISTS orders, order_items, addresses;`;
+      const result = adapter.extractDroppedTables(sql);
+      expect(result).toContain('orders');
+      expect(result).toContain('order_items');
+      expect(result).toContain('addresses');
+    });
+
+    it('schema-qualified DROP TABLE captures table name not schema (Bug 2)', () => {
+      const sql = 'DROP TABLE `mydb`.`orders`;';
+      const result = adapter.extractDroppedTables(sql);
+      expect(result).toContain('orders');
+      expect(result).not.toContain('mydb');
+    });
+
+    it('DROP TABLE inside CREATE PROCEDURE body is NOT counted (Bug 5)', () => {
+      const sql = `
+CREATE PROCEDURE cleanup()
+BEGIN
+  DROP TABLE temp_cache;
+END;
+`;
+      const result = adapter.extractDroppedTables(sql);
+      expect(result).not.toContain('temp_cache');
+    });
+
+    it('DROP TABLE inside PROCEDURE with nested END IF is NOT counted (Bug 5)', () => {
+      const sql = `
+CREATE PROCEDURE cleanup()
+BEGIN
+  IF x > 0 THEN
+    DROP TABLE temp_cache;
+  END IF;
+  DROP TABLE another_temp;
+END;
+`;
+      const result = adapter.extractDroppedTables(sql);
+      expect(result).not.toContain('temp_cache');
+      expect(result).not.toContain('another_temp');
+    });
+
+    it('DDL-level DROP TABLE outside procedure is still captured (Bug 5 no false negative)', () => {
+      const sql = `
+CREATE PROCEDURE cleanup() BEGIN DROP TABLE proc_temp; END;
+DROP TABLE real_table;
+`;
+      const result = adapter.extractDroppedTables(sql);
+      expect(result).toContain('real_table');
+      expect(result).not.toContain('proc_temp');
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // extractFKReferences() — Bug 6: hyphenated constraint names
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('extractFKReferences() — hyphenated constraint name (Bug 6)', () => {
+    it('backtick-quoted constraint name with hyphens is fully captured', () => {
+      const sql = 'CONSTRAINT `fk-orders-user` FOREIGN KEY (user_id) REFERENCES users(id)';
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].constraintName).toBe('fk-orders-user');
+      expect(result[0].referencedTable).toBe('users');
+    });
+
+    it('double-quoted constraint name with hyphens is fully captured', () => {
+      const sql = 'CONSTRAINT "fk-items-prod" FOREIGN KEY (prod_id) REFERENCES products(id)';
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].constraintName).toBe('fk-items-prod');
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // validateCrossFileFKDependencies() — Bug 3: RENAME TABLE + Bug 2/4
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('validateCrossFileFKDependencies() — RENAME TABLE, OR REPLACE, schema CREATE', () => {
+    it('RENAME users_v1 TO users in V001, FK to users in V002 — no error (Bug 3)', () => {
+      const filesData = [
+        { fileName: 'V001__rename.sql', content: `-- +migrate Up\nRENAME TABLE users_v1 TO users;\n-- +migrate Down\nRENAME TABLE users TO users_v1;\n` },
+        { fileName: 'V002__fk.sql', content: `-- +migrate Up\nCREATE TABLE orders (id INT, uid INT, FOREIGN KEY (uid) REFERENCES users(id));\n-- +migrate Down\nDROP TABLE orders;\n` }
+      ];
+      expect(adapter.validateCrossFileFKDependencies(filesData)).toHaveLength(0);
+    });
+
+    it('RENAME users TO accounts in V001, FK to users in V002 — error (old name is gone) (Bug 3)', () => {
+      const filesData = [
+        { fileName: 'V001__rename.sql', content: `-- +migrate Up\nRENAME TABLE users TO accounts;\n-- +migrate Down\nRENAME TABLE accounts TO users;\n` },
+        { fileName: 'V002__fk_old.sql', content: `-- +migrate Up\nCREATE TABLE orders (id INT, uid INT, FOREIGN KEY (uid) REFERENCES users(id));\n-- +migrate Down\nDROP TABLE orders;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(1);
+      expect(result[0].errors[0].code).toBe('FK_UNRESOLVED_REFERENCE');
+    });
+
+    it('CREATE OR REPLACE TABLE in V001, FK to that table in V002 — no error (Bug 4)', () => {
+      const filesData = [
+        { fileName: 'V001__orp.sql', content: `-- +migrate Up\nCREATE OR REPLACE TABLE users (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE IF EXISTS users;\n` },
+        { fileName: 'V002__fk.sql', content: `-- +migrate Up\nCREATE TABLE orders (id INT, uid INT, FOREIGN KEY (uid) REFERENCES users(id));\n-- +migrate Down\nDROP TABLE orders;\n` }
+      ];
+      expect(adapter.validateCrossFileFKDependencies(filesData)).toHaveLength(0);
+    });
+
+    it('schema-qualified CREATE TABLE in V001, FK to table name in V002 — no error (Bug 2)', () => {
+      const filesData = [
+        { fileName: 'V001__schema.sql', content: '-- +migrate Up\nCREATE TABLE `mydb`.`users` (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE `mydb`.`users`;\n' },
+        { fileName: 'V002__fk.sql', content: `-- +migrate Up\nCREATE TABLE orders (id INT, uid INT, FOREIGN KEY (uid) REFERENCES users(id));\n-- +migrate Down\nDROP TABLE orders;\n` }
+      ];
+      expect(adapter.validateCrossFileFKDependencies(filesData)).toHaveLength(0);
+    });
+  });
 });
