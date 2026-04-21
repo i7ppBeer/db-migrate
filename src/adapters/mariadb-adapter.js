@@ -1583,6 +1583,8 @@ export class MariaDBAdapter extends BaseAdapter {
   extractFKReferences(sql) {
     if (!sql) return [];
 
+    sql = this._stripRoutineBodies(sql);
+
     // Strip comments and single-quoted string literals to avoid false positives.
     // Double-quoted strings are kept because MariaDB uses them as identifiers (ANSI mode)
     // when they appear in CONSTRAINT "name" syntax.

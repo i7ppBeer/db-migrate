@@ -1552,4 +1552,175 @@ DROP TABLE real_table;
       expect(adapter.validateCrossFileFKDependencies(filesData)).toHaveLength(0);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // extractFKReferences() — stored procedure body (P0 — validates Bug Fix)
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('extractFKReferences() — stored procedure body', () => {
+    it('FK inside CREATE PROCEDURE body is NOT extracted', () => {
+      const sql = `
+        CREATE PROCEDURE fix_orders()
+        BEGIN
+          ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users(id);
+        END;
+      `;
+      expect(adapter.extractFKReferences(sql)).toHaveLength(0);
+    });
+
+    it('FK inside CREATE FUNCTION body is NOT extracted', () => {
+      const sql = `
+        CREATE FUNCTION get_user(uid INT) RETURNS INT
+        BEGIN
+          ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users(id);
+          RETURN 1;
+        END;
+      `;
+      expect(adapter.extractFKReferences(sql)).toHaveLength(0);
+    });
+
+    it('FK outside procedure (DDL level) is still extracted when procedure also exists', () => {
+      const sql = `
+        CREATE PROCEDURE fix() BEGIN ALTER TABLE x ADD FOREIGN KEY (a) REFERENCES b(id); END;
+        ALTER TABLE orders ADD CONSTRAINT fk_real FOREIGN KEY (user_id) REFERENCES users(id);
+      `;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].constraintName).toBe('fk_real');
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // validateContent() — FK in stored procedure body (P0)
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('validateContent() — FK in stored procedure body', () => {
+    it('FK inside CREATE PROCEDURE body does NOT trigger FK_REFERENCES_DROPPED_TABLE', () => {
+      const sql = `
+-- +migrate Up
+DROP TABLE users;
+CREATE PROCEDURE fix()
+BEGIN
+  ALTER TABLE orders ADD FOREIGN KEY (uid) REFERENCES users(id);
+END;
+-- +migrate Down
+CREATE TABLE users (id INT PRIMARY KEY);
+      `;
+      const result = adapter.validateContent(sql, 'V001__proc.sql');
+      expect(result.errors.some(e => e.code === 'FK_REFERENCES_DROPPED_TABLE')).toBe(false);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // extractFKReferences() — ON DELETE/UPDATE all actions (P1)
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('extractFKReferences() — ON DELETE/UPDATE all actions', () => {
+    it('ON DELETE NO ACTION is captured', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users(id) ON DELETE NO ACTION`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result[0].onDelete).toBe('NO ACTION');
+    });
+
+    it('ON UPDATE NO ACTION is captured', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users(id) ON UPDATE NO ACTION`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result[0].onUpdate).toBe('NO ACTION');
+    });
+
+    it('ON UPDATE SET NULL is captured', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users(id) ON UPDATE SET NULL`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result[0].onUpdate).toBe('SET NULL');
+    });
+
+    it('ON UPDATE SET DEFAULT is captured', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users(id) ON UPDATE SET DEFAULT`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result[0].onUpdate).toBe('SET DEFAULT');
+    });
+
+    it('ON UPDATE RESTRICT is captured', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users(id) ON UPDATE RESTRICT`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result[0].onUpdate).toBe('RESTRICT');
+    });
+
+    it('ON DELETE CASCADE and ON UPDATE NO ACTION together', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users(id) ON DELETE CASCADE ON UPDATE NO ACTION`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result[0].onDelete).toBe('CASCADE');
+      expect(result[0].onUpdate).toBe('NO ACTION');
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // extractFKReferences() — block comment protection (P1)
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('extractFKReferences() — block comment protection', () => {
+    it('FK inside /* */ block comment is NOT extracted', () => {
+      const sql = `/* FOREIGN KEY (uid) REFERENCES users(id) */\nCREATE TABLE foo (id INT);`;
+      expect(adapter.extractFKReferences(sql)).toHaveLength(0);
+    });
+
+    it('FK inside multi-line /* */ block comment is NOT extracted', () => {
+      const sql = `
+        /*
+         * Example: FOREIGN KEY (user_id) REFERENCES users(id)
+         */
+        CREATE TABLE foo (id INT);
+      `;
+      expect(adapter.extractFKReferences(sql)).toHaveLength(0);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // extractFKReferences() — edge cases (P2)
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('extractFKReferences() — edge cases', () => {
+    it('table name with underscores and numbers is captured correctly', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users_v2(id)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result[0].referencedTable).toBe('users_v2');
+    });
+
+    it('UPPERCASE constraint name is captured correctly', () => {
+      const sql = `CONSTRAINT FK_ORDERS_USER FOREIGN KEY (user_id) REFERENCES users(id)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result[0].constraintName).toBe('FK_ORDERS_USER');
+    });
+
+    it('duplicate ON DELETE clauses — does not throw', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users(id) ON DELETE CASCADE ON DELETE RESTRICT`;
+      expect(() => adapter.extractFKReferences(sql)).not.toThrow();
+    });
+
+    it('extractFKReferences does not hang on large SQL (performance guard)', () => {
+      const bigSQL = 'CREATE TABLE t (id INT);\n'.repeat(500) +
+        'ALTER TABLE orders ADD CONSTRAINT fk_perf FOREIGN KEY (uid) REFERENCES users(id);';
+      const start = Date.now();
+      const result = adapter.extractFKReferences(bigSQL);
+      expect(Date.now() - start).toBeLessThan(2000);
+      expect(result).toHaveLength(1);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // validateCrossFileFKDependencies() — edge cases (P2)
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('validateCrossFileFKDependencies() — edge cases', () => {
+    it('multiple FKs from different tables pointing to same parent table — no error', () => {
+      const filesData = [
+        { fileName: 'V001__users.sql', content: `-- +migrate Up\nCREATE TABLE users (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE users;\n` },
+        { fileName: 'V002__a.sql', content: `-- +migrate Up\nCREATE TABLE a (id INT, uid INT, FOREIGN KEY (uid) REFERENCES users(id));\n-- +migrate Down\nDROP TABLE a;\n` },
+        { fileName: 'V003__b.sql', content: `-- +migrate Up\nCREATE TABLE b (id INT, uid INT, FOREIGN KEY (uid) REFERENCES users(id));\n-- +migrate Down\nDROP TABLE b;\n` }
+      ];
+      expect(adapter.validateCrossFileFKDependencies(filesData)).toHaveLength(0);
+    });
+
+    it('case-insensitive table name matching: CREATE TABLE "Users" resolved by FK to "users"', () => {
+      const filesData = [
+        { fileName: 'V001__Users.sql', content: `-- +migrate Up\nCREATE TABLE Users (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE Users;\n` },
+        { fileName: 'V002__orders.sql', content: `-- +migrate Up\nCREATE TABLE orders (id INT, uid INT, FOREIGN KEY (uid) REFERENCES users(id));\n-- +migrate Down\nDROP TABLE orders;\n` }
+      ];
+      expect(adapter.validateCrossFileFKDependencies(filesData)).toHaveLength(0);
+    });
+  });
 });
