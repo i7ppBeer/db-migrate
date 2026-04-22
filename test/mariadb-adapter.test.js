@@ -1700,6 +1700,56 @@ CREATE TABLE users (id INT PRIMARY KEY);
       expect(Date.now() - start).toBeLessThan(2000);
       expect(result).toHaveLength(1);
     });
+
+    it('unquoted table name with $ is captured fully (Fix A)', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users$archive(id)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('users$archive');
+    });
+
+    it('backtick-quoted table name with $ is captured fully (Fix A)', () => {
+      const sql = 'FOREIGN KEY (uid) REFERENCES `users$archive`(id)';
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('users$archive');
+    });
+
+    it('schema name with $ is captured without truncation (Fix A)', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES mydb$1.users(id)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedSchema).toBe('mydb$1');
+      expect(result[0].referencedTable).toBe('users');
+    });
+
+    it('backtick-quoted table name with hyphen is captured fully', () => {
+      const sql = 'FOREIGN KEY (uid) REFERENCES `tbl-name`(id)';
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('tbl-name');
+    });
+
+    it('inline block comment between FOREIGN and KEY is handled', () => {
+      const sql = `FOREIGN /* inline comment */ KEY (uid) REFERENCES tbl(id)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('tbl');
+    });
+
+    it('CRLF line endings throughout FK SQL — extracted correctly', () => {
+      const sql =
+        'CREATE TABLE orders (\r\n' +
+        '  id INT PRIMARY KEY,\r\n' +
+        '  user_id INT,\r\n' +
+        '  CONSTRAINT fk_cr FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT\r\n' +
+        ');\r\n';
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].constraintName).toBe('fk_cr');
+      expect(result[0].referencedTable).toBe('users');
+      expect(result[0].onDelete).toBe('RESTRICT');
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1722,5 +1772,168 @@ CREATE TABLE users (id INT PRIMARY KEY);
       ];
       expect(adapter.validateCrossFileFKDependencies(filesData)).toHaveLength(0);
     });
+
+    it('file with only -- +migrate Down and no Up section — no crash, no FK errors', () => {
+      const filesData = [
+        { fileName: 'V001__users.sql', content: `-- +migrate Up\nCREATE TABLE users (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE users;\n` },
+        { fileName: 'V002__down_only.sql', content: `-- +migrate Down\nDROP TABLE something;\n` }
+      ];
+      expect(() => adapter.validateCrossFileFKDependencies(filesData)).not.toThrow();
+      expect(adapter.validateCrossFileFKDependencies(filesData)).toHaveLength(0);
+    });
+
+    it('file consisting entirely of SQL comments — no crash, no FK errors', () => {
+      const filesData = [
+        { fileName: 'V001__only_comments.sql', content: `-- +migrate Up\n-- This is a comment\n-- Another comment\n-- +migrate Down\n-- Rollback comment\n` }
+      ];
+      expect(() => adapter.validateCrossFileFKDependencies(filesData)).not.toThrow();
+      expect(adapter.validateCrossFileFKDependencies(filesData)).toHaveLength(0);
+    });
+
+    it('table created AND dropped in same file; FK to it in NEXT file — FK_UNRESOLVED_REFERENCE', () => {
+      const filesData = [
+        { fileName: 'V001__create_drop.sql', content: `-- +migrate Up\nCREATE TABLE temp (id INT PRIMARY KEY);\nDROP TABLE temp;\n-- +migrate Down\n` },
+        { fileName: 'V002__fk_to_temp.sql', content: `-- +migrate Up\nCREATE TABLE orders (id INT, t_id INT, FOREIGN KEY (t_id) REFERENCES temp(id));\n-- +migrate Down\nDROP TABLE orders;\n` }
+      ];
+      const result = adapter.validateCrossFileFKDependencies(filesData);
+      expect(result).toHaveLength(1);
+      expect(result[0].fileName).toBe('V002__fk_to_temp.sql');
+      expect(result[0].errors[0].code).toBe('FK_UNRESOLVED_REFERENCE');
+    });
+
+    it('$ table name: File1 creates tbl$1, File2 FKs to it — no error (Fix A)', () => {
+      const filesData = [
+        { fileName: 'V001__dollar.sql', content: '-- +migrate Up\nCREATE TABLE `tbl$1` (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE `tbl$1`;\n' },
+        { fileName: 'V002__fk_dollar.sql', content: '-- +migrate Up\nCREATE TABLE orders (id INT, t_id INT, FOREIGN KEY (t_id) REFERENCES `tbl$1`(id));\n-- +migrate Down\nDROP TABLE orders;\n' }
+      ];
+      expect(adapter.validateCrossFileFKDependencies(filesData)).toHaveLength(0);
+    });
+
+    it('reserved-word table name using backtick quotes — captured correctly', () => {
+      const filesData = [
+        { fileName: 'V001__order.sql', content: '-- +migrate Up\nCREATE TABLE `order` (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE `order`;\n' },
+        { fileName: 'V002__fk_order.sql', content: '-- +migrate Up\nCREATE TABLE items (id INT, ord_id INT, FOREIGN KEY (ord_id) REFERENCES `order`(id));\n-- +migrate Down\nDROP TABLE items;\n' }
+      ];
+      expect(adapter.validateCrossFileFKDependencies(filesData)).toHaveLength(0);
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// databases/mariadb/fk-test fixture tests
+// 直接讀取 fixture SQL 檔案，驗證 validator 產生正確的 FK 錯誤
+// ─────────────────────────────────────────────────────────────────────────────
+import { readFileSync, readdirSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname_fk = dirname(fileURLToPath(import.meta.url));
+const fixtureBase = join(__dirname_fk, '../databases/mariadb/fk-test');
+
+function loadMigrations(subDir) {
+  const migrationsDir = join(fixtureBase, subDir, 'migrations');
+  return readdirSync(migrationsDir)
+    .filter(f => f.endsWith('.sql'))
+    .sort()
+    .map(f => ({
+      fileName: f,
+      content: readFileSync(join(migrationsDir, f), 'utf8')
+    }));
+}
+
+describe('fk-test fixtures — ddl/ (valid chain, should produce no FK errors)', () => {
+  let adapter;
+  beforeEach(() => {
+    adapter = new MariaDBAdapter({ migrationsDir: './tmp', changelogTable: '_migrations' });
+  });
+
+  it('all 4 migrations pass single-file FK checks', () => {
+    const files = loadMigrations('ddl');
+    for (const { fileName, content } of files) {
+      const r = adapter.validateContent(content, fileName);
+      const fkErrors = r.errors.filter(e =>
+        e.code === 'FK_REFERENCES_DROPPED_TABLE' || e.code === 'FK_UNRESOLVED_REFERENCE'
+      );
+      expect(fkErrors, `${fileName} should have no FK errors`).toHaveLength(0);
+    }
+  });
+
+  it('all 4 migrations pass cross-file FK dependency check', () => {
+    const files = loadMigrations('ddl');
+    const result = adapter.validateCrossFileFKDependencies(files);
+    expect(result).toHaveLength(0);
+  });
+});
+
+describe('fk-test fixtures — ddl-bad/ (invalid scenarios, each must produce expected FK error)', () => {
+  let adapter;
+  beforeEach(() => {
+    adapter = new MariaDBAdapter({ migrationsDir: './tmp', changelogTable: '_migrations' });
+  });
+
+  // ── 001: cross-file — FK to customers before customers is created ────────
+  it('000001: FK_UNRESOLVED_REFERENCE — fk_orders_customer → customers (not yet created)', () => {
+    const files = loadMigrations('ddl-bad');
+    const file001 = files.find(f => f.fileName.startsWith('20260101000001'));
+    const result = adapter.validateCrossFileFKDependencies([file001]);
+    expect(result).toHaveLength(1);
+    expect(result[0].errors.some(e =>
+      e.code === 'FK_UNRESOLVED_REFERENCE' && e.message.includes("'customers'")
+    )).toBe(true);
+  });
+
+  // ── 002: single-file — DROP products then FK to it in same UP section ────
+  it('000002: FK_REFERENCES_DROPPED_TABLE — fk_items_product → products (dropped in same UP)', () => {
+    const files = loadMigrations('ddl-bad');
+    const file002 = files.find(f => f.fileName.startsWith('20260101000002'));
+    const r = adapter.validateContent(file002.content, file002.fileName);
+    expect(r.errors.some(e =>
+      e.code === 'FK_REFERENCES_DROPPED_TABLE' && e.message.includes("'products'")
+    )).toBe(true);
+  });
+
+  // ── 003: cross-file — ALTER TABLE ADD FK to non-existent departments ─────
+  it('000003: FK_UNRESOLVED_REFERENCE — fk_orders_dept → departments (ALTER-only file, table never created)', () => {
+    const files = loadMigrations('ddl-bad');
+    // Include files up to 003 so validator has proper order context
+    const upTo003 = files.filter(f =>
+      f.fileName.startsWith('20260101000001') ||
+      f.fileName.startsWith('20260101000002') ||
+      f.fileName.startsWith('20260101000003')
+    );
+    const crossErrors = adapter.validateCrossFileFKDependencies(upTo003);
+    const file003Errors = crossErrors.find(e => e.fileName.startsWith('20260101000003'));
+    expect(file003Errors).toBeDefined();
+    expect(file003Errors.errors.some(e =>
+      e.code === 'FK_UNRESOLVED_REFERENCE' && e.message.includes("'departments'")
+    )).toBe(true);
+  });
+
+  // ── 004: cross-file — two FKs both unresolved, each reported separately ──
+  it('000004: two FK_UNRESOLVED_REFERENCE — fk_shipments_carrier → carriers AND fk_shipments_warehouse → warehouses', () => {
+    const files = loadMigrations('ddl-bad');
+    const file004 = files.find(f => f.fileName.startsWith('20260101000004'));
+    const crossErrors = adapter.validateCrossFileFKDependencies([file004]);
+    expect(crossErrors).toHaveLength(1);
+    const errors = crossErrors[0].errors;
+    expect(errors).toHaveLength(2);
+    expect(errors.some(e =>
+      e.code === 'FK_UNRESOLVED_REFERENCE' && e.message.includes("'carriers'")
+    )).toBe(true);
+    expect(errors.some(e =>
+      e.code === 'FK_UNRESOLVED_REFERENCE' && e.message.includes("'warehouses'")
+    )).toBe(true);
+  });
+
+  // ── 005: cross-file — RENAME removes 'orders'; FK in same file targets old name ──
+  it('000005: FK_UNRESOLVED_REFERENCE — fk_invoices_order → orders (renamed away in same file, old name gone)', () => {
+    const files = loadMigrations('ddl-bad');
+    const file005 = files.find(f => f.fileName.startsWith('20260101000005'));
+    // Provide no prior files — 'orders' was never established before this file's RENAME
+    const crossErrors = adapter.validateCrossFileFKDependencies([file005]);
+    expect(crossErrors).toHaveLength(1);
+    expect(crossErrors[0].errors.some(e =>
+      e.code === 'FK_UNRESOLVED_REFERENCE' && e.message.includes("'orders'")
+    )).toBe(true);
   });
 });

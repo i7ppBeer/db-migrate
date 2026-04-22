@@ -16,6 +16,7 @@
 - **Unified CLI**: Single command-line interface for all database migrations
 - **Validation Rules**: Auto-detect dangerous operations, empty down(), orphaned drops, DCL operations, etc.
   - **SQL Syntax Check (MariaDB)**: All `.sql` files are pre-validated by `node-sql-parser` (MariaDB dialect) before rule checks — syntax errors are caught early
+  - **FK Integrity Check (MariaDB DDL)**: Two-layer Foreign Key dependency analysis — detects FKs pointing to dropped or never-created tables, both within a single file and across the entire migration history
   - **Smart Allowance**: CREATE DATABASE allowed in UP, DROP DATABASE allowed in DOWN (when UP creates it)
   - **Batch Validation**: `validate-all` command validates entire directory of DDL + DCL at once
 - **Auto Database Creation**: MariaDB adapter auto-creates database before connection (dual guarantee)
@@ -607,7 +608,46 @@ Validation tool auto-detects dangerous operations and provides allowance mechani
 | `dropUser()` | User management (should be in DCL) | - |
 | `grantRolesToUser()` | Permission management (should be in DCL) | - |
 
-#### 🟠 Dangerous Operations (MariaDB)
+#### � Structural FK Integrity Checks (MariaDB DDL Only)
+
+Beyond rule-matching, the validator performs two-layer **Foreign Key dependency analysis** across your entire migration history — no configuration required.
+
+| Error Code | Trigger | Severity |
+|-----------|---------|----------|
+| `FK_REFERENCES_DROPPED_TABLE` | A `DROP TABLE X` appears in the same UP section as a FK pointing to `X` | 🔴 Error |
+| `FK_UNRESOLVED_REFERENCE` | A FK points to a table that has never been created in any preceding migration | 🔴 Error |
+
+**Common mistake patterns:**
+
+```sql
+-- ❌ FK_REFERENCES_DROPPED_TABLE
+-- +migrate Up
+DROP TABLE IF EXISTS products;        -- drops products...
+CREATE TABLE order_items (
+    product_id BIGINT,
+    FOREIGN KEY (product_id) REFERENCES products(id)  -- ...but FK still points to it!
+);
+
+-- ❌ FK_UNRESOLVED_REFERENCE (wrong file order)
+-- File: 20260101000001-create-orders.sql
+-- +migrate Up
+CREATE TABLE orders (
+    customer_id BIGINT,
+    FOREIGN KEY (customer_id) REFERENCES customers(id)  -- customers not created yet!
+);
+
+-- ❌ FK_UNRESOLVED_REFERENCE (RENAME removes old name)
+-- +migrate Up
+RENAME TABLE orders TO orders_legacy;
+CREATE TABLE invoices (
+    order_id BIGINT,
+    FOREIGN KEY (order_id) REFERENCES orders(id)  -- 'orders' was renamed away!
+);
+```
+
+Self-referential FKs, schema-qualified references (`mydb.tbl`), `ALTER TABLE ADD FK`, multi-column FKs, and table names with `$` or hyphens are all handled correctly. See [`docs/VALIDATION-RULES-REFERENCE.md`](docs/VALIDATION-RULES-REFERENCE.md) and [`databases/mariadb/fk-test/`](databases/mariadb/fk-test/) for full details and live fixture examples.
+
+#### �🟠 Dangerous Operations (MariaDB)
 
 - `TRUNCATE TABLE` - Clear table data
 - `DROP INDEX` - Delete index (affects performance)

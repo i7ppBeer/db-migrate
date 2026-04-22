@@ -281,6 +281,117 @@ GRANT ${priv} ON mydb.* TO 'user'@'%';
       expect(rules.performance.thresholds.maxTotalLength).toBe(50000);
     });
   });
+
+  // =========================================
+  // FK regex security and bypass prevention
+  // FK 正則安全性與繞過防護測試
+  // =========================================
+  describe('FK regex security and bypass', () => {
+    // ── Fix B: zero-width strip ─────────────────────────────────────────
+    it('should detect FK with zero-width char inside FOREIGN keyword', () => {
+      const sql = `FORE\u200BIGN KEY (uid) REFERENCES users(id)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('users');
+    });
+
+    it('should detect FK with zero-width char inside REFERENCES keyword', () => {
+      const sql = `FOREIGN KEY (uid) REFER\u200BENCES users(id)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('users');
+    });
+
+    it('should detect FK with BOM character present', () => {
+      const sql = `\uFEFFFOREIGN KEY (uid) REFERENCES users(id)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('users');
+    });
+
+    // ── Fix C: fullwidth normalization ──────────────────────────────────
+    it('should detect FK with fullwidth FOREIGN KEY keywords', () => {
+      // Fullwidth "FOREIGN KEY" = \uFF26\uFF2F\uFF32\uFF25\uFF29\uFF27\uFF2E \uFF2B\uFF25\uFF39
+      const sql = '\uFF26\uFF2F\uFF32\uFF25\uFF29\uFF27\uFF2E \uFF2B\uFF25\uFF39 (uid) REFERENCES users(id)';
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('users');
+    });
+
+    // ── Already works: whitespace variants ─────────────────────────────
+    it('should detect FK with tab between FOREIGN and KEY', () => {
+      const sql = `FOREIGN\tKEY (uid) REFERENCES users(id)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('users');
+    });
+
+    it('should detect FK with newline between FOREIGN and KEY', () => {
+      const sql = `FOREIGN\nKEY (uid) REFERENCES users(id)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('users');
+    });
+
+    it('should detect FK with inline block comment between FOREIGN and KEY', () => {
+      const sql = `FOREIGN /* a comment */ KEY (uid) REFERENCES users(id)`;
+      // cleanSQL strips /* */ first, then regex matches
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('users');
+    });
+
+    it('should detect FK with CRLF line endings throughout', () => {
+      const sql =
+        'CREATE TABLE orders (\r\n' +
+        '  id INT PRIMARY KEY,\r\n' +
+        '  user_id INT,\r\n' +
+        '  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE\r\n' +
+        ');\r\n';
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('users');
+      expect(result[0].onDelete).toBe('CASCADE');
+    });
+
+    // ── Fix A: $ in identifiers ─────────────────────────────────────────
+    it('should capture unquoted table name containing $ (Fix A)', () => {
+      const sql = `FOREIGN KEY (uid) REFERENCES users$archive(id)`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('users$archive');
+    });
+
+    it('should capture backtick-quoted table name containing $ (Fix A)', () => {
+      const sql = 'FOREIGN KEY (uid) REFERENCES `users$archive`(id)';
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(1);
+      expect(result[0].referencedTable).toBe('users$archive');
+    });
+
+    // ── FK inside conditional comment: NOT extracted ────────────────────
+    it('should NOT extract FK inside /*! */ conditional comment', () => {
+      // cleanSQL strips all /* */ blocks including /*! */, so FK inside is not seen
+      const sql = `/*! FOREIGN KEY (uid) REFERENCES users(id) */\nCREATE TABLE foo (id INT);`;
+      const result = adapter.extractFKReferences(sql);
+      expect(result).toHaveLength(0);
+    });
+
+    // ── Cross-file end-to-end with $ table name ─────────────────────────
+    it('cross-file: File1 creates table with $ in name, File2 FKs to it — no false-positive error (Fix A)', () => {
+      const filesData = [
+        {
+          fileName: 'V001__archive.sql',
+          content: '-- +migrate Up\nCREATE TABLE `users$archive` (id INT PRIMARY KEY);\n-- +migrate Down\nDROP TABLE `users$archive`;\n'
+        },
+        {
+          fileName: 'V002__fk.sql',
+          content: '-- +migrate Up\nCREATE TABLE orders (id INT, arc_id INT, FOREIGN KEY (arc_id) REFERENCES `users$archive`(id));\n-- +migrate Down\nDROP TABLE orders;\n'
+        }
+      ];
+      expect(adapter.validateCrossFileFKDependencies(filesData)).toHaveLength(0);
+    });
+  });
 });
 
 describe('Security Edge Cases - MongoDB', () => {

@@ -1583,6 +1583,11 @@ export class MariaDBAdapter extends BaseAdapter {
   extractFKReferences(sql) {
     if (!sql) return [];
 
+    // Fix B: Strip zero-width characters (Unicode confusion bypass prevention)
+    sql = sql.replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '');
+    // Fix C: Convert fullwidth characters to halfwidth (align with normalizeSQL)
+    sql = sql.replace(/[\uFF01-\uFF5E]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+
     sql = this._stripRoutineBodies(sql);
 
     // Strip comments and single-quoted string literals to avoid false positives.
@@ -1595,22 +1600,30 @@ export class MariaDBAdapter extends BaseAdapter {
 
     const fks = [];
 
-    // Groups: 1=quoted constraint name (allows hyphens), 2=unquoted constraint name,
-    //         3=referencedSchema (optional), 4=referencedTable, 5=ON clause  (Bug 6)
-    const fkRegex = /(?:CONSTRAINT\s+(?:[`"]([^`"]+)[`"]|(\w+))\s+)?FOREIGN\s+KEY\s*\([^)]+\)\s+REFERENCES\s+(?:[`"]?(\w+)[`"]?\.)?[`"]?(\w+)[`"]?\s*(?:\([^)]+\))?\s*((?:ON\s+(?:DELETE|UPDATE)\s+(?:NO\s+ACTION|SET\s+(?:NULL|DEFAULT)|CASCADE|RESTRICT)\s*)*)/gi;
+    // Fix A: REFERENCES clause now handles:
+    //   - quoted schema/table identifiers using [^`"]+ (supports hyphens, $, spaces)
+    //   - unquoted schema/table identifiers using [\w$]+ (supports $ per MariaDB spec)
+    // Groups: 1=quoted constraint name, 2=unquoted constraint name,
+    //         3=quoted schema, 4=unquoted schema,
+    //         5=quoted table,  6=unquoted table,
+    //         7=ON clause
+    const fkRegex = /(?:CONSTRAINT\s+(?:[`"]([^`"]+)[`"]|(\w+))\s+)?FOREIGN\s+KEY\s*\([^)]+\)\s+REFERENCES\s+(?:(?:[`"]([^`"]+)[`"]|([\w$]+))\.)?(?:[`"]([^`"]+)[`"]|([\w$]+))\s*(?:\([^)]+\))?\s*((?:ON\s+(?:DELETE|UPDATE)\s+(?:NO\s+ACTION|SET\s+(?:NULL|DEFAULT)|CASCADE|RESTRICT)\s*)*)/gi;
 
     let match;
     while ((match = fkRegex.exec(cleanSQL)) !== null) {
-      const actionClause = match[5] || '';
+      const actionClause = match[7] || '';
 
       // Extract ON DELETE and ON UPDATE independently (order-insensitive)
       const onDeleteMatch = actionClause.match(/ON\s+DELETE\s+(NO\s+ACTION|SET\s+NULL|SET\s+DEFAULT|CASCADE|RESTRICT)/i);
       const onUpdateMatch = actionClause.match(/ON\s+UPDATE\s+(NO\s+ACTION|SET\s+NULL|SET\s+DEFAULT|CASCADE|RESTRICT)/i);
 
+      const rawSchema = match[3] || match[4] || null;
+      const rawTable  = match[5] || match[6] || '';
+
       fks.push({
         constraintName: match[1] || match[2] || null,
-        referencedSchema: match[3] ? match[3].replace(/[`"]/g, '') : null,
-        referencedTable: match[4].replace(/[`"]/g, '').toLowerCase(),
+        referencedSchema: rawSchema ? rawSchema.replace(/[`"]/g, '') : null,
+        referencedTable: rawTable.replace(/[`"]/g, '').toLowerCase(),
         onDelete: onDeleteMatch ? onDeleteMatch[1].toUpperCase().replace(/\s+/g, ' ').trim() : null,
         onUpdate: onUpdateMatch ? onUpdateMatch[1].toUpperCase().replace(/\s+/g, ' ').trim() : null
       });
@@ -1684,6 +1697,11 @@ export class MariaDBAdapter extends BaseAdapter {
       // After processing this file, its created tables are available to subsequent files
       for (const t of createdNow) {
         allCreatedTables.add(t);
+      }
+      // A table created AND dropped in the same file must not persist into subsequent files.
+      // (The start-of-loop deletion only handles tables that existed from prior files.)
+      for (const t of droppedNow) {
+        allCreatedTables.delete(t);
       }
     }
 

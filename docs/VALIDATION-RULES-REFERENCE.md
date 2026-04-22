@@ -138,6 +138,181 @@
 
 ---
 
+## FK 完整性驗證（MariaDB DDL Only）
+
+### 概述
+
+MariaDB adapter 在 `validate` / `up` 階段自動執行兩層 Foreign Key 完整性檢查，**無需任何設定**，且只在 DDL（versioned）模式下運作，DCL（repeatable）模式完全略過。
+
+### 兩層檢查機制
+
+| 層次 | 時機 | Error Code | 說明 |
+|------|------|-----------|------|
+| **單檔檢查** | 分析每個 migration 檔案時 | `FK_REFERENCES_DROPPED_TABLE` | 同一個 UP section 裡，某張表先被 `DROP`，之後又有 FK 指向它 |
+| **跨檔檢查** | 分析整個 migration 目錄後 | `FK_UNRESOLVED_REFERENCE` | FK 指向的表在此檔案之前的任何 migration 都未被建立 |
+
+---
+
+### `FK_REFERENCES_DROPPED_TABLE` — 同檔 DROP 後再建 FK
+
+**觸發條件**：同一個 `-- +migrate Up` 區塊裡，`DROP TABLE X` 出現在 `FOREIGN KEY ... REFERENCES X` 之前。
+
+✅ **正常（不觸發）**
+
+```sql
+-- +migrate Up
+CREATE TABLE users (id BIGINT PRIMARY KEY);
+
+CREATE TABLE orders (
+    id      BIGINT PRIMARY KEY,
+    user_id BIGINT,
+    CONSTRAINT fk_orders_user
+        FOREIGN KEY (user_id) REFERENCES users(id)  -- users 在同一 UP 裡被建立，OK
+);
+```
+
+❌ **錯誤（觸發 FK_REFERENCES_DROPPED_TABLE）**
+
+```sql
+-- +migrate Up
+DROP TABLE IF EXISTS products;   -- ← products 在這裡被刪掉
+
+CREATE TABLE order_items (
+    id         BIGINT PRIMARY KEY,
+    product_id BIGINT,
+    CONSTRAINT fk_items_product
+        FOREIGN KEY (product_id)
+        REFERENCES products(id)  -- ❌ products 已在上方被 DROP！
+);
+```
+
+---
+
+### `FK_UNRESOLVED_REFERENCE` — 跨檔找不到被參照的表
+
+**觸發條件**：FK 所指向的表名，在此 migration 檔案之前（包含此檔案本身）的所有 UP section 都從未被 `CREATE TABLE` 建立過。
+
+#### 情境一：FK 比 CREATE TABLE 先執行（順序錯誤）
+
+```
+20260101000001-create-orders.sql   ← FK → customers，但 customers 還沒建！
+20260101000002-create-customers.sql
+```
+
+```sql
+-- 20260101000001  ❌
+-- +migrate Up
+CREATE TABLE orders (
+    customer_id BIGINT,
+    CONSTRAINT fk_orders_customer
+        FOREIGN KEY (customer_id)
+        REFERENCES customers(id)   -- ❌ customers 尚未在任何前置 migration 建立
+);
+```
+
+#### 情境二：ALTER TABLE 加 FK，目標表從未存在
+
+```sql
+-- +migrate Up
+ALTER TABLE orders ADD COLUMN dept_id BIGINT;
+
+ALTER TABLE orders
+    ADD CONSTRAINT fk_orders_dept
+        FOREIGN KEY (dept_id)
+        REFERENCES departments(id);   -- ❌ departments 從未在任何 migration 建立過
+```
+
+#### 情境三：同一個 CREATE TABLE，多個 FK 全部未解析
+
+```sql
+-- +migrate Up
+CREATE TABLE shipments (
+    carrier_id   BIGINT,
+    warehouse_id BIGINT,
+    CONSTRAINT fk_shipments_carrier
+        FOREIGN KEY (carrier_id)   REFERENCES carriers(id),   -- ❌ carriers 不存在
+    CONSTRAINT fk_shipments_warehouse
+        FOREIGN KEY (warehouse_id) REFERENCES warehouses(id)  -- ❌ warehouses 不存在
+);  -- 兩個 FK 各自獨立回報，不會只報第一個
+```
+
+#### 情境四：RENAME TABLE 把舊名移走後仍 FK 指向舊名
+
+```sql
+-- +migrate Up
+RENAME TABLE orders TO orders_legacy;  -- 'orders' 這個名字被移除
+
+CREATE TABLE invoices (
+    order_id BIGINT,
+    CONSTRAINT fk_invoices_order
+        FOREIGN KEY (order_id)
+        REFERENCES orders(id)   -- ❌ 'orders' 已被 RENAME 移走，不再存在
+);
+```
+
+---
+
+### FK 解析規則總整理
+
+| 情況 | 是否算「可用」 |
+|------|---------------|
+| 前置 migration 已 `CREATE TABLE` | ✅ 可用 |
+| 同一個 migration 檔案裡 `CREATE TABLE` | ✅ 可用（同檔自參考 OK）|
+| 自我參照（table FK → 自己）| ✅ 允許（例如 `parent_id`）|
+| 前置 migration 已 `DROP TABLE` | ❌ 不可用 |
+| 同一 UP section 先 `DROP TABLE` 再 FK | ❌ 不可用 |
+| 前置 migration 已 `RENAME TABLE X TO Y`（X 消失）| ❌ `X` 不可用，`Y` 可用 |
+| FK 在 `-- +migrate Down` 區塊 | ✅ 不檢查（Down 不驗證 FK）|
+| FK 在 `CREATE PROCEDURE/FUNCTION` 內 | ✅ 不檢查（routine 體內略過）|
+| Schema 前綴（`mydb.users`）| ✅ 忽略 schema，只對比表名 |
+
+### FK 識別符支援範圍
+
+| 語法 | 範例 | 是否支援 |
+|------|------|----------|
+| 有名 inline | `CONSTRAINT fk_name FOREIGN KEY (col) REFERENCES tbl(id)` | ✅ |
+| 無名 inline | `FOREIGN KEY (col) REFERENCES tbl(id)` | ✅ |
+| ALTER TABLE 有名 | `ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (col) REFERENCES tbl(id)` | ✅ |
+| ALTER TABLE 無名 | `ALTER TABLE t ADD FOREIGN KEY (col) REFERENCES tbl(id)` | ✅ |
+| 多欄位 FK | `FOREIGN KEY (a, b) REFERENCES tbl(x, y)` | ✅ |
+| Schema 前綴 | `` REFERENCES `mydb`.`tbl`(id) `` | ✅（schema 忽略）|
+| 含 `$` 的表名 | `` REFERENCES `users$archive`(id) `` | ✅ |
+| Backtick 含 hyphen | `` REFERENCES `tbl-name`(id) `` | ✅ |
+| ON DELETE / ON UPDATE | `ON DELETE CASCADE ON UPDATE RESTRICT` | ✅（順序無關）|
+
+### ON DELETE / ON UPDATE 動作的警告
+
+`ON DELETE CASCADE` 和 `ON UPDATE CASCADE` 會觸發 🟡 **Warning**（不是 Error），提醒開發者注意 cascade 造成的隱性資料刪除風險。
+
+```sql
+-- ⚠️ 觸發 Warning（但不阻擋執行）
+FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+
+-- ✅ 不觸發 Warning
+FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT
+FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+```
+
+### DROP FOREIGN KEY 的警告
+
+移除外鍵約束被歸類為 🟠 **Dangerous**（`DROP_FOREIGN_KEY`），需要 `--allow-dangerous` 或 `-- @allow: DROP_FOREIGN_KEY` 方可通過驗證。
+
+```sql
+-- 觸發 🟠 DANGEROUS: DROP_FOREIGN_KEY
+ALTER TABLE orders DROP FOREIGN KEY fk_orders_user;
+```
+
+### Fixture 範例
+
+可參考 `databases/mariadb/fk-test/` 目錄的實際範例：
+
+| 目錄 | 用途 |
+|------|------|
+| `fk-test/ddl/` | 合法的 FK chain（customers → orders → order_items、自我參照等）|
+| `fk-test/ddl-bad/` | 各種錯誤情境（共 5 個，每個對應不同的 FK error）|
+
+---
+
 ## 字串誤判防護
 
 ### 原理
@@ -263,27 +438,28 @@ const dropDatabaseHelper = () => {};  // ⚠️ SUSPICIOUS NAME
 | 測試類別 | 測試數量 |
 |----------|----------|
 | **CLI Tests** | 10 |
-| **DCL Idempotent Checker** | 14 |
-| **MariaDB Adapter** | 14 |
-| **MongoDB Adapter** | 35 |
-| **Normalize Pattern (MariaDB)** | 77 |
-| **Normalize Pattern (MongoDB)** | 22 |
-| **Cross-Adapter Edge Cases** | 4 |
-| **Repeatable Runner** | 11 |
+| **DCL Idempotent Checker** | 17 |
+| **DCL Scaffold** | 20 |
+| **MariaDB Adapter** | 174 |
+| **MongoDB Adapter** | 61 |
+| **Normalize Pattern** | 113 |
+| **Repeatable Runner** | 25 |
 | **Sanity Checker** | 25 |
-| **Security Edge Cases** | 54 |
-| **總計** | **266** |
+| **Security Edge Cases** | 66 |
+| **總計** | **511** |
 
 ### 按功能分類
 
-| 功能 | MariaDB Tests | MongoDB Tests |
-|------|---------------|---------------|
-| 基本正規化 | 7 | 5 |
-| 字串誤判防護 | 7 | 7 |
-| 可疑名稱檢測 | 12 | 6 |
-| 效能問題檢測 | 26 | 9 |
-| Pattern Matching | 25 | 15 |
-| Structural Checks | - | 8 |
+| 功能 | 測試檔案 |
+|------|---------|
+| FK 完整性驗證 | `mariadb-adapter.test.js`, `security-edge-cases.test.js` |
+| 字串誤判防護 | `normalize-pattern.test.js` |
+| 可疑名稱檢測 | `normalize-pattern.test.js`, `mariadb-adapter.test.js` |
+| 效能問題檢測 | `mariadb-adapter.test.js`, `mongodb-adapter.test.js` |
+| Unicode / 安全繞過防護 | `security-edge-cases.test.js` |
+| DCL 冪等性驗證 | `dcl-idempotent-checker.test.js` |
+| Repeatable Runner | `repeatable-runner.test.js` |
+| Sanity Check | `sanity-checker.test.js` |
 
 ---
 
