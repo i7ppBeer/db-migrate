@@ -1847,7 +1847,7 @@ describe('fk-test fixtures — ddl/ (valid chain, should produce no FK errors)',
     adapter = new MariaDBAdapter({ migrationsDir: './tmp', changelogTable: '_migrations' });
   });
 
-  it('all 4 migrations pass single-file FK checks', () => {
+  it('all 6 migrations pass single-file FK checks', () => {
     const files = loadMigrations('ddl');
     for (const { fileName, content } of files) {
       const r = adapter.validateContent(content, fileName);
@@ -1858,10 +1858,33 @@ describe('fk-test fixtures — ddl/ (valid chain, should produce no FK errors)',
     }
   });
 
-  it('all 4 migrations pass cross-file FK dependency check', () => {
+  it('all 6 migrations pass cross-file FK dependency check', () => {
     const files = loadMigrations('ddl');
     const result = adapter.validateCrossFileFKDependencies(files);
     expect(result).toHaveLength(0);
+  });
+
+  // ── drop → re-add FK scenario ────────────────────────────────────────────
+  it('000005: DROP_FOREIGN_KEY allowed via @allow annotation — no errors, demoted to warning', () => {
+    const files = loadMigrations('ddl');
+    const file005 = files.find(f => f.fileName.startsWith('20260101000005'));
+    const r = adapter.validateContent(file005.content, file005.fileName);
+    expect(r.errors, 'DROP FK with @allow annotation should produce no errors').toHaveLength(0);
+    expect(r.warnings.some(w => w.code === 'DROP_FOREIGN_KEY'),
+      'DROP_FOREIGN_KEY should appear as an allowed warning').toBe(true);
+  });
+
+  it('000006: re-add fk_orders_customer passes cross-file check — customers still in table set', () => {
+    const files = loadMigrations('ddl');
+    // Run the full chain; re-add in 006 must resolve against 'customers' created in 001
+    const result = adapter.validateCrossFileFKDependencies(files);
+    expect(result, 'full chain including drop+re-add should have no cross-file FK errors').toHaveLength(0);
+
+    // Also verify 006 alone passes when customers is pre-seeded
+    const file001 = files.find(f => f.fileName.startsWith('20260101000001'));
+    const file006 = files.find(f => f.fileName.startsWith('20260101000006'));
+    const partialResult = adapter.validateCrossFileFKDependencies([file001, file006]);
+    expect(partialResult, '006 re-add should pass when customers table exists').toHaveLength(0);
   });
 });
 

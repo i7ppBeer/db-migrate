@@ -563,7 +563,66 @@ node src/cli.js up-all -c databases/mariadb/multi-instance/ddl/config.js
 | `dropUser()` | 使用者管理（應在 DCL） | - |
 | `grantRolesToUser()` | 權限管理（應在 DCL） | - |
 
-#### 🟠 Dangerous 操作（MariaDB）
+#### � FK 完整性靜態分析（MariaDB DDL 專用）
+
+除規則比對外，驗證器還會對整個遷移歷史執行**雙層外鍵依賴分析**，不需任何額外設定。
+
+| 錯誤碼 | 觸發條件 | 嚴重程度 |
+|--------|---------|----------|
+| `FK_REFERENCES_DROPPED_TABLE` | 同一 UP 區塊內先 `DROP TABLE X`，後有 FK 指向 `X` | 🔴 Error |
+| `FK_UNRESOLVED_REFERENCE` | FK 指向的表在任何前置遷移中均未被建立 | 🔴 Error |
+
+**常見錯誤範例：**
+
+```sql
+-- ❌ FK_REFERENCES_DROPPED_TABLE
+-- +migrate Up
+DROP TABLE IF EXISTS products;        -- 已刪除 products...
+CREATE TABLE order_items (
+    product_id BIGINT,
+    FOREIGN KEY (product_id) REFERENCES products(id)  -- ...但 FK 仍指向它！
+);
+
+-- ❌ FK_UNRESOLVED_REFERENCE（檔案順序錯誤）
+-- File: 20260101000001-create-orders.sql
+-- +migrate Up
+CREATE TABLE orders (
+    customer_id BIGINT,
+    FOREIGN KEY (customer_id) REFERENCES customers(id)  -- customers 尚未建立！
+);
+
+-- ❌ FK_UNRESOLVED_REFERENCE（RENAME 移除了舊名稱）
+-- +migrate Up
+RENAME TABLE orders TO orders_legacy;
+CREATE TABLE invoices (
+    order_id BIGINT,
+    FOREIGN KEY (order_id) REFERENCES orders(id)  -- 'orders' 已被改名！
+);
+```
+
+**先刪後加 FK（合法操作模式）：**
+
+先在一個遷移中刪除 FK 約束、再於後續遷移中重新加回，是合法操作。刪除步驟屬於 **🟠 Dangerous** 操作（代碼 `DROP_FOREIGN_KEY`）——在該檔案頂部加上 `-- @allow: DROP_FOREIGN_KEY` 即可放行。重新加回的遷移則按正常流程驗證：只要被引用的表仍存在於遷移歷史中，即可通過。
+
+```sql
+-- ✅ V005 — 刪除約束（加上明確放行 annotation）
+-- @allow: DROP_FOREIGN_KEY
+-- +migrate Up
+ALTER TABLE orders
+    DROP FOREIGN KEY fk_orders_customer;
+
+-- ✅ V006 — 重新加回；'customers' 仍在遷移歷史中 → 通過驗證
+-- +migrate Up
+ALTER TABLE orders
+    ADD CONSTRAINT fk_orders_customer
+        FOREIGN KEY (customer_id)
+        REFERENCES customers(id)
+        ON DELETE RESTRICT ON UPDATE CASCADE;
+```
+
+自引用 FK、schema 前綴（`mydb.tbl`）、`ALTER TABLE ADD FK`、多欄位 FK 及含 `$` 或連字號的表名均可正確處理。詳見 [`docs/VALIDATION-RULES-REFERENCE.md`](docs/VALIDATION-RULES-REFERENCE.md) 與 [`databases/mariadb/fk-test/`](databases/mariadb/fk-test/)。
+
+#### �🟠 Dangerous 操作（MariaDB）
 
 - `TRUNCATE TABLE` - 清空表資料
 - `DROP INDEX` - 刪除索引（影響效能）

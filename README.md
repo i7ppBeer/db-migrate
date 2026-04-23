@@ -645,6 +645,26 @@ CREATE TABLE invoices (
 );
 ```
 
+**Drop → Re-add FK (valid pattern):**
+
+Dropping a FK constraint and re-adding it in a later migration is a valid pattern. The `DROP FOREIGN KEY` step is classified as a **🟠 Dangerous** operation (code `DROP_FOREIGN_KEY`) — add `-- @allow: DROP_FOREIGN_KEY` at the top of that file to allow it. The subsequent re-add migration is validated normally: as long as the referenced table still exists in the migration history, it passes with no errors.
+
+```sql
+-- ✅ V005 — drop the constraint (with explicit allow annotation)
+-- @allow: DROP_FOREIGN_KEY
+-- +migrate Up
+ALTER TABLE orders
+    DROP FOREIGN KEY fk_orders_customer;
+
+-- ✅ V006 — re-add the constraint; 'customers' still in migration history → passes
+-- +migrate Up
+ALTER TABLE orders
+    ADD CONSTRAINT fk_orders_customer
+        FOREIGN KEY (customer_id)
+        REFERENCES customers(id)
+        ON DELETE RESTRICT ON UPDATE CASCADE;
+```
+
 Self-referential FKs, schema-qualified references (`mydb.tbl`), `ALTER TABLE ADD FK`, multi-column FKs, and table names with `$` or hyphens are all handled correctly. See [`docs/VALIDATION-RULES-REFERENCE.md`](docs/VALIDATION-RULES-REFERENCE.md) and [`databases/mariadb/fk-test/`](databases/mariadb/fk-test/) for full details and live fixture examples.
 
 #### �🟠 Dangerous Operations (MariaDB)
