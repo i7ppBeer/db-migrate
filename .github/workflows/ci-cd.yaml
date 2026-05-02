@@ -34,7 +34,9 @@ jobs:
     
     - name: Check for forbidden operations
       run: |
-        if grep -r "dropDatabase\|createUser\|dropUser" test-fixtures/*/migrations/*.js 2>/dev/null | grep -v "dangerous_legacy"; then
+        if find test-fixtures -type f \( -path "*/ddl/migrations/*.js" -o -path "*/dcl/migrations/*.js" \) -print0 \
+          | xargs -0 -r grep -H -E "dropDatabase|createUser|dropUser" \
+          | grep -v "dangerous_legacy"; then
           echo "[ERROR] Forbidden operations detected in production migrations!"
           exit 1
         fi
