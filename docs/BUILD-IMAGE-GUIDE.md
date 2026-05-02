@@ -112,7 +112,7 @@ Options:
 # 使用特定的遷移目錄
 ./scripts/build-migration-image.sh \
   -t v1.2.3 \
-  -m ./databases/mongodb/production/migrations \
+  -m ./test-fixtures/mongodb/production/migrations \
   -r myregistry.azurecr.io \
   -p
 ```

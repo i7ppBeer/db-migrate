@@ -27,7 +27,7 @@ PROJECT=${1:-test-success}
 DB_TYPE=${2:-mariadb}
 
 # 路徑設定
-BASE_PATH="databases/${DB_TYPE}/${PROJECT}"
+BASE_PATH="test-fixtures/${DB_TYPE}/${PROJECT}"
 DCL_CONFIG="/app/${BASE_PATH}/dcl/config.js"
 DDL_CONFIG="/app/${BASE_PATH}/ddl/config.js"
 

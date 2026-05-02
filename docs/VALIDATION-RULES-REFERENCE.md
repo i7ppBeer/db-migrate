@@ -304,7 +304,7 @@ ALTER TABLE orders DROP FOREIGN KEY fk_orders_user;
 
 ### Fixture 範例
 
-可參考 `databases/mariadb/fk-test/` 目錄的實際範例：
+可參考 `test-fixtures/mariadb/fk-test/` 目錄的實際範例：
 
 | 目錄 | 用途 |
 |------|------|
@@ -469,13 +469,13 @@ const dropDatabaseHelper = () => {};  // ⚠️ SUSPICIOUS NAME
 
 ```bash
 # 執行驗證
-node src/cli.js -c ./databases/mariadb/test-success/ddl/config.js validate
+node src/cli.js -c ./test-fixtures/mariadb/test-success/ddl/config.js validate
 
 # 允許危險操作
-node src/cli.js -c ./databases/mariadb/test-success/ddl/config.js validate --allow-dangerous
+node src/cli.js -c ./test-fixtures/mariadb/test-success/ddl/config.js validate --allow-dangerous
 
 # 允許特定 code
-node src/cli.js -c ./databases/mariadb/test-success/ddl/config.js validate --allow DROP_TABLE,ALTER_TABLE
+node src/cli.js -c ./test-fixtures/mariadb/test-success/ddl/config.js validate --allow DROP_TABLE,ALTER_TABLE
 ```
 
 ### 程式化使用

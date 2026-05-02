@@ -83,16 +83,16 @@ DCL 使用 **Repeatable** 模式，檔案以 `R__` 開頭，每當內容 (checks
 
 ```bash
 # 方式一：複製範本 (推薦)
-cp -r databases/mariadb/_templates/dcl databases/mariadb/my-project/dcl
+cp -r test-fixtures/mariadb/_templates/dcl test-fixtures/mariadb/my-project/dcl
 
 # 方式二：手動建立目錄
-mkdir -p databases/mariadb/my-project/dcl/migrations
+mkdir -p test-fixtures/mariadb/my-project/dcl/migrations
 ```
 
 #### Step 2: 建立 Config 檔案 (如使用範本可跳過)
 
 ```bash
-cat > databases/mariadb/my-project/dcl/config.js << 'EOF'
+cat > test-fixtures/mariadb/my-project/dcl/config.js << 'EOF'
 /**
  * DCL Configuration - 帳號權限管理
  */
@@ -119,7 +119,7 @@ EOF
 #### Step 3: 建立公版 Default 帳號腳本
 
 ```bash
-cat > databases/mariadb/my-project/dcl/migrations/R__00_default_users.sql << 'EOF'
+cat > test-fixtures/mariadb/my-project/dcl/migrations/R__00_default_users.sql << 'EOF'
 -- R__00_default_users.sql
 -- DCL Repeatable Migration: Default Service Account (公版)
 -- ⚠️ 必須是 IDEMPOTENT (可重複執行)
@@ -145,7 +145,7 @@ EOF
 #### Step 4: 建立 Readonly 帳號腳本
 
 ```bash
-cat > databases/mariadb/my-project/dcl/migrations/R__01_readonly_users.sql << 'EOF'
+cat > test-fixtures/mariadb/my-project/dcl/migrations/R__01_readonly_users.sql << 'EOF'
 -- R__01_readonly_users.sql
 -- DCL Repeatable Migration: Read-Only Users
 -- ⚠️ 必須是 IDEMPOTENT (可重複執行)
@@ -172,7 +172,7 @@ EOF
 #### Step 5: 建立 Readwrite 帳號腳本
 
 ```bash
-cat > databases/mariadb/my-project/dcl/migrations/R__02_readwrite_users.sql << 'EOF'
+cat > test-fixtures/mariadb/my-project/dcl/migrations/R__02_readwrite_users.sql << 'EOF'
 -- R__02_readwrite_users.sql
 -- DCL Repeatable Migration: Read-Write Users (Application Accounts)
 -- ⚠️ 必須是 IDEMPOTENT (可重複執行)
@@ -199,10 +199,10 @@ EOF
 # 使用 docker-compose 執行 DCL
 docker compose run --rm migrate \
   node src/cli.js dcl \
-  -c /app/databases/mariadb/my-project/dcl/config.js
+  -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 
 # 或使用簡化別名 (需先設定)
-docker compose run --rm migrate dcl -c /app/databases/mariadb/my-project/dcl/config.js
+docker compose run --rm migrate dcl -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
 ---
@@ -215,7 +215,7 @@ DCL 是 **Repeatable** 模式，只需要修改對應的 SQL 檔案，然後重�
 
 ```bash
 # 新增一個 DDL Admin 帳號
-cat > databases/mariadb/my-project/dcl/migrations/R__03_ddl_admin.sql << 'EOF'
+cat > test-fixtures/mariadb/my-project/dcl/migrations/R__03_ddl_admin.sql << 'EOF'
 -- R__03_ddl_admin.sql
 -- DCL Repeatable Migration: DDL Admin User
 -- ⚠️ 必須是 IDEMPOTENT (可重複執行)
@@ -253,7 +253,7 @@ EOF
 # DCL 會自動偵測 checksum 變化，只執行有修改的檔案
 docker compose run --rm migrate \
   node src/cli.js dcl \
-  -c /app/databases/mariadb/my-project/dcl/config.js
+  -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
 #### 查看 DCL 狀態
@@ -262,7 +262,7 @@ docker compose run --rm migrate \
 # 查看哪些 DCL 需要更新
 docker compose run --rm migrate \
   node src/cli.js dcl:status \
-  -c /app/databases/mariadb/my-project/dcl/config.js
+  -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
 ---
@@ -275,7 +275,7 @@ docker compose run --rm migrate \
 # 驗證所有 DCL 腳本是否為冪等 (可重複執行)
 docker compose run --rm migrate \
   node src/cli.js dcl:verify \
-  -c /app/databases/mariadb/my-project/dcl/config.js
+  -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
 **預期輸出:**
@@ -304,7 +304,7 @@ docker compose run --rm migrate \
 # 預覽會執行哪些 DCL
 docker compose run --rm migrate \
   node src/cli.js dcl --dry-run \
-  -c /app/databases/mariadb/my-project/dcl/config.js
+  -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
 ---
@@ -319,16 +319,16 @@ DDL 使用 **Versioned** 模式，檔案以時間戳開頭 (如 `20250101000001-
 
 ```bash
 # 方式一：複製範本 (推薦)
-cp -r databases/mariadb/_templates/ddl databases/mariadb/my-project/ddl
+cp -r test-fixtures/mariadb/_templates/ddl test-fixtures/mariadb/my-project/ddl
 
 # 方式二：手動建立目錄
-mkdir -p databases/mariadb/my-project/ddl/migrations
+mkdir -p test-fixtures/mariadb/my-project/ddl/migrations
 ```
 
 #### Step 2: 建立 Config 檔案 (如使用範本可跳過)
 
 ```bash
-cat > databases/mariadb/my-project/ddl/config.js << 'EOF'
+cat > test-fixtures/mariadb/my-project/ddl/config.js << 'EOF'
 /**
  * DDL Configuration - 結構變更管理
  */
@@ -360,7 +360,7 @@ EOF
 # 建立新的 DDL migration
 docker compose run --rm migrate \
   node src/cli.js create create-users \
-  -c /app/databases/mariadb/my-project/ddl/config.js
+  -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
 **輸出:**
@@ -464,7 +464,7 @@ ALTER TABLE users DROP COLUMN phone;
 # 驗證所有 DDL migration 檔案
 docker compose run --rm migrate \
   node src/cli.js validate \
-  -c /app/databases/mariadb/my-project/ddl/config.js
+  -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
 **預期輸出:**
@@ -488,12 +488,12 @@ Invalid: 0
 # 允許危險操作 (如 DROP TABLE)
 docker compose run --rm migrate \
   node src/cli.js validate --allow-dangerous \
-  -c /app/databases/mariadb/my-project/ddl/config.js
+  -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 # 允許特定操作碼
 docker compose run --rm migrate \
   node src/cli.js validate --allow DROP_TABLE,TRUNCATE \
-  -c /app/databases/mariadb/my-project/ddl/config.js
+  -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
 #### 查看 Migration 狀態
@@ -502,7 +502,7 @@ docker compose run --rm migrate \
 # 查看已執行和待執行的 migration
 docker compose run --rm migrate \
   node src/cli.js status \
-  -c /app/databases/mariadb/my-project/ddl/config.js
+  -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
 ---
@@ -532,7 +532,7 @@ docker compose exec mariadb mariadb -u root -prootpass -e "CREATE DATABASE IF NO
 # 第一步: 執行 DCL 建立所有帳號
 docker compose run --rm migrate \
   node src/cli.js dcl \
-  -c /app/databases/mariadb/my-project/dcl/config.js
+  -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 
 echo "✅ DCL 執行完成"
 ```
@@ -543,7 +543,7 @@ echo "✅ DCL 執行完成"
 # 執行所有待執行的 DDL migration
 docker compose run --rm migrate \
   node src/cli.js up \
-  -c /app/databases/mariadb/my-project/ddl/config.js
+  -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 echo "✅ DDL Up 執行完成"
 ```
@@ -554,7 +554,7 @@ echo "✅ DDL Up 執行完成"
 # Rollback 最近 1 個 migration
 docker compose run --rm migrate \
   node src/cli.js down -n 1 \
-  -c /app/databases/mariadb/my-project/ddl/config.js
+  -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 echo "✅ DDL Down 執行完成"
 ```
@@ -565,7 +565,7 @@ echo "✅ DDL Down 執行完成"
 # 再次執行 Up，驗證可重複執行
 docker compose run --rm migrate \
   node src/cli.js up \
-  -c /app/databases/mariadb/my-project/ddl/config.js
+  -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 echo "✅ DDL Up 再次執行完成"
 ```
@@ -576,7 +576,7 @@ echo "✅ DDL Up 再次執行完成"
 # 一鍵執行 Up-Down-Up 測試
 docker compose run --rm migrate \
   node src/cli.js test \
-  -c /app/databases/mariadb/my-project/ddl/config.js
+  -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
 **預期輸出:**
@@ -615,7 +615,7 @@ docker compose run --rm migrate \
 
 set -e  # 遇到錯誤就停止
 
-PROJECT_PATH="databases/mariadb/my-project"
+PROJECT_PATH="test-fixtures/mariadb/my-project"
 DCL_CONFIG="/app/${PROJECT_PATH}/dcl/config.js"
 DDL_CONFIG="/app/${PROJECT_PATH}/ddl/config.js"
 
@@ -707,9 +707,9 @@ chmod +x full-migration-test.sh
 alias migrate='docker compose run --rm migrate node src/cli.js'
 
 # 然後就可以這樣用:
-migrate dcl -c /app/databases/mariadb/my-project/dcl/config.js
-migrate up -c /app/databases/mariadb/my-project/ddl/config.js
-migrate validate -c /app/databases/mariadb/my-project/ddl/config.js
+migrate dcl -c /app/test-fixtures/mariadb/my-project/dcl/config.js
+migrate up -c /app/test-fixtures/mariadb/my-project/ddl/config.js
+migrate validate -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
 ---
@@ -740,7 +740,7 @@ export DB_READONLY_PASSWORD=$(az keyvault secret show --name db-readonly-pass --
 # 然後執行 migration
 docker compose run --rm \
   -e DB_READONLY_PASSWORD="$DB_READONLY_PASSWORD" \
-  migrate node src/cli.js dcl -c /app/databases/mariadb/my-project/dcl/config.js
+  migrate node src/cli.js dcl -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
 ---

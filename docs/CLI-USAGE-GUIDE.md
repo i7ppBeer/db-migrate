@@ -3,7 +3,7 @@
 ## 目錄結構
 
 ```
-databases/
+test-fixtures/
 ├── mariadb/
 │   ├── production-server/
 │   │   ├── ddl/                 # DDL (版本化遷移)
@@ -31,10 +31,10 @@ databases/
 
 ```bash
 # 查看 MariaDB DDL 遷移狀態
-node src/cli.js -c databases/mariadb/test-success/ddl/config.js status
+node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js status
 
 # 查看 MongoDB DDL 遷移狀態
-node src/cli.js -c databases/mongodb/test-success/ddl/config.js status
+node src/cli.js -c test-fixtures/mongodb/test-success/ddl/config.js status
 ```
 
 ### 2. 執行遷移 (UP)
@@ -73,13 +73,13 @@ node src/cli.js -c <config-path> down -n 3
 
 ```bash
 # 執行到 create-orders（包含 create-users, seed-users, create-products, create-orders）
-node src/cli.js -c databases/mariadb/test-success/ddl/config.js up --target 20250101000004-create-orders.sql
+node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js up --target 20250101000004-create-orders.sql
 
 # 支援部分匹配（只要名稱包含即可）
-node src/cli.js -c databases/mariadb/test-success/ddl/config.js up --target create-orders
+node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js up --target create-orders
 
 # MongoDB 範例
-node src/cli.js -c databases/mongodb/test-success/ddl/config.js up --target seed-users
+node src/cli.js -c test-fixtures/mongodb/test-success/ddl/config.js up --target seed-users
 ```
 
 ### --only：只執行指定的單一遷移
@@ -88,20 +88,20 @@ node src/cli.js -c databases/mongodb/test-success/ddl/config.js up --target seed
 
 ```bash
 # 只執行 add-user-profile
-node src/cli.js -c databases/mariadb/test-success/ddl/config.js up --only 20250101000005-add-user-profile.sql
+node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js up --only 20250101000005-add-user-profile.sql
 
 # 支援部分匹配
-node src/cli.js -c databases/mariadb/test-success/ddl/config.js up --only add-user-profile
+node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js up --only add-user-profile
 
 # MongoDB 範例
-node src/cli.js -c databases/mongodb/test-success/ddl/config.js up --only create-products
+node src/cli.js -c test-fixtures/mongodb/test-success/ddl/config.js up --only create-products
 ```
 
 ### 組合使用範例
 
 ```bash
 # 先檢查狀態
-node src/cli.js -c databases/mariadb/test-success/ddl/config.js status
+node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js status
 
 # 結果：
 # ✅ Applied (2):
@@ -114,10 +114,10 @@ node src/cli.js -c databases/mariadb/test-success/ddl/config.js status
 #    20250101000006-add-phone-with-sanity.sql
 
 # 只執行到 create-orders（執行 products 和 orders）
-node src/cli.js -c databases/mariadb/test-success/ddl/config.js up --target create-orders
+node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js up --target create-orders
 
 # 跳過 add-user-profile，只執行 add-phone-with-sanity
-node src/cli.js -c databases/mariadb/test-success/ddl/config.js up --only add-phone-with-sanity
+node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js up --only add-phone-with-sanity
 ```
 
 ---
@@ -161,13 +161,13 @@ export default {
 
 ```bash
 # 測試所有實例（驗證 + Up-Down-Up 測試）
-node src/cli.js -c databases/mariadb/multi-instance/config.js test-instances
+node src/cli.js -c test-fixtures/mariadb/multi-instance/config.js test-instances
 
 # 只驗證，不執行遷移測試
-node src/cli.js -c databases/mariadb/multi-instance/config.js test-instances --validate-only
+node src/cli.js -c test-fixtures/mariadb/multi-instance/config.js test-instances --validate-only
 
 # 平行執行（更快但更耗資源）
-node src/cli.js -c databases/mariadb/multi-instance/config.js test-instances --parallel
+node src/cli.js -c test-fixtures/mariadb/multi-instance/config.js test-instances --parallel
 ```
 
 ---
@@ -178,10 +178,10 @@ node src/cli.js -c databases/mariadb/multi-instance/config.js test-instances --p
 
 ```bash
 # 驗證 DDL 遷移（檢查危險操作、DCL 混用等）
-node src/cli.js -c databases/mariadb/test-success/ddl/config.js validate
+node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js validate
 
 # 驗證失敗案例（應該報錯）
-node src/cli.js -c databases/mariadb/test-failure/ddl/config.js validate
+node src/cli.js -c test-fixtures/mariadb/test-failure/ddl/config.js validate
 ```
 
 驗證會檢查：
@@ -231,13 +231,13 @@ node src/cli.js -c <config> test-instances
 
 | 類型 | 路徑 |
 |------|------|
-| MariaDB DDL 成功案例 | `databases/mariadb/test-success/ddl/config.js` |
-| MariaDB DCL 成功案例 | `databases/mariadb/test-success/dcl/config.js` |
-| MariaDB DDL 失敗案例 | `databases/mariadb/test-failure/ddl/config.js` |
-| MariaDB 多實例 | `databases/mariadb/multi-instance/config.js` |
-| MongoDB DDL 成功案例 | `databases/mongodb/test-success/ddl/config.js` |
-| MongoDB DCL 成功案例 | `databases/mongodb/test-success/dcl/config.js` |
-| MongoDB 多實例 | `databases/mongodb/multi-instance/config.js` |
+| MariaDB DDL 成功案例 | `test-fixtures/mariadb/test-success/ddl/config.js` |
+| MariaDB DCL 成功案例 | `test-fixtures/mariadb/test-success/dcl/config.js` |
+| MariaDB DDL 失敗案例 | `test-fixtures/mariadb/test-failure/ddl/config.js` |
+| MariaDB 多實例 | `test-fixtures/mariadb/multi-instance/config.js` |
+| MongoDB DDL 成功案例 | `test-fixtures/mongodb/test-success/ddl/config.js` |
+| MongoDB DCL 成功案例 | `test-fixtures/mongodb/test-success/dcl/config.js` |
+| MongoDB 多實例 | `test-fixtures/mongodb/multi-instance/config.js` |
 
 ---
 

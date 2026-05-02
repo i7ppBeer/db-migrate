@@ -64,7 +64,7 @@ services:
       - DB_PORT=27017
       - DB_NAME=migrate_test
     volumes:
-      - ./databases/mongodb/test-success:/app/migrations:ro
+      - ./test-fixtures/mongodb/test-success:/app/migrations:ro
     networks:
       - migrate-network
 
@@ -87,7 +87,7 @@ services:
       - DB_USER=migrate
       - DB_PASSWORD=migratepass
     volumes:
-      - ./databases/mariadb/test-success:/app/migrations:ro
+      - ./test-fixtures/mariadb/test-success:/app/migrations:ro
     networks:
       - migrate-network
 
@@ -117,9 +117,9 @@ services:
       - MONGODB_HOST=mongodb
       - MONGODB_PORT=27017
     volumes:
-      - ./databases:/app/databases:ro
+      - ./test-fixtures:/app/test-fixtures:ro
       - ./reports:/app/reports
-    command: ["test-all", "-o", "/app/reports", "--pattern", "databases/**/config.js"]
+    command: ["test-all", "-o", "/app/reports", "--pattern", "test-fixtures/**/config.js"]
     networks:
       - migrate-network
 
@@ -128,10 +128,10 @@ services:
   # 用法:
   #   docker compose run --rm migrate <command> -c <config>
   # 範例:
-  #   docker compose run --rm migrate dcl -c /app/databases/mariadb/my-project/dcl/config.js
-  #   docker compose run --rm migrate up -c /app/databases/mariadb/my-project/ddl/config.js
-  #   docker compose run --rm migrate validate -c /app/databases/mariadb/my-project/ddl/config.js
-  #   docker compose run --rm migrate validate-all /app/databases/mariadb/production-server
+  #   docker compose run --rm migrate dcl -c /app/test-fixtures/mariadb/my-project/dcl/config.js
+  #   docker compose run --rm migrate up -c /app/test-fixtures/mariadb/my-project/ddl/config.js
+  #   docker compose run --rm migrate validate -c /app/test-fixtures/mariadb/my-project/ddl/config.js
+  #   docker compose run --rm migrate validate-all /app/test-fixtures/mariadb/production-server
   # ──────────────────────────────────────────────────────────
   migrate:
     build:
@@ -140,7 +140,7 @@ services:
     container_name: migrate-cli
     working_dir: /app
     volumes:
-      - ./databases:/app/databases
+      - ./test-fixtures:/app/test-fixtures
       - ./reports:/app/reports
     environment:
       # MariaDB

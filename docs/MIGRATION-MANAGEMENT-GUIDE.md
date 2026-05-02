@@ -292,7 +292,7 @@ export class UpDownUpTester {
 
 ```bash
 # 執行 Up-Down-Up 測試
-npm run test:up-down-up -- -c databases/products/config.js
+npm run test:up-down-up -- -c test-fixtures/products/config.js
 
 # 在 Docker 中執行（推薦，避免污染本地資料庫）
 npm run docker:test -- --up-down-up
@@ -476,7 +476,7 @@ export const down = async (db) => {
 #### 驗證輸出
 
 ```bash
-$ npm run validate -c databases/orders/config.js
+$ npm run validate -c test-fixtures/orders/config.js
 
 [OK] 20250115-create-orders.js
    [WARN]  [ALLOWED] drop in down() because up() creates collection
@@ -566,10 +566,10 @@ SELECT 1; -- placeholder
 
 ```bash
 # 本地驗證（會顯示警告但不阻止）
-npm run validate -c databases/products/config.js --allow-dangerous
+npm run validate -c test-fixtures/products/config.js --allow-dangerous
 
 # 執行遷移（需要特殊權限）
-npm run up -c databases/products/config.js --allow-dangerous
+npm run up -c test-fixtures/products/config.js --allow-dangerous
 ```
 
 #### 方式三：環境變數控制（CI/CD 專用）
@@ -610,7 +610,7 @@ jobs:
         env:
           ALLOW_DANGEROUS: 'true'
         run: |
-          npm run up -c databases/products/config.js --allow-dangerous
+          npm run up -c test-fixtures/products/config.js --allow-dangerous
 ```
 
 ### 4.3 審核清單模板
@@ -702,16 +702,16 @@ jobs:
 
 ```bash
 # 啟用 sanity check 執行遷移
-npm run up -c databases/products/config.js --sanity-check
+npm run up -c test-fixtures/products/config.js --sanity-check
 
 # 啟用 sanity check 但禁用自動回滾
-npm run up -c databases/products/config.js --sanity-check --no-auto-rollback
+npm run up -c test-fixtures/products/config.js --sanity-check --no-auto-rollback
 ```
 
 #### 方式二：Config 設定
 
 ```javascript
-// databases/products/config.js
+// test-fixtures/products/config.js
 export default {
   mongodb: {
     url: process.env.MONGO_URL,
@@ -1000,7 +1000,7 @@ const helpers = adapter.getSanityCheckHelpers();
 ### 5.6 CLI 輸出範例
 
 ```bash
-$ npm run up -c databases/users/config.js --sanity-check
+$ npm run up -c test-fixtures/users/config.js --sanity-check
 
 [UP] Running migrations (mongodb)...
    Sanity Check: ENABLED
@@ -1041,7 +1041,7 @@ $ npm run up -c databases/users/config.js --sanity-check
 ### 5.7 自動回滾輸出範例
 
 ```bash
-$ npm run up -c databases/users/config.js --sanity-check
+$ npm run up -c test-fixtures/users/config.js --sanity-check
 
 [UP] Running migrations (mongodb)...
    Sanity Check: ENABLED
@@ -1115,7 +1115,7 @@ $ npm run up -c databases/users/config.js --sanity-check
 ### 架構設計
 
 ```
-databases/
+test-fixtures/
 ├── _platform/                    # DCL - 平台團隊管理
 │   ├── config.js
 │   └── migrations/
@@ -1185,13 +1185,13 @@ DCL 遷移使用 **Repeatable 模式**，與 DDL 的 Versioned 模式不同：
 
 ```bash
 # 執行 DCL 遷移（只執行有變更的）
-node src/cli.js -c databases/mariadb/production-server/dcl/config.js dcl
+node src/cli.js -c test-fixtures/mariadb/production-server/dcl/config.js dcl
 
 # 查看 DCL 狀態
-node src/cli.js -c databases/mariadb/production-server/dcl/config.js dcl:status
+node src/cli.js -c test-fixtures/mariadb/production-server/dcl/config.js dcl:status
 
 # 驗證 DCL 冪等性（執行兩次，確認結果相同）
-node src/cli.js -c databases/mariadb/production-server/dcl/config.js dcl:verify
+node src/cli.js -c test-fixtures/mariadb/production-server/dcl/config.js dcl:verify
 ```
 
 ### 7.1 冪等性設計原則
@@ -1859,7 +1859,7 @@ export class DDLSanityChecker {
 
 ```bash
 # 1. 建立遷移檔案
-npm run create -c databases/products/config.js "create-orders-table"
+npm run create -c test-fixtures/products/config.js "create-orders-table"
 
 # 2. 編輯遷移檔案
 ```
@@ -1894,7 +1894,7 @@ DROP TABLE IF EXISTS "order";
 
 ```bash
 # 1. 建立遷移檔案
-npm run create -c databases/products/config.js "create-orders-collection"
+npm run create -c test-fixtures/products/config.js "create-orders-collection"
 
 # 2. 編輯遷移檔案
 ```
@@ -1968,7 +1968,7 @@ export const down = async (db, client) => {
 
 ```bash
 # 3. 驗證
-npm run validate -c databases/products/config.js
+npm run validate -c test-fixtures/products/config.js
 
 # 4. 本地測試
 npm run docker:test
@@ -1983,7 +1983,7 @@ git add . && git commit -m "feat: add orders table"
 
 ```bash
 # 1. 建立 DCL 遷移
-npm run create -c databases/_platform/config.js "create-products-app-user"
+npm run create -c test-fixtures/_platform/config.js "create-products-app-user"
 ```
 
 ```sql
@@ -2020,7 +2020,7 @@ DROP USER IF EXISTS products_app;
 
 ```bash
 # 1. 建立 DCL 遷移
-npm run create -c databases/_platform/config.js "create-products-app-user"
+npm run create -c test-fixtures/_platform/config.js "create-products-app-user"
 ```
 
 ```javascript
@@ -2082,7 +2082,7 @@ export const down = async (db, client) => {
 **MariaDB/MySQL/PostgreSQL 版本：**
 
 ```bash
-npm run create -c databases/users/config.js "add-phone-to-users"
+npm run create -c test-fixtures/users/config.js "add-phone-to-users"
 ```
 
 ```sql
@@ -2104,7 +2104,7 @@ ALTER TABLE "user" DROP COLUMN IF EXISTS phone;
 **MongoDB 版本：**
 
 ```bash
-npm run create -c databases/users/config.js "add-phone-to-users"
+npm run create -c test-fixtures/users/config.js "add-phone-to-users"
 ```
 
 ```javascript
@@ -2241,7 +2241,7 @@ export const down = async (db, client) => {
 
 ```bash
 # 需要刪除舊表（經審核批准）
-npm run create -c databases/products/config.js "drop-legacy-temp-table"
+npm run create -c test-fixtures/products/config.js "drop-legacy-temp-table"
 ```
 
 ```sql
@@ -2262,7 +2262,7 @@ SELECT 1; -- placeholder
 
 ```bash
 # 需要刪除舊 Collection（經審核批准）
-npm run create -c databases/products/config.js "drop-legacy-temp-collection"
+npm run create -c test-fixtures/products/config.js "drop-legacy-temp-collection"
 ```
 
 ```javascript
@@ -2299,7 +2299,7 @@ export const down = async (db, client) => {
 
 ```bash
 # 使用 --allow-dangerous 旗標（需審核權限）
-npm run validate -c databases/products/config.js --allow-dangerous
+npm run validate -c test-fixtures/products/config.js --allow-dangerous
 ```
 
 ### 情境 5：大表新增索引（零停機）
@@ -2423,10 +2423,10 @@ name: Migration Pipeline
 on:
   push:
     paths:
-      - 'databases/**'
+      - 'test-fixtures/**'
   pull_request:
     paths:
-      - 'databases/**'
+      - 'test-fixtures/**'
 
 jobs:
   validate:
@@ -2444,7 +2444,7 @@ jobs:
         
       - name: Validate DDL migrations
         run: |
-          for config in databases/*/config.js; do
+          for config in test-fixtures/*/config.js; do
             # Skip _platform (DCL)
             if [[ "$config" == *"_platform"* ]]; then
               continue
@@ -2455,9 +2455,9 @@ jobs:
           
       - name: Validate DCL migrations (idempotency check)
         run: |
-          if [ -d "databases/_platform" ]; then
-            echo "Validating DCL: databases/_platform/config.js..."
-            npm run validate:dcl -- -c databases/_platform/config.js
+          if [ -d "test-fixtures/_platform" ]; then
+            echo "Validating DCL: test-fixtures/_platform/config.js..."
+            npm run validate:dcl -- -c test-fixtures/_platform/config.js
           fi
 
   test:
