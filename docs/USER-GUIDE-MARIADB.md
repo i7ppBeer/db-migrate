@@ -460,10 +460,10 @@ ALTER TABLE users DROP COLUMN phone;
 
 ```bash
 # 啟用 Sanity Check 執行遷移
-docker compose run --rm migrate up --sanity-check -c /app/databases/mariadb/your-project/ddl/config.js
+docker compose run --rm migrate up --sanity-check -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
 # 停用自動回滾（Post-Check 失敗時不回滾）
-docker compose run --rm migrate up --sanity-check --no-auto-rollback -c /app/databases/mariadb/your-project/ddl/config.js
+docker compose run --rm migrate up --sanity-check --no-auto-rollback -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 ```
 
 ### 6.5 Sanity Check 情境範例
@@ -651,7 +651,7 @@ docker compose build migrate
 ```
 your-project/
 ├── docker-compose.yml
-└── databases/
+└── test-fixtures/
     └── mariadb/
         └── your-project/
             ├── ddl/
@@ -691,47 +691,47 @@ export default {
 # ═══════════════════════════════════════════════════════════
 
 # 查看狀態
-docker compose run --rm migrate status -c /app/databases/mariadb/your-project/ddl/config.js
+docker compose run --rm migrate status -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
 # 執行遷移
-docker compose run --rm migrate up -c /app/databases/mariadb/your-project/ddl/config.js
+docker compose run --rm migrate up -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
 # 執行遷移（啟用 Sanity Check）
-docker compose run --rm migrate up --sanity-check -c /app/databases/mariadb/your-project/ddl/config.js
+docker compose run --rm migrate up --sanity-check -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
 # Dry Run（預覽）
-docker compose run --rm migrate up --dry-run -c /app/databases/mariadb/your-project/ddl/config.js
+docker compose run --rm migrate up --dry-run -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
 # 回滾 1 個遷移
-docker compose run --rm migrate down -n 1 -c /app/databases/mariadb/your-project/ddl/config.js
+docker compose run --rm migrate down -n 1 -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
 # 驗證遷移檔案
-docker compose run --rm migrate validate -c /app/databases/mariadb/your-project/ddl/config.js
+docker compose run --rm migrate validate -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
 # 建立新的 DDL 遷移檔案
-docker compose run --rm migrate create "add-email-to-users" -c /app/databases/mariadb/your-project/ddl/config.js
+docker compose run --rm migrate create "add-email-to-users" -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
 # ═══════════════════════════════════════════════════════════
 # DCL (Repeatable) 操作
 # ═══════════════════════════════════════════════════════════
 
 # 查看 DCL 狀態
-docker compose run --rm migrate dcl:status -c /app/databases/mariadb/your-project/dcl/config.js
+docker compose run --rm migrate dcl:status -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 
 # 執行 DCL（無驗證）
-docker compose run --rm migrate dcl -c /app/databases/mariadb/your-project/dcl/config.js
+docker compose run --rm migrate dcl -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 
 # 執行 DCL（啟用驗證）
-docker compose run --rm migrate dcl --validate -c /app/databases/mariadb/your-project/dcl/config.js
+docker compose run --rm migrate dcl --validate -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 
 # 執行 DCL（允許危險操作）
-docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/databases/mariadb/your-project/dcl/config.js
+docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 
 # Dry Run（預覽）
-docker compose run --rm migrate dcl --dry-run -c /app/databases/mariadb/your-project/dcl/config.js
+docker compose run --rm migrate dcl --dry-run -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 
 # 建立新的 DCL 遷移檔案
-docker compose run --rm migrate create-dcl "create-app-user" -n 001 -c /app/databases/mariadb/your-project/dcl/config.js
+docker compose run --rm migrate create-dcl "create-app-user" -n 001 -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 ```
 
 ---

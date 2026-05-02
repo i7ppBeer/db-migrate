@@ -1820,7 +1820,7 @@ CREATE TABLE users (id INT PRIMARY KEY);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// databases/mariadb/fk-test fixture tests
+// test-fixtures/mariadb/fk-test fixture tests
 // 直接讀取 fixture SQL 檔案，驗證 validator 產生正確的 FK 錯誤
 // ─────────────────────────────────────────────────────────────────────────────
 import { readFileSync, readdirSync } from 'fs';
@@ -1828,7 +1828,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname_fk = dirname(fileURLToPath(import.meta.url));
-const fixtureBase = join(__dirname_fk, '../databases/mariadb/fk-test');
+const fixtureBase = join(__dirname_fk, '../test-fixtures/mariadb/fk-test');
 
 function loadMigrations(subDir) {
   const migrationsDir = join(fixtureBase, subDir, 'migrations');

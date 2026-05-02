@@ -27,14 +27,16 @@ jobs:
       run: npm ci
     
     - name: Run validation (products)
-      run: npm run validate -- -c databases/products/config.js
+      run: npm run validate -- -c test-fixtures/products/config.js
     
     - name: Run validation (users)
-      run: npm run validate -- -c databases/users/config.js
+      run: npm run validate -- -c test-fixtures/users/config.js
     
     - name: Check for forbidden operations
       run: |
-        if grep -r "dropDatabase\|createUser\|dropUser" databases/*/migrations/*.js 2>/dev/null | grep -v "dangerous_legacy"; then
+        if find test-fixtures -type f \( -path "*/ddl/migrations/*.js" -o -path "*/dcl/migrations/*.js" \) -print0 \
+          | xargs -0 -r grep -H -E "dropDatabase|createUser|dropUser" \
+          | grep -v "dangerous_legacy"; then
           echo "[ERROR] Forbidden operations detected in production migrations!"
           exit 1
         fi
@@ -78,16 +80,16 @@ jobs:
       env:
         MONGODB_URL: mongodb://admin:admin123@localhost:27017/products?authSource=admin
       run: |
-        npm run status -- -c databases/products/config.js
-        npm run up -- -c databases/products/config.js
-        npm run status -- -c databases/products/config.js
+        npm run status -- -c test-fixtures/products/config.js
+        npm run up -- -c test-fixtures/products/config.js
+        npm run status -- -c test-fixtures/products/config.js
     
     - name: Test rollback (products)
       env:
         MONGODB_URL: mongodb://admin:admin123@localhost:27017/products?authSource=admin
       run: |
-        npm run down -- -c databases/products/config.js
-        npm run up -- -c databases/products/config.js
+        npm run down -- -c test-fixtures/products/config.js
+        npm run up -- -c test-fixtures/products/config.js
     
     - name: Cleanup
       if: always()

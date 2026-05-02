@@ -74,7 +74,7 @@ fi
 if [ "$MONGO_UP" = true ]; then
     print_header "MongoDB Tests"
     
-    for test_dir in "$PROJECT_DIR/databases/mongodb"/*/; do
+    for test_dir in "$PROJECT_DIR/test-fixtures/mongodb"/*/; do
         test_name=$(basename "$test_dir")
         config_file="${test_dir}config.js"
         
@@ -109,7 +109,7 @@ fi
 if [ "$MARIADB_UP" = true ]; then
     print_header "MariaDB Tests"
     
-    for test_dir in "$PROJECT_DIR/databases/mariadb"/*/; do
+    for test_dir in "$PROJECT_DIR/test-fixtures/mariadb"/*/; do
         test_name=$(basename "$test_dir")
         config_file="${test_dir}config.js"
         

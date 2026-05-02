@@ -159,8 +159,8 @@ run_test_for_db() {
     local db_type=$1
     local project=$2
     local allow_dangerous=${3:-false}
-    local ddl_config="/app/databases/${db_type}/${project}/ddl/config.js"
-    local dcl_config="/app/databases/${db_type}/${project}/dcl/config.js"
+    local ddl_config="/app/test-fixtures/${db_type}/${project}/ddl/config.js"
+    local dcl_config="/app/test-fixtures/${db_type}/${project}/dcl/config.js"
     
     # Validate 選項
     local validate_opts=""

@@ -43,8 +43,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CLI="node $PROJECT_DIR/src/cli.js"
 
-MONGO_PRODUCTION="$PROJECT_DIR/databases/mongodb/production-server"
-MARIA_PRODUCTION="$PROJECT_DIR/databases/mariadb/production-server"
+MONGO_PRODUCTION="$PROJECT_DIR/test-fixtures/mongodb/production-server"
+MARIA_PRODUCTION="$PROJECT_DIR/test-fixtures/mariadb/production-server"
 
 # ─── 計數器 ───────────────────────────────────────────────
 PASSED=0

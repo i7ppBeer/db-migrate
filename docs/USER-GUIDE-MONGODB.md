@@ -1059,7 +1059,7 @@ docker compose build migrate
 ```
 your-project/
 ├── docker-compose.yml
-└── databases/
+└── test-fixtures/
     └── mongodb/
         └── your-project/
             ├── ddl/
@@ -1097,44 +1097,44 @@ export default {
 # ═══════════════════════════════════════════════════════════
 
 # 查看狀態
-docker compose run --rm migrate status -c /app/databases/mongodb/your-project/ddl/config.js
+docker compose run --rm migrate status -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
 # 執行遷移
-docker compose run --rm migrate up -c /app/databases/mongodb/your-project/ddl/config.js
+docker compose run --rm migrate up -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
 # Dry Run（預覽）
-docker compose run --rm migrate up --dry-run -c /app/databases/mongodb/your-project/ddl/config.js
+docker compose run --rm migrate up --dry-run -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
 # 回滾 1 個遷移
-docker compose run --rm migrate down -n 1 -c /app/databases/mongodb/your-project/ddl/config.js
+docker compose run --rm migrate down -n 1 -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
 # 驗證遷移檔案
-docker compose run --rm migrate validate -c /app/databases/mongodb/your-project/ddl/config.js
+docker compose run --rm migrate validate -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
 # 建立新的 DDL 遷移檔案
-docker compose run --rm migrate create "add-user-profile" -c /app/databases/mongodb/your-project/ddl/config.js
+docker compose run --rm migrate create "add-user-profile" -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
 # ═══════════════════════════════════════════════════════════
 # DCL (Repeatable) 操作
 # ═══════════════════════════════════════════════════════════
 
 # 查看 DCL 狀態
-docker compose run --rm migrate dcl:status -c /app/databases/mongodb/your-project/dcl/config.js
+docker compose run --rm migrate dcl:status -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 
 # 執行 DCL（無驗證）
-docker compose run --rm migrate dcl -c /app/databases/mongodb/your-project/dcl/config.js
+docker compose run --rm migrate dcl -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 
 # 執行 DCL（啟用驗證）
-docker compose run --rm migrate dcl --validate -c /app/databases/mongodb/your-project/dcl/config.js
+docker compose run --rm migrate dcl --validate -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 
 # 執行 DCL（允許危險操作）
-docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/databases/mongodb/your-project/dcl/config.js
+docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 
 # Dry Run（預覽）
-docker compose run --rm migrate dcl --dry-run -c /app/databases/mongodb/your-project/dcl/config.js
+docker compose run --rm migrate dcl --dry-run -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 
 # 建立新的 DCL 遷移檔案
-docker compose run --rm migrate create-dcl "create-app-user" -n 001 -c /app/databases/mongodb/your-project/dcl/config.js
+docker compose run --rm migrate create-dcl "create-app-user" -n 001 -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 ```
 
 ---

@@ -22,7 +22,7 @@
 #   ./scripts/build-migration-image.sh -t v1.0.0 -r myregistry.azurecr.io -p
 #
 #   # 指定遷移目錄
-#   ./scripts/build-migration-image.sh -t v1.0.0 -m ./databases/mongodb/test-success/migrations
+#   ./scripts/build-migration-image.sh -t v1.0.0 -m ./test-fixtures/mongodb/test-success/migrations
 #
 # ============================================================
 

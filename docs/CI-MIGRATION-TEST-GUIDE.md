@@ -478,7 +478,7 @@ docker compose up -d mariadb
 **解決方案：**
 ```bash
 # 單獨執行 validate 查看詳細錯誤
-docker compose run --rm migrate validate -c /app/databases/mariadb/test-success/ddl/config.js
+docker compose run --rm migrate validate -c /app/test-fixtures/mariadb/test-success/ddl/config.js
 
 # 常見原因：
 # 1. 檔名格式錯誤 (應為 YYYYMMDDHHMMSS-xxx.sql)
@@ -495,7 +495,7 @@ docker compose run --rm migrate validate -c /app/databases/mariadb/test-success/
 **解決方案：**
 ```bash
 # 檢查 down() 函數是否正確
-docker compose run --rm migrate status -c /app/databases/mariadb/test-success/ddl/config.js
+docker compose run --rm migrate status -c /app/test-fixtures/mariadb/test-success/ddl/config.js
 
 # 可能原因：
 # 1. down() 函數缺失或不完整
@@ -507,7 +507,7 @@ docker compose run --rm migrate status -c /app/databases/mariadb/test-success/dd
 
 ```bash
 # 查看詳細日誌
-docker compose run --rm migrate up -c /app/databases/mariadb/test-success/ddl/config.js 2>&1 | tee migration.log
+docker compose run --rm migrate up -c /app/test-fixtures/mariadb/test-success/ddl/config.js 2>&1 | tee migration.log
 
 # 進入容器除錯
 docker compose run --rm --entrypoint sh migrate

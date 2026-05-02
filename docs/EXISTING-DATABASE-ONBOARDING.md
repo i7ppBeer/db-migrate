@@ -32,15 +32,15 @@
 
 ```bash
 # MariaDB 專案結構
-mkdir -p databases/mariadb/my-project/{ddl,dcl}/migrations
+mkdir -p test-fixtures/mariadb/my-project/{ddl,dcl}/migrations
 
 # 或 MongoDB 專案結構
-mkdir -p databases/mongodb/my-project/{ddl,dcl}/migrations
+mkdir -p test-fixtures/mongodb/my-project/{ddl,dcl}/migrations
 ```
 
 ### 2.2 建立 DDL config.js
 
-**MariaDB (`databases/mariadb/my-project/ddl/config.js`):**
+**MariaDB (`test-fixtures/mariadb/my-project/ddl/config.js`):**
 
 ```javascript
 export default {
@@ -58,7 +58,7 @@ export default {
 };
 ```
 
-**MongoDB (`databases/mongodb/my-project/ddl/config.js`):**
+**MongoDB (`test-fixtures/mongodb/my-project/ddl/config.js`):**
 
 ```javascript
 export default {
@@ -75,7 +75,7 @@ export default {
 
 ### 2.3 建立 DCL config.js
 
-**MariaDB (`databases/mariadb/my-project/dcl/config.js`):**
+**MariaDB (`test-fixtures/mariadb/my-project/dcl/config.js`):**
 
 ```javascript
 export default {
@@ -173,7 +173,7 @@ docker compose exec mongodb mongosh my_database --eval '...' > schema-export.js
 
 ### 4.1 MariaDB Baseline
 
-**檔案：`databases/mariadb/my-project/ddl/migrations/20250101000000-baseline.sql`**
+**檔案：`test-fixtures/mariadb/my-project/ddl/migrations/20250101000000-baseline.sql`**
 
 ```sql
 -- +migrate Up
@@ -262,7 +262,7 @@ DROP TABLE IF EXISTS users;
 
 ### 4.2 MongoDB Baseline
 
-**檔案：`databases/mongodb/my-project/ddl/migrations/20250101000000-baseline.js`**
+**檔案：`test-fixtures/mongodb/my-project/ddl/migrations/20250101000000-baseline.js`**
 
 ```javascript
 /**
@@ -339,7 +339,7 @@ export async function down(db, client) {
 
 ### 5.1 MariaDB DCL
 
-**檔案：`databases/mariadb/my-project/dcl/migrations/R__001_app_users.sql`**
+**檔案：`test-fixtures/mariadb/my-project/dcl/migrations/R__001_app_users.sql`**
 
 ```sql
 -- ═══════════════════════════════════════════════════════════════
@@ -361,7 +361,7 @@ GRANT EXECUTE ON my_database.* TO 'app_user'@'%';
 FLUSH PRIVILEGES;
 ```
 
-**檔案：`databases/mariadb/my-project/dcl/migrations/R__002_readonly_users.sql`**
+**檔案：`test-fixtures/mariadb/my-project/dcl/migrations/R__002_readonly_users.sql`**
 
 ```sql
 -- ═══════════════════════════════════════════════════════════════
@@ -382,7 +382,7 @@ FLUSH PRIVILEGES;
 
 ### 5.2 MongoDB DCL
 
-**檔案：`databases/mongodb/my-project/dcl/migrations/R__001_app_users.js`**
+**檔案：`test-fixtures/mongodb/my-project/dcl/migrations/R__001_app_users.js`**
 
 ```javascript
 /**
@@ -436,23 +436,23 @@ export async function down(db, client) {
 
 ```bash
 # 查看有哪些 migration 檔案
-docker compose run --rm migrate baseline -c /app/databases/mariadb/my-project/ddl/config.js
+docker compose run --rm migrate baseline -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 # 標記所有 DDL 為已執行 (不實際執行 SQL)
-docker compose run --rm migrate baseline --all -c /app/databases/mariadb/my-project/ddl/config.js
+docker compose run --rm migrate baseline --all -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 # 只標記到某個版本
-docker compose run --rm migrate baseline --up-to 20250101000000-baseline -c /app/databases/mariadb/my-project/ddl/config.js
+docker compose run --rm migrate baseline --up-to 20250101000000-baseline -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 # 預覽 (不實際標記)
-docker compose run --rm migrate baseline --all --dry-run -c /app/databases/mariadb/my-project/ddl/config.js
+docker compose run --rm migrate baseline --all --dry-run -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
 ### 6.2 DCL 首次執行
 
 ```bash
 # DCL 需要實際執行 (建立使用者/權限)
-docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/databases/mariadb/my-project/dcl/config.js
+docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
 ### 6.3 完整導入腳本
@@ -472,8 +472,8 @@ echo "  Onboarding Existing Database: ${PROJECT}"
 echo "  Database Type: ${DB_TYPE}"
 echo "═══════════════════════════════════════════════════════════"
 
-DDL_CONFIG="/app/databases/${DB_TYPE}/${PROJECT}/ddl/config.js"
-DCL_CONFIG="/app/databases/${DB_TYPE}/${PROJECT}/dcl/config.js"
+DDL_CONFIG="/app/test-fixtures/${DB_TYPE}/${PROJECT}/ddl/config.js"
+DCL_CONFIG="/app/test-fixtures/${DB_TYPE}/${PROJECT}/dcl/config.js"
 
 # Step 1: 確認資料庫連線
 echo ""
@@ -520,7 +520,7 @@ echo "  docker compose run --rm migrate up -c $DDL_CONFIG"
 ### 7.1 檢查 DDL 狀態
 
 ```bash
-docker compose run --rm migrate status -c /app/databases/mariadb/my-project/ddl/config.js
+docker compose run --rm migrate status -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
 **預期輸出：**
@@ -538,7 +538,7 @@ docker compose run --rm migrate status -c /app/databases/mariadb/my-project/ddl/
 ### 7.2 檢查 DCL 狀態
 
 ```bash
-docker compose run --rm migrate dcl:status -c /app/databases/mariadb/my-project/dcl/config.js
+docker compose run --rm migrate dcl:status -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
 ### 7.3 驗證資料庫帳號
@@ -561,7 +561,7 @@ docker compose exec mongodb mongosh admin --eval "db.getUsers()"
 
 ```bash
 # 建立新的 migration 檔案
-docker compose run --rm migrate create 'add-user-profile-table' -c /app/databases/mariadb/my-project/ddl/config.js
+docker compose run --rm migrate create 'add-user-profile-table' -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 # 編輯檔案: 20250126100000-add-user-profile-table.sql
 ```
@@ -570,20 +570,20 @@ docker compose run --rm migrate create 'add-user-profile-table' -c /app/database
 
 ```bash
 # 預覽
-docker compose run --rm migrate up --dry-run -c /app/databases/mariadb/my-project/ddl/config.js
+docker compose run --rm migrate up --dry-run -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 # 執行
-docker compose run --rm migrate up -c /app/databases/mariadb/my-project/ddl/config.js
+docker compose run --rm migrate up -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
 ### 8.3 新增 DCL
 
 ```bash
 # 建立新的 DCL 檔案
-docker compose run --rm migrate create-dcl 'new-service-account' -n 003 -c /app/databases/mariadb/my-project/dcl/config.js
+docker compose run --rm migrate create-dcl 'new-service-account' -n 003 -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 
 # 執行
-docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/databases/mariadb/my-project/dcl/config.js
+docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
 ---
@@ -630,7 +630,7 @@ MARIADB_HOST=prod-db.example.com ./scripts/onboard-existing-db.sh
 
 ```bash
 # 建立補充 migration
-docker compose run --rm migrate create 'add-missing-audit-table' -c /app/databases/mariadb/my-project/ddl/config.js
+docker compose run --rm migrate create 'add-missing-audit-table' -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
 ### Q7: 如何回滾到 Baseline 之前？
@@ -650,28 +650,28 @@ docker compose run --rm migrate create 'add-missing-audit-table' -c /app/databas
 # ═══════════════════════════════════════════════════════════════
 
 # 1. 建立目錄
-mkdir -p databases/mariadb/my-project/{ddl,dcl}/migrations
+mkdir -p test-fixtures/mariadb/my-project/{ddl,dcl}/migrations
 
 # 2. 建立 config.js (複製模板並修改)
-cp databases/mariadb/_templates/ddl/config.js databases/mariadb/my-project/ddl/
-cp databases/mariadb/_templates/dcl/config.js databases/mariadb/my-project/dcl/
+cp test-fixtures/mariadb/_templates/ddl/config.js test-fixtures/mariadb/my-project/ddl/
+cp test-fixtures/mariadb/_templates/dcl/config.js test-fixtures/mariadb/my-project/dcl/
 
 # 3. 匯出現有 Schema 並建立 baseline 檔案
 # ... (手動編輯)
 
 # 4. 標記 Baseline
 docker compose run --rm migrate baseline --all \
-  -c /app/databases/mariadb/my-project/ddl/config.js
+  -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 # 5. 執行 DCL
 docker compose run --rm migrate dcl --validate --allow-dangerous \
-  -c /app/databases/mariadb/my-project/dcl/config.js
+  -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 
 # 6. 驗證
 docker compose run --rm migrate status \
-  -c /app/databases/mariadb/my-project/ddl/config.js
+  -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 # 後續: 建立新 migration
 docker compose run --rm migrate create 'add-xxx' \
-  -c /app/databases/mariadb/my-project/ddl/config.js
+  -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
