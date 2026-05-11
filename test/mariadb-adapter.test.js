@@ -662,6 +662,62 @@ REVOKE SELECT ON mydb.* FROM 'app'@'%';
         const result = adapter.validateContent(sql, 'V001__create.sql');
         expect(result.warnings.some(w => w.type === 'missing-down')).toBe(true);
       });
+
+      it('should NOT report SQL_SYNTAX_ERROR for column named "status"', () => {
+        const sql = `
+-- +migrate Up
+CREATE TABLE orders (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  status INT(1) NOT NULL
+);
+-- +migrate Down
+DROP TABLE IF EXISTS orders;
+`;
+        const result = adapter.validateContent(sql, 'V001__create_orders.sql');
+        expect(result.errors.filter(e => e.code === 'SQL_SYNTAX_ERROR')).toHaveLength(0);
+      });
+
+      it('should NOT report SQL_SYNTAX_ERROR for column named "type"', () => {
+        const sql = `
+-- +migrate Up
+CREATE TABLE items (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  type VARCHAR(50) NOT NULL
+);
+-- +migrate Down
+DROP TABLE IF EXISTS items;
+`;
+        const result = adapter.validateContent(sql, 'V001__create_items.sql');
+        expect(result.errors.filter(e => e.code === 'SQL_SYNTAX_ERROR')).toHaveLength(0);
+      });
+
+      it('should NOT report SQL_SYNTAX_ERROR for column named "end"', () => {
+        const sql = `
+-- +migrate Up
+CREATE TABLE events (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  end DATETIME NOT NULL
+);
+-- +migrate Down
+DROP TABLE IF EXISTS events;
+`;
+        const result = adapter.validateContent(sql, 'V001__create_events.sql');
+        expect(result.errors.filter(e => e.code === 'SQL_SYNTAX_ERROR')).toHaveLength(0);
+      });
+
+      it('should report SQL_SYNTAX_ERROR with parser message for genuinely invalid SQL', () => {
+        const sql = `
+-- +migrate Up
+CRAETE TABLE broken (id INT);
+-- +migrate Down
+DROP TABLE IF EXISTS broken;
+`;
+        const result = adapter.validateContent(sql, 'V001__broken.sql');
+        const syntaxErrors = result.errors.filter(e => e.code === 'SQL_SYNTAX_ERROR');
+        expect(syntaxErrors.length).toBeGreaterThan(0);
+        expect(syntaxErrors[0].message).toMatch(/SQL syntax error/i);
+        expect(syntaxErrors[0].message.length).toBeGreaterThan(20);
+      });
     });
 
     describe('DCL mode (repeatable)', () => {

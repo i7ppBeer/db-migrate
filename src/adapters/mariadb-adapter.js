@@ -1127,6 +1127,18 @@ export class MariaDBAdapter extends BaseAdapter {
       .trim();
 
     // Helper: parse SQL with node-sql-parser; push error if syntax invalid
+    // Pre-process SQL to backtick-quote identifiers that appear immediately before
+    // a column type keyword. node-sql-parser incorrectly treats several valid MariaDB
+    // column names (e.g. status, type, end, session, global) as reserved keywords,
+    // causing false-positive syntax errors. Wrapping them in backticks makes the
+    // parser treat them as identifiers without changing runtime semantics.
+    const SQL_TYPES = 'INT|TINYINT|SMALLINT|MEDIUMINT|BIGINT|FLOAT|DOUBLE|DECIMAL|NUMERIC|REAL|BIT|BOOLEAN|BOOL|SERIAL|CHAR|VARCHAR|NCHAR|NVARCHAR|BINARY|VARBINARY|TINYBLOB|BLOB|MEDIUMBLOB|LONGBLOB|TINYTEXT|TEXT|MEDIUMTEXT|LONGTEXT|DATE|TIME|DATETIME|TIMESTAMP|YEAR|JSON|POINT|GEOMETRY';
+    const quoteReservedIdentifiers = (sql) =>
+      sql.replace(
+        new RegExp(`(?<!['\`\\w])\\b([a-z_][a-z0-9_]*)\\b(?=\\s+(?:${SQL_TYPES})(?:[\\s,(]|$))`, 'gi'),
+        (match, ident) => `\`${ident}\``
+      );
+
     const checkSQL = (sql, label, code) => {
       const clean = cleanUnicode(sql);
       if (!clean) return;
@@ -1138,9 +1150,10 @@ export class MariaDBAdapter extends BaseAdapter {
         });
         return;
       }
+      const normalized = quoteReservedIdentifiers(clean);
       try {
         const parser = new SQLParser();
-        parser.astify(clean, { database: 'MariaDB' });
+        parser.astify(normalized, { database: 'MariaDB' });
       } catch (e) {
         errors.push({
           type: 'syntax-error',

@@ -710,6 +710,10 @@ program
             console.log(chalk.blue(`\n[VALIDATE] Checking migrations (${adapter.dbType})...\n`));
             
             const result = await adapter.validate(validateOptions);
+
+            if (result.error) {
+              console.log(chalk.red(`[ERROR] ${result.error}`));
+            }
             
             for (const fileResult of result.results) {
               if (fileResult.valid) {
@@ -733,11 +737,21 @@ program
                   console.log(chalk.magenta(`   ⛔ [${op.code}] ${op.message}`));
                 }
               }
+
+              // Show structural errors (syntax errors, orphan drops, FK errors, etc.)
+              const shownOps = new Set([
+                ...(fileResult.forbiddenOps || []),
+                ...(fileResult.dangerousOps || [])
+              ]);
+              const structuralErrors = (fileResult.errors || []).filter(e => !shownOps.has(e));
+              for (const err of structuralErrors) {
+                console.log(chalk.red(`   🔴 [${err.code || 'ERROR'}] ${err.message}`));
+              }
               
               // Show summary for this file
-              if (fileResult.summary && (fileResult.summary.forbidden > 0 || fileResult.summary.dangerous > 0)) {
+              if (fileResult.summary && (fileResult.summary.forbidden > 0 || fileResult.summary.dangerous > 0 || fileResult.summary.structural > 0)) {
                 const s = fileResult.summary;
-                console.log(chalk.gray(`   📊 forbidden:${s.forbidden} dangerous:${s.dangerous} warnings:${s.warnings}`));
+                console.log(chalk.gray(`   📊 structural:${s.structural} forbidden:${s.forbidden} dangerous:${s.dangerous} warnings:${s.warnings}`));
               }
             }
             
