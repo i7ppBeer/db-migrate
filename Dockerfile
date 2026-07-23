@@ -6,8 +6,8 @@
 FROM node:20-alpine
 
 RUN apk add --no-cache bash curl mongodb-tools python3 py3-yaml \
- && apk upgrade --no-cache curl \
- && npm install -g npm@latest \
+ && apk upgrade --no-cache curl libssl3 \
+ && npm install -g npm@10 \
  && KUBECTL_VERSION=$(curl -sL https://dl.k8s.io/release/stable.txt) \
  && curl -sLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
  && chmod +x /usr/local/bin/kubectl
