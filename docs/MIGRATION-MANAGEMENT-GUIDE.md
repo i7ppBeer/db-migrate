@@ -782,10 +782,11 @@ export default {
 
 /**
  * Pre-Check: 驗證前置條件
- * @param {Object} context - { db, client, config }
+ * @param {Object} db - MongoDB database instance
+ * @param {Object} client - MongoDB client instance
  * @returns {Promise<{success: boolean, error?: string, details?: string[]}>}
  */
-export const preCheck = async ({ db }) => {
+export const preCheck = async (db, client) => {
   // 檢查 users collection 是否存在
   const collections = await db.listCollections({ name: 'users' }).toArray();
   if (collections.length === 0) {
@@ -834,10 +835,11 @@ export const up = async (db, client) => {
 
 /**
  * Post-Check (Sanity Check): 驗證遷移結果
- * @param {Object} context - { db, client, config }
+ * @param {Object} db - MongoDB database instance
+ * @param {Object} client - MongoDB client instance
  * @returns {Promise<{success: boolean, error?: string, details?: string[]}>}
  */
-export const postCheck = async ({ db }) => {
+export const postCheck = async (db, client) => {
   // 1. 確認所有文件都有 phone 欄位
   const missingPhone = await db.collection('users').countDocuments({ 
     phone: { $exists: false } 
@@ -2111,7 +2113,7 @@ npm run create -c test-fixtures/users/config.js "add-phone-to-users"
 // 20250120000001-add-phone-to-users.js
 
 // Pre-Check: 驗證前置條件
-export const preCheck = async ({ db }) => {
+export const preCheck = async (db, client) => {
   const collections = await db.listCollections({ name: 'users' }).toArray();
   if (collections.length === 0) {
     return { success: false, error: 'Collection "users" does not exist' };
@@ -2192,7 +2194,7 @@ export const up = async (db, client) => {
 };
 
 // Post-Check: 驗證遷移結果
-export const postCheck = async ({ db }) => {
+export const postCheck = async (db, client) => {
   // 檢查是否還有文件缺少 phone 欄位
   const missing = await db.collection('users').countDocuments({
     phone: { $exists: false }
@@ -2333,7 +2335,7 @@ DROP INDEX CONCURRENTLY IF EXISTS idx_orders_created_at;
  * MongoDB 預設使用背景建立索引，不會阻塞讀寫操作
  */
 
-export const preCheck = async ({ db }) => {
+export const preCheck = async (db, client) => {
   // 檢查 Collection 是否存在
   const collections = await db.listCollections({ name: 'orders' }).toArray();
   if (collections.length === 0) {
@@ -2378,7 +2380,7 @@ export const up = async (db, client) => {
   console.log(`Index created in ${duration} seconds`);
 };
 
-export const postCheck = async ({ db }) => {
+export const postCheck = async (db, client) => {
   // 驗證索引建立成功
   const indexes = await db.collection('orders').indexes();
   const newIndex = indexes.find(idx => idx.name === 'idx_orders_createdAt');

@@ -93,7 +93,7 @@ export class SanityChecker {
       // If sanity check is disabled, just run the migration
       this.log('⚠️  Sanity check disabled, running migration directly...');
       try {
-        await up(context);
+        await up(context.db, context.client);
         return { success: true, skipped: true, message: 'Sanity check disabled' };
       } catch (error) {
         return { success: false, error: error.message };
@@ -113,7 +113,7 @@ export class SanityChecker {
         this.log('═'.repeat(60));
         
         const preCheckResult = await this.runWithTimeout(
-          () => preCheck(context),
+          () => preCheck(context.db, context.client),
           localTimeout,
           'Pre-check timed out'
         ).catch(err => ({ success: false, error: err.message }));
@@ -149,8 +149,8 @@ export class SanityChecker {
       this.log('\n' + '═'.repeat(60));
       this.log('[PHASE 2] Execute Migration');
       this.log('═'.repeat(60));
-      
-      await up(context);
+
+      await up(context.db, context.client);
       migrationExecuted = true;
       this.results.migration = { success: true };
       
@@ -166,7 +166,7 @@ export class SanityChecker {
         this.log('═'.repeat(60));
         
         postCheckResult = await this.runWithTimeout(
-          () => postCheck(context),
+          () => postCheck(context.db, context.client),
           localTimeout,
           'Sanity check timed out'
         ).catch(err => ({ success: false, error: err.message }));
@@ -185,7 +185,7 @@ export class SanityChecker {
             this.log('!'.repeat(60));
             
             try {
-              await down(context);
+              await down(context.db, context.client);
               this.results.rollback = { success: true };
               this.log('✅ Rollback Completed');
               
@@ -353,8 +353,8 @@ export const MongoDBChecks = {
    * Create a pre-check for collection existence
    */
   createCollectionExistsCheck(collectionName, shouldExist = true) {
-    return async (context) => {
-      const exists = await this.collectionExists(context.db, collectionName);
+    return async (db, client) => {
+      const exists = await this.collectionExists(db, collectionName);
       if (shouldExist && !exists) {
         return { success: false, error: `Collection '${collectionName}' does not exist` };
       }
@@ -369,8 +369,8 @@ export const MongoDBChecks = {
    * Create a post-check for field existence on all documents
    */
   createFieldExistsCheck(collectionName, fieldName) {
-    return async (context) => {
-      const result = await this.allDocumentsHaveField(context.db, collectionName, fieldName);
+    return async (db, client) => {
+      const result = await this.allDocumentsHaveField(db, collectionName, fieldName);
       if (!result.success) {
         return { 
           success: false, 

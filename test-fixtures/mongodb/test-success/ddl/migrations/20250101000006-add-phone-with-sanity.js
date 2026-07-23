@@ -12,10 +12,11 @@ import { MongoDBChecks } from '../../../../../src/core/sanity-checker.js';
 
 /**
  * Pre-Check: Validate preconditions before migration
- * @param {Object} context - { db, client, helpers }
+ * @param {Object} db - MongoDB database instance
+ * @param {Object} client - MongoDB client instance
  * @returns {Promise<{success: boolean, error?: string, details?: string[]}>}
  */
-export async function preCheck({ db }) {
+export async function preCheck(db, client) {
   const details = [];
   
   // Check if users collection exists
@@ -71,10 +72,11 @@ export async function up(db, client) {
 
 /**
  * Post-Check (Sanity Check): Validate migration results
- * @param {Object} context - { db, client, helpers }
+ * @param {Object} db - MongoDB database instance
+ * @param {Object} client - MongoDB client instance
  * @returns {Promise<{success: boolean, error?: string, details?: string[]}>}
  */
-export async function postCheck({ db }) {
+export async function postCheck(db, client) {
   const details = [];
   
   // Verify all users have phone field
