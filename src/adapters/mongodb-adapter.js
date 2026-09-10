@@ -284,6 +284,30 @@ export class MongoDBAdapter extends BaseAdapter {
     return result;
   }
 
+  /**
+   * Delete all documents from a changelog/checksum collection. Does NOT run down()
+   * and does NOT touch any actual collections/documents — this only clears the
+   * tool's own tracking records, so the next `status`/`up`/`dcl` treats every
+   * migration as pending again.
+   *
+   * Used for both DDL (changelog collection, `collectionName` omitted → uses
+   * `this.changelogCollection`) and DCL (checksum collection, caller passes the
+   * already-validated `collectionName`).
+   *
+   * @param {Object} [options]
+   * @param {boolean} [options.dryRun=false] - Count only, don't delete
+   * @param {string}  [options.collectionName] - Override collection (used for DCL checksum collections)
+   * @returns {Promise<number>} Number of documents that existed before deletion
+   */
+  async resetChangelog({ dryRun = false, collectionName } = {}) {
+    const coll = collectionName || this.changelogCollection;
+    const count = await this.db.collection(coll).countDocuments({});
+    if (!dryRun && count > 0) {
+      await this.db.collection(coll).deleteMany({});
+    }
+    return count;
+  }
+
   async up(options = {}) {
     const result = {
       applied: [],

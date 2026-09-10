@@ -387,6 +387,45 @@ export class MariaDBAdapter extends BaseAdapter {
     return result;
   }
 
+  /**
+   * Delete all rows from a changelog/checksum table. Does NOT run down() and does
+   * NOT touch any actual schema or data — this only clears the tool's own tracking
+   * records, so the next `status`/`up`/`dcl` treats every migration as pending again.
+   *
+   * Used for both DDL (changelog table, `tableName` omitted → uses `this.changelogTable`)
+   * and DCL (checksum table, caller passes the already-validated `tableName`).
+   *
+   * @param {Object} [options]
+   * @param {boolean} [options.dryRun=false] - Count only, don't delete
+   * @param {string}  [options.tableName] - Override table (used for DCL checksum tables)
+   * @returns {Promise<number>} Number of rows that existed before deletion
+   */
+  async resetChangelog({ dryRun = false, tableName } = {}) {
+    const table = tableName || this.changelogTable;
+    // Same identifier rule as RepeatableRunner's checksumTable validation — this is
+    // interpolated directly into SQL below, so it must be a safe bare identifier.
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/.test(table)) {
+      throw new Error(`Invalid table name: ${table}. Must be a valid identifier (letters, digits, underscores).`);
+    }
+
+    const dbConfig = this.config.mariadb || this.config;
+    const dbName = dbConfig.database;
+    const qualifiedTable = dbName ? `\`${dbName}\`.${table}` : table;
+
+    try {
+      const [[{ cnt }]] = await this.connection.query(`SELECT COUNT(*) AS cnt FROM ${qualifiedTable}`);
+      const count = Number(cnt);
+      if (!dryRun && count > 0) {
+        await this.connection.query(`DELETE FROM ${qualifiedTable}`);
+      }
+      return count;
+    } catch (error) {
+      // Table doesn't exist yet — nothing to reset
+      if (error.code === 'ER_NO_SUCH_TABLE') return 0;
+      throw error;
+    }
+  }
+
   async up(options = {}) {
     const result = {
       applied: [],

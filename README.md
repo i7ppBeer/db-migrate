@@ -90,6 +90,7 @@ node src/cli.js test -c test-fixtures/mariadb/test-success/ddl/config.js
 | `dcl:status` | Show DCL migration status |
 | `create-dcl <name>` | Create a new DCL migration file |
 | `baseline` | Baseline existing migrations |
+| `reset --yes` | Delete all changelog/checksum records (dry-run without `--yes`) — does **not** run `down()` or touch schema/data |
 
 ### Command Format
 

@@ -2016,3 +2016,82 @@ describe('fk-test fixtures — ddl-bad/ (invalid scenarios, each must produce ex
     )).toBe(true);
   });
 });
+
+describe('MariaDBAdapter — resetChangelog', () => {
+  let adapter;
+  beforeEach(() => {
+    adapter = new MariaDBAdapter({
+      migrationsDir: '/test/migrations',
+      mariadb: { host: 'localhost', port: 3306, user: 'root', password: 'password', database: 'test' }
+    });
+  });
+
+  function mockConnection(count) {
+    return {
+      query: vi.fn().mockImplementation((sql) => {
+        if (/^SELECT COUNT/i.test(sql)) return Promise.resolve([[{ cnt: count }]]);
+        if (/^DELETE FROM/i.test(sql)) return Promise.resolve([{ affectedRows: count }]);
+        throw new Error(`Unexpected query in mock: ${sql}`);
+      })
+    };
+  }
+
+  it('dry run counts rows but issues no DELETE', async () => {
+    const conn = mockConnection(3);
+    adapter.connection = conn;
+    const count = await adapter.resetChangelog({ dryRun: true });
+    expect(count).toBe(3);
+    expect(conn.query).toHaveBeenCalledTimes(1); // only the COUNT, no DELETE
+    expect(conn.query.mock.calls[0][0]).toMatch(/^SELECT COUNT/i);
+  });
+
+  it('actual run deletes and returns the pre-deletion count', async () => {
+    const conn = mockConnection(5);
+    adapter.connection = conn;
+    const count = await adapter.resetChangelog({ dryRun: false });
+    expect(count).toBe(5);
+    expect(conn.query).toHaveBeenCalledTimes(2);
+    expect(conn.query.mock.calls[1][0]).toMatch(/^DELETE FROM/i);
+  });
+
+  it('skips the DELETE entirely when there is nothing to delete', async () => {
+    const conn = mockConnection(0);
+    adapter.connection = conn;
+    const count = await adapter.resetChangelog({ dryRun: false });
+    expect(count).toBe(0);
+    expect(conn.query).toHaveBeenCalledTimes(1); // COUNT only
+  });
+
+  it('defaults to this.changelogTable when no tableName is given', async () => {
+    const conn = mockConnection(1);
+    adapter.connection = conn;
+    adapter.changelogTable = 'custom_changelog';
+    await adapter.resetChangelog({ dryRun: true });
+    expect(conn.query.mock.calls[0][0]).toContain('custom_changelog');
+  });
+
+  it('uses the passed tableName for DCL checksum tables instead of the changelog table', async () => {
+    const conn = mockConnection(2);
+    adapter.connection = conn;
+    expect(adapter.changelogTable).toBe('schema_migrations');
+    await adapter.resetChangelog({ dryRun: true, tableName: 'repeatable_migrations' });
+    expect(conn.query.mock.calls[0][0]).toContain('repeatable_migrations');
+    expect(conn.query.mock.calls[0][0]).not.toContain('schema_migrations');
+  });
+
+  it('rejects an unsafe table name instead of interpolating it into SQL', async () => {
+    adapter.connection = mockConnection(0);
+    await expect(
+      adapter.resetChangelog({ tableName: 'x; DROP TABLE users; --' })
+    ).rejects.toThrow(/Invalid table name/);
+  });
+
+  it('treats a missing table as zero records instead of throwing', async () => {
+    const conn = {
+      query: vi.fn().mockRejectedValue(Object.assign(new Error('no such table'), { code: 'ER_NO_SUCH_TABLE' }))
+    };
+    adapter.connection = conn;
+    const count = await adapter.resetChangelog({ dryRun: true });
+    expect(count).toBe(0);
+  });
+});

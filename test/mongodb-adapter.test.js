@@ -787,4 +787,57 @@ export const down = async (db) => {};
       await fs.rm(tmpDir, { recursive: true, force: true });
     });
   });
+
+  describe('resetChangelog', () => {
+    function mockDb(count) {
+      const deleteMany = vi.fn().mockResolvedValue({ deletedCount: count });
+      const countDocuments = vi.fn().mockResolvedValue(count);
+      return {
+        db: { collection: vi.fn().mockReturnValue({ countDocuments, deleteMany }) },
+        countDocuments,
+        deleteMany
+      };
+    }
+
+    it('dry run counts documents but issues no deleteMany', async () => {
+      const m = mockDb(4);
+      adapter.db = m.db;
+      const count = await adapter.resetChangelog({ dryRun: true });
+      expect(count).toBe(4);
+      expect(m.countDocuments).toHaveBeenCalledTimes(1);
+      expect(m.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('actual run deletes and returns the pre-deletion count', async () => {
+      const m = mockDb(6);
+      adapter.db = m.db;
+      const count = await adapter.resetChangelog({ dryRun: false });
+      expect(count).toBe(6);
+      expect(m.deleteMany).toHaveBeenCalledTimes(1);
+      expect(m.deleteMany).toHaveBeenCalledWith({});
+    });
+
+    it('skips deleteMany entirely when there is nothing to delete', async () => {
+      const m = mockDb(0);
+      adapter.db = m.db;
+      const count = await adapter.resetChangelog({ dryRun: false });
+      expect(count).toBe(0);
+      expect(m.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('defaults to this.changelogCollection when no collectionName is given', async () => {
+      const m = mockDb(1);
+      adapter.db = m.db;
+      adapter.changelogCollection = 'custom_changelog';
+      await adapter.resetChangelog({ dryRun: true });
+      expect(m.db.collection).toHaveBeenCalledWith('custom_changelog');
+    });
+
+    it('uses the passed collectionName for DCL checksum collections instead of the changelog collection', async () => {
+      const m = mockDb(2);
+      adapter.db = m.db;
+      await adapter.resetChangelog({ dryRun: true, collectionName: 'repeatable_migrations' });
+      expect(m.db.collection).toHaveBeenCalledWith('repeatable_migrations');
+    });
+  });
 });
