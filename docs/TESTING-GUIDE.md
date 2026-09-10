@@ -209,3 +209,60 @@ node src/cli.js test-all -o ./reports
 | `test-fixtures/mariadb/test-failure/` | MariaDB migrations that should fail validation |
 | `test-fixtures/mongodb/test-success/` | MongoDB migrations that should pass |
 | `test-fixtures/mongodb/test-failure/` | MongoDB migrations that should fail validation |
+
+---
+
+## Known test gaps (audited 2026-09-10)
+
+`npx vitest run` currently reports 504 `it()` blocks across 9 files — every single one
+runs against a **mocked** driver (`vi.mock('mysql2/promise', ...)` /
+`vi.mock('migrate-mongo', ...)`). There is exactly one file that talks to a real
+database — `test/integration.test.js`, added on `feat/mariadb-lock-guard` — and even
+that one has only been confirmed to *skip cleanly* when no database is reachable; its
+actual lock-contention assertions have not yet been observed passing against a live
+MariaDB (no Docker in the environment that wrote it — see that branch's PR notes).
+
+Concretely, **nothing in this repo has ever executed a real up → down → up cycle, a
+real sanity-check rollback, or a real DCL idempotency run against an actual database.**
+The mocks return canned values (`[[]]`, `undefined`, etc.), so a test can pass while
+asserting on a code path the mock made trivially succeed rather than on what MariaDB
+or MongoDB actually does.
+
+### Gap list, in priority order
+
+1. **Real `up → down → up` cycle** (`runUpDownUpTest()` in `base-adapter.js`) — never
+   run against a live DB. The `test` CLI command exercises this logic path but only
+   against `test-success` fixtures with mocked connections in CI.
+2. **Real sanity-check rollback** — `SanityChecker.runWithSanityCheck()`'s
+   `postCheck` failure → `down()` → verify state path has unit tests for the state
+   machine, but never against a database that could genuinely fail a post-check for a
+   real reason (e.g. a column that didn't get the expected type).
+3. **Real DCL idempotency** (`dcl:verify`) — `dcl-idempotent-checker.test.js` tests the
+   *comparison logic* against synthetic before/after state objects, never against a
+   database actually running the same DCL script three times.
+4. **Lock Guard e2e scenarios** (the 3 scenarios in `test/integration.test.js`) —
+   written, logic-reviewed, not yet observed passing.
+5. **Runtime Gate plan** (`docs/RUNTIME-GATE-PLAN.md`, R0–R4) — not implemented, so
+   nothing to test yet; listed here so it isn't forgotten once it is.
+6. **Two confirmed FK/orphan-drop logic bugs** (`docs/VALIDATION-RULES-MARIADB.md`,
+   "Confirmed logic bugs" section — traced by hand against the source, not inspection
+   guesses): (a) `FK_REFERENCES_DROPPED_TABLE` is order-blind within one file and
+   false-positives on a valid drop-then-recreate-then-reference sequence; (b)
+   `ORPHAN_DROP_UP` never looks at `Down`, so a `Up: DROP TABLE x` / `Down: CREATE
+   TABLE x` migration — a textbook-correct reverse migration — is unconditionally
+   blocked with no bypass. Both are pure static-analysis bugs, closeable with unit
+   tests alone, no database required. Highest-value items in this list precisely
+   because they block *valid* migrations rather than just missing invalid ones.
+7. **MongoDB `validateJSSyntax` multi-line `import` false-positive** — flagged in
+   `docs/VALIDATION-RULES-MONGODB.md` discussion item #3, from code inspection only.
+   Needs a `validateContent()` unit test with a multi-line import to confirm one way
+   or the other — this one doesn't need a real database, it's a pure regex/parsing
+   test and could be closed without any DB access.
+8. **Bracket-notation validation bypass** (`docs/VALIDATION-RULES-MONGODB.md`
+   discussion item #2) — worth a regression test asserting the *current* (bypassable)
+   behavior, so it's a documented, deliberate gap rather than a silent one, even if
+   nobody decides to close it right away. Also doesn't need a real database.
+
+Items 1–5 need a reachable MariaDB and/or MongoDB (`docker compose up -d mariadb
+mongodb`) that this environment doesn't have. Items 6–8 can be closed with unit tests
+alone, no database required — good candidates to pick up first.
