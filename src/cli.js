@@ -541,9 +541,9 @@ program
         }
         
         process.exitCode = 1;
+      } else {
+        console.log(chalk.green('\n✅ All migrations are valid!'));
       }
-      
-      console.log(chalk.green('\n✅ All migrations are valid!'));
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
       process.exitCode = 1;
