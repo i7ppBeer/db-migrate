@@ -16,7 +16,7 @@
     "test:migration": "node src/cli.js test",
     "test:all": "node src/cli.js test-all",
     "test": "vitest",
-    "test:integration": "vitest run test/integration.test.js",
+    "test:integration": "vitest run --config vitest.integration.config.js",
     "lint": "eslint .",
     "console": "node web-console/server.js",
     "docker:up": "docker compose up -d mongodb mariadb",

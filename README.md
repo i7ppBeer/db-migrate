@@ -17,6 +17,7 @@
 - **Validation Rules**: Auto-detect dangerous operations, empty down(), orphaned drops, DCL operations in DDL, SQL syntax check (MariaDB), and FK integrity checks (MariaDB DDL)
 - **DCL Auto-Generated Passwords**: Each `CHANGE_ME_ON_FIRST_LOGIN` placeholder is replaced at runtime with its own cryptographically secure 16-character password — original files are never modified; credentials are saved to `/tmp/secret`
 - **Sanity Check**: Built-in Pre-Check / Post-Check / Auto-Rollback mechanism
+- **Lock Guard (MariaDB)**: Bounded lock-wait timeout + retry on DDL execution, so an `ALTER TABLE` stuck behind a long transaction fails fast instead of queuing indefinitely and blocking every later query on that table — see [docs/LOCK-GUARD.md](docs/LOCK-GUARD.md)
 - **Report Generation**: JSON and HTML formats
 
 ---
@@ -130,6 +131,26 @@ export default {
 };
 ```
 
+Every MariaDB DDL project also gets a **Lock Guard** on by default (bounded lock-wait + retry around each migration's SQL, so a stuck `ALTER TABLE` fails fast instead of hanging and jamming other queries behind it). Override it per project if needed:
+
+```javascript
+export default {
+  type: 'mariadb',
+  database: process.env.MARIADB_DB || 'myapp',
+  ddlSafety: {
+    lockGuard: {
+      enabled: true,          // set false to restore the old unguarded behavior
+      lockWaitTimeoutSec: 5,  // SESSION lock_wait_timeout while running migration SQL
+      innodbLockWaitTimeoutSec: 5,
+      maxRetries: 3,          // give up after this many lock-wait-timeout failures
+      retryDelayMs: 2000
+    }
+  }
+};
+```
+
+See [docs/LOCK-GUARD.md](docs/LOCK-GUARD.md) for why this exists and what it does and doesn't protect against.
+
 ### MongoDB DCL Config
 
 ```javascript
@@ -237,6 +258,7 @@ See [docs/VALIDATION-RULES-REFERENCE.md](docs/VALIDATION-RULES-REFERENCE.md) for
 | [VALIDATION-RULES-REFERENCE.md](docs/VALIDATION-RULES-REFERENCE.md) | Full validation rules reference |
 | [CLI-USAGE-GUIDE.md](docs/CLI-USAGE-GUIDE.md) | Detailed CLI usage guide |
 | [EXISTING-DATABASE-ONBOARDING.md](docs/EXISTING-DATABASE-ONBOARDING.md) | Onboarding existing databases |
+| [LOCK-GUARD.md](docs/LOCK-GUARD.md) | MariaDB lock-wait guard: config, error behavior, and its limits |
 
 ---
 

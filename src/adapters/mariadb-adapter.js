@@ -212,6 +212,59 @@ export class MariaDBAdapter extends BaseAdapter {
     };
   }
 
+  /**
+   * Execute migration-authored SQL with a bounded lock-wait guard.
+   *
+   * Root cause this guards against: MariaDB's metadata lock (MDL) queue is FIFO.
+   * If a long-running transaction (e.g. a large batch DELETE) already holds a
+   * shared MDL on the target table, an ALTER TABLE requesting an exclusive MDL
+   * queues behind it — and because the queue is FIFO, any *new* query on that
+   * table (including a plain SELECT) that arrives after the ALTER is already
+   * queued gets stuck behind the ALTER too, even though a SELECT would
+   * otherwise be lock-compatible. Without a bound, that queue can jam
+   * indefinitely.
+   *
+   * This sets a short `lock_wait_timeout` / `innodb_lock_wait_timeout` on the
+   * session before executing, and retries a bounded number of times on
+   * MariaDB's lock-wait-timeout error before failing loudly — so a stuck ALTER
+   * fails fast instead of parking in the queue and dragging everything else
+   * down with it.
+   *
+   * @param {string} sql - SQL to execute via this.connection.query()
+   * @returns {Promise<*>} - Same return shape as this.connection.query()
+   */
+  async executeWithLockGuard(sql) {
+    const cfg = this.config.ddlSafety?.lockGuard ?? {};
+    const enabled = cfg.enabled ?? true;
+
+    if (!enabled) {
+      return this.connection.query(sql);
+    }
+
+    const lockWaitTimeoutSec = cfg.lockWaitTimeoutSec ?? 5;
+    const innodbLockWaitTimeoutSec = cfg.innodbLockWaitTimeoutSec ?? 5;
+    const maxRetries = cfg.maxRetries ?? 3;
+    const retryDelayMs = cfg.retryDelayMs ?? 2000;
+
+    await this.connection.execute('SET SESSION lock_wait_timeout = ?', [lockWaitTimeoutSec]);
+    await this.connection.execute('SET SESSION innodb_lock_wait_timeout = ?', [innodbLockWaitTimeoutSec]);
+
+    let attempt = 0;
+    for (;;) {
+      attempt++;
+      try {
+        return await this.connection.query(sql);
+      } catch (error) {
+        const isLockWaitTimeout = error && (error.errno === 1205 || error.code === 'ER_LOCK_WAIT_TIMEOUT');
+        if (!isLockWaitTimeout || attempt >= maxRetries) {
+          throw error;
+        }
+        console.warn(`⚠️  Lock wait timeout (attempt ${attempt}/${maxRetries}), retrying in ${retryDelayMs}ms...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+      }
+    }
+  }
+
   async connect() {
     try {
       // Support both flat config and nested config.mariadb
@@ -438,9 +491,9 @@ export class MariaDBAdapter extends BaseAdapter {
             // This means migration files don't need to include "USE <db>" themselves.
             const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
 
-            // Use query() for multi-statement support
-            await this.connection.query(wrappedUpSQL);
-            
+            // Use query() for multi-statement support, guarded against MDL queue jams
+            await this.executeWithLockGuard(wrappedUpSQL);
+
             // Record in changelog
             const id = file.replace('.sql', '');
             await this.connection.execute(
@@ -526,7 +579,7 @@ export class MariaDBAdapter extends BaseAdapter {
                 if (upSQL) {
                   const dbName = (this.config.mariadb || this.config).database;
                   const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
-                  await this.connection.query(wrappedUpSQL);
+                  await this.executeWithLockGuard(wrappedUpSQL);
                   const id = file.replace('.sql', '');
                   await this.connection.execute(
                     `INSERT INTO ${this.changelogTable} (id) VALUES (?)`,
@@ -538,7 +591,7 @@ export class MariaDBAdapter extends BaseAdapter {
                 if (downSQL) {
                   const dbName = (this.config.mariadb || this.config).database;
                   const wrappedDownSQL = dbName ? `USE \`${dbName}\`;\n${downSQL}` : downSQL;
-                  await this.connection.query(wrappedDownSQL);
+                  await this.executeWithLockGuard(wrappedDownSQL);
                   const id = file.replace('.sql', '');
                   await this.connection.execute(
                     `DELETE FROM ${this.changelogTable} WHERE id = ?`,
@@ -575,7 +628,7 @@ export class MariaDBAdapter extends BaseAdapter {
               const startTime = Date.now();
               const dbName = (this.config.mariadb || this.config).database;
               const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
-              await this.connection.query(wrappedUpSQL);
+              await this.executeWithLockGuard(wrappedUpSQL);
               const id = file.replace('.sql', '');
               await this.connection.execute(
                 `INSERT INTO ${this.changelogTable} (id) VALUES (?)`,
@@ -890,8 +943,8 @@ export class MariaDBAdapter extends BaseAdapter {
                 ? `USE \`${dbConfigDown.database}\`;\n${downSQL}`
                 : downSQL;
 
-              // Use query() for multi-statement support
-              await this.connection.query(wrappedDownSQL);
+              // Use query() for multi-statement support, guarded against MDL queue jams
+              await this.executeWithLockGuard(wrappedDownSQL);
             } catch (downError) {
               // DOWN SQL failed — restore the changelog entry so state stays consistent
               try {

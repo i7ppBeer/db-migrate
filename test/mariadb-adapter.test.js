@@ -2015,4 +2015,95 @@ describe('fk-test fixtures — ddl-bad/ (invalid scenarios, each must produce ex
       e.code === 'FK_UNRESOLVED_REFERENCE' && e.message.includes("'orders'")
     )).toBe(true);
   });
+
+  // ── executeWithLockGuard: Gate 2 (lock-wait fail-fast + bounded retry) ──
+  describe('executeWithLockGuard', () => {
+    let guardAdapter;
+    let mockConnection;
+
+    const lockWaitError = () => {
+      const err = new Error('Lock wait timeout exceeded; try restarting transaction');
+      err.errno = 1205;
+      err.code = 'ER_LOCK_WAIT_TIMEOUT';
+      return err;
+    };
+
+    beforeEach(() => {
+      mockConnection = {
+        execute: vi.fn().mockResolvedValue([[]]),
+        query: vi.fn()
+      };
+      guardAdapter = new MariaDBAdapter({
+        migrationsDir: '/test/migrations',
+        mariadb: { host: 'localhost', port: 3306, user: 'root', password: 'x', database: 'test' },
+        // Fast retry delay so the suite doesn't actually wait 2s per test
+        ddlSafety: { lockGuard: { lockWaitTimeoutSec: 5, innodbLockWaitTimeoutSec: 5, maxRetries: 3, retryDelayMs: 1 } }
+      });
+      guardAdapter.connection = mockConnection;
+    });
+
+    it('sets SESSION lock_wait_timeout and innodb_lock_wait_timeout before executing', async () => {
+      mockConnection.query.mockResolvedValueOnce([[]]);
+      await guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
+
+      expect(mockConnection.execute).toHaveBeenCalledWith('SET SESSION lock_wait_timeout = ?', [5]);
+      expect(mockConnection.execute).toHaveBeenCalledWith('SET SESSION innodb_lock_wait_timeout = ?', [5]);
+    });
+
+    it('retries on ER_LOCK_WAIT_TIMEOUT (errno 1205) and succeeds once the lock frees up', async () => {
+      mockConnection.query
+        .mockRejectedValueOnce(lockWaitError())
+        .mockResolvedValueOnce([[{ ok: 1 }]]);
+
+      const result = await guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
+
+      expect(mockConnection.query).toHaveBeenCalledTimes(2);
+      expect(result).toEqual([[{ ok: 1 }]]);
+    });
+
+    it('retries exactly maxRetries times then propagates the original error', async () => {
+      mockConnection.query.mockRejectedValue(lockWaitError());
+
+      await expect(
+        guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT')
+      ).rejects.toMatchObject({ errno: 1205 });
+
+      expect(mockConnection.query).toHaveBeenCalledTimes(3); // maxRetries = 3
+    });
+
+    it('does not retry a non-lock-wait error — fails on first attempt', async () => {
+      const syntaxError = new Error('You have an error in your SQL syntax');
+      syntaxError.errno = 1064;
+      mockConnection.query.mockRejectedValue(syntaxError);
+
+      await expect(
+        guardAdapter.executeWithLockGuard('ALTER TABLE orders BROKEN SQL')
+      ).rejects.toMatchObject({ errno: 1064 });
+
+      expect(mockConnection.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('ddlSafety.lockGuard.enabled: false bypasses SET SESSION and retry entirely', async () => {
+      guardAdapter.config.ddlSafety.lockGuard.enabled = false;
+      mockConnection.query.mockResolvedValueOnce([[]]);
+
+      await guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
+
+      expect(mockConnection.execute).not.toHaveBeenCalled();
+      expect(mockConnection.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to defaults when ddlSafety.lockGuard is not configured', async () => {
+      const bareAdapter = new MariaDBAdapter({
+        migrationsDir: '/test/migrations',
+        mariadb: { host: 'localhost', port: 3306, user: 'root', password: 'x', database: 'test' }
+      });
+      bareAdapter.connection = mockConnection;
+      mockConnection.query.mockResolvedValueOnce([[]]);
+
+      await bareAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
+
+      expect(mockConnection.execute).toHaveBeenCalledWith('SET SESSION lock_wait_timeout = ?', [5]);
+    });
+  });
 });
