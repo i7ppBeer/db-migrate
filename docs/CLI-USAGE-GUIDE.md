@@ -63,6 +63,20 @@ node src/cli.js -c <config-path> down
 node src/cli.js -c <config-path> down -n 3
 ```
 
+### 4. 重置遷移紀錄 (RESET)
+
+刪除 changelog（DDL）或 checksum（DCL）table/collection 裡**所有**紀錄，讓下一次 `status`/`up`/`dcl` 把所有遷移都當成 pending。**不會**執行 `down()`，也**不會**動到實際的表格/collection 或資料 —— 只清工具自己的追蹤紀錄。
+
+```bash
+# 預設是 dry-run：只印出會刪幾筆，不會真的刪
+node src/cli.js -c <config-path> reset
+
+# 加 --yes 才會真的執行刪除
+node src/cli.js -c <config-path> reset --yes
+```
+
+⚠️ 只清紀錄、不清實際資料，代表重置後再跑 `up` 極可能因為表格/collection 已存在而失敗（除非migration 本身有用 `IF NOT EXISTS`）。**通常只在會被整個重置的開發/測試用資料庫上使用**，正式環境幾乎不會需要。
+
 ---
 
 ## 🎯 指定特定遷移
@@ -279,3 +293,8 @@ docker compose -f docker-compose.local-test.yml logs -f
 3. **多實例注意**：
    - 所有實例共用相同的遷移檔案
    - 每個實例有獨立的 changelog 表
+
+4. **`reset` 只清紀錄、不清資料**：
+   - 只刪 changelog/checksum 裡的追蹤紀錄，不執行 `down()`、不動實際表格/collection
+   - 重置後跑 `up` 若表格/collection 已存在（沒有 `IF NOT EXISTS`）會直接失敗
+   - 預設 dry-run，需要 `--yes` 才會真的刪除

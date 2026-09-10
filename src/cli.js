@@ -385,6 +385,65 @@ program
     }
   });
 
+// ─────────────────────────────────────────────────────────────────
+// reset: Delete all changelog/checksum tracking records
+// ─────────────────────────────────────────────────────────────────
+
+program
+  .command('reset')
+  .description('Delete all changelog/checksum records — does NOT run down() and does NOT touch schema/data')
+  .option('--yes', 'Actually perform the deletion (omit for a dry-run count only)')
+  .action(async (cmdOptions, cmd) => {
+    const options = { ...cmd.parent.opts(), ...cmdOptions };
+    let adapter;
+
+    try {
+      adapter = await getAdapter(options);
+      await adapter.connect();
+
+      const config = await loadConfig(options.config);
+      const isRepeatable = config.mode === 'repeatable';
+
+      let tableLabel;
+      let resetArgs;
+      if (isRepeatable) {
+        // Reuse RepeatableRunner's constructor validation for the checksum table/collection name
+        const runner = new RepeatableRunner({
+          checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+        });
+        tableLabel = runner.checksumTable;
+        resetArgs = adapter.dbType === 'mongodb'
+          ? { collectionName: runner.checksumTable }
+          : { tableName: runner.checksumTable };
+      } else {
+        tableLabel = adapter.dbType === 'mongodb' ? adapter.changelogCollection : adapter.changelogTable;
+        resetArgs = {};
+      }
+
+      console.log(chalk.blue(`\n[RESET] ${adapter.dbType} / mode=${config.mode || 'versioned'} / table=${tableLabel}`));
+
+      const dryCount = await adapter.resetChangelog({ ...resetArgs, dryRun: true });
+
+      if (!options.yes) {
+        console.log(chalk.yellow(`\n⚠️  DRY RUN: would delete ${dryCount} record(s) from '${tableLabel}'.`));
+        console.log(chalk.gray(`   This only clears tracking records — it does NOT run down() and does NOT touch any actual tables/collections.`));
+        console.log(chalk.gray(`   After a reset, the next 'up'/'dcl' will try to re-apply everything from scratch —`));
+        console.log(chalk.gray(`   only do this if the underlying schema/data is also being reset (e.g. a throwaway dev/test database).`));
+        console.log(chalk.gray(`   Re-run with --yes to actually delete.`));
+        return;
+      }
+
+      const deletedCount = await adapter.resetChangelog({ ...resetArgs, dryRun: false });
+      console.log(chalk.red(`\n🗑️  Deleted ${deletedCount} record(s) from '${tableLabel}'.`));
+      console.log(chalk.gray(`   Next 'status'/'up'/'dcl' will treat all migrations as pending again.`));
+    } catch (error) {
+      console.error(chalk.red(`[ERROR] ${error.message}`));
+      process.exitCode = 1;
+    } finally {
+      if (adapter) await adapter.disconnect();
+    }
+  });
+
 program
   .command('create <name>')
   .description('Create a new DDL (versioned) migration file')
