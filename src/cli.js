@@ -17,10 +17,6 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const program = new Command();
 
@@ -32,6 +28,27 @@ program
   .option('-t, --type <type>', 'Database type (mongodb, mariadb)');
 
 /**
+ * Resolve a config's migrationsDir to an absolute path, relative to the
+ * directory the config file itself lives in. Returns the value unchanged if
+ * it's already absolute or not set.
+ */
+function resolveMigrationsDir(config, configPath) {
+  if (!config.migrationsDir || path.isAbsolute(config.migrationsDir)) {
+    return config.migrationsDir;
+  }
+  const configDir = path.dirname(path.resolve(configPath));
+  return path.resolve(configDir, config.migrationsDir);
+}
+
+/**
+ * Resolve the checksum table/collection name for a DCL (repeatable) config,
+ * with the same fallback chain RepeatableRunner's constructor expects.
+ */
+function resolveChecksumTable(config) {
+  return config.checksumTable || config.checksumCollection || 'repeatable_migrations';
+}
+
+/**
  * Load config and create single adapter (for backward compatibility)
  */
 async function getAdapter(options) {
@@ -41,12 +58,7 @@ async function getAdapter(options) {
   }
 
   const config = await loadConfig(options.config);
-  
-  // Resolve migrations directory relative to config file
-  if (config.migrationsDir && !path.isAbsolute(config.migrationsDir)) {
-    const configDir = path.dirname(path.resolve(options.config));
-    config.migrationsDir = path.resolve(configDir, config.migrationsDir);
-  }
+  config.migrationsDir = resolveMigrationsDir(config, options.config);
 
   // Override type if provided
   if (options.type) {
@@ -67,12 +79,8 @@ async function getAdapters(options) {
 
   const config = await loadConfig(options.config);
   const configDir = path.dirname(path.resolve(options.config));
-  
-  // Resolve migrations directory relative to config file
-  if (config.migrationsDir && !path.isAbsolute(config.migrationsDir)) {
-    config.migrationsDir = path.resolve(configDir, config.migrationsDir);
-  }
-  
+  config.migrationsDir = resolveMigrationsDir(config, options.config);
+
   // Handle instances - resolve their migrationsDir too
   if (config.instances) {
     for (const instance of config.instances) {
@@ -133,6 +141,70 @@ function printSchemaSnapshot(snapshot, dbType) {
     }
   }
   console.log('');
+}
+
+/**
+ * Build the context object RepeatableRunner / DCLIdempotentChecker expect.
+ * `extra` can add fields like `validator` that only some call sites need.
+ */
+function buildDCLContext(adapter, migrationsDir, extra = {}) {
+  return {
+    dbType: adapter.dbType,
+    connection: adapter.connection,
+    db: adapter.db,
+    client: adapter.client,
+    migrationsDir,
+    ...extra
+  };
+}
+
+/**
+ * Execute one DCL (repeatable) migration file's content once, without any
+ * checksum bookkeeping. Used by the read-only verification/dry paths
+ * (dcl:verify, validate-all, test-all, dcl:verify-all) that need to actually
+ * run a script to observe its effect, but don't go through
+ * RepeatableRunner.run()'s normal checksum-tracked apply flow.
+ */
+async function executeDCLFile(adapter, runner, file) {
+  if (adapter.dbType === 'mariadb') {
+    await adapter.connection.query(file.content);
+    return;
+  }
+  if (adapter.dbType === 'mongodb') {
+    const { resolved, generated } = runner.resolvePlaceholderPasswords(file.content, file.fileName);
+    let mod;
+    if (generated) {
+      const baseName = file.fileName.replace(/\.js$/, '.mjs');
+      const tmpPath = path.join(os.tmpdir(), `dcl-exec-${crypto.randomBytes(8).toString('hex')}-${baseName}`);
+      await fs.writeFile(tmpPath, resolved, 'utf-8');
+      mod = await import(`file://${tmpPath}`);
+      await fs.unlink(tmpPath).catch(() => {});
+    } else {
+      mod = await import(`file://${file.filePath}?t=${Date.now()}`);
+    }
+    if (typeof mod.up === 'function') {
+      await mod.up(adapter.db, adapter.client, mongodbHelpers);
+    }
+  }
+}
+
+/**
+ * Auto-create placeholder tables for table-level GRANTs so DCL scripts that
+ * reference not-yet-existing tables can still be exercised for verification.
+ * MariaDB only; no-op for MongoDB or when there are no DCL files.
+ */
+async function scaffoldDCLPlaceholders(adapter, files) {
+  if (adapter.dbType !== 'mariadb' || files.length === 0) return;
+  const { DCLScaffold } = await import('./core/dcl-scaffold.js');
+  const scaffold = new DCLScaffold();
+  const scaffoldResult = await scaffold.scaffoldForDCL(
+    adapter.connection,
+    files.map(f => f.content),
+    { verbose: false }
+  );
+  if (scaffoldResult.tables.length > 0) {
+    console.log(chalk.gray(`   [scaffold] Created ${scaffoldResult.tables.length} placeholder table(s): ${scaffoldResult.tables.join(', ')}`));
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -455,7 +527,8 @@ program
         const targetFile = versionedFiles.find(f => f.includes(options.upTo));
         if (!targetFile) {
           console.error(chalk.red(`[ERROR] Migration '${options.upTo}' not found`));
-          process.exit(1);
+          process.exitCode = 1;
+          return; // let the finally block below close the connection
         }
         const targetIdx = versionedFiles.indexOf(targetFile);
         filesToMark = versionedFiles.slice(0, targetIdx + 1);
@@ -463,7 +536,8 @@ program
         const targetFile = versionedFiles.find(f => f.includes(options.file));
         if (!targetFile) {
           console.error(chalk.red(`[ERROR] Migration '${options.file}' not found`));
-          process.exit(1);
+          process.exitCode = 1;
+          return; // let the finally block below close the connection
         }
         filesToMark = [targetFile];
       } else {
@@ -544,7 +618,7 @@ program
       if (isRepeatable) {
         // Reuse RepeatableRunner's constructor validation for the checksum table/collection name
         const runner = new RepeatableRunner({
-          checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+          checksumTable: resolveChecksumTable(config)
         });
         tableLabel = runner.checksumTable;
         resetArgs = adapter.dbType === 'mongodb'
@@ -837,16 +911,16 @@ program
                   label: `DDL/${subdir}`,
                   path: configPath
                 });
-              } catch (e) {
+              } catch {
                 // config.js not found, skip
               }
             }
           }
-        } catch (e) {
+        } catch {
           // ddl/ directory not found
         }
       }
-      
+
       // Scan for DCL config
       if (!options.ddlOnly) {
         const dclConfigPath = path.join(absDir, 'dcl', 'config.js');
@@ -857,7 +931,7 @@ program
             label: 'DCL',
             path: dclConfigPath
           });
-        } catch (e) {
+        } catch {
           // dcl/config.js not found
         }
       }
@@ -890,13 +964,8 @@ program
         try {
           // Load config
           const config = await loadConfig(cfg.path);
-          
-          // Resolve migrations directory
-          if (config.migrationsDir && !path.isAbsolute(config.migrationsDir)) {
-            const configDir = path.dirname(path.resolve(cfg.path));
-            config.migrationsDir = path.resolve(configDir, config.migrationsDir);
-          }
-          
+          config.migrationsDir = resolveMigrationsDir(config, cfg.path);
+
           adapter = await createAdapter(config);
           
           if (cfg.type === 'DDL') {
@@ -969,69 +1038,30 @@ program
             // Connect to database for DCL verification
             await adapter.connect();
             
-            const configDir = path.dirname(path.resolve(cfg.path));
-            const migrationsDir = config.migrationsDir && !path.isAbsolute(config.migrationsDir)
-              ? path.resolve(configDir, config.migrationsDir)
-              : config.migrationsDir;
-            
+            // config.migrationsDir was already resolved to an absolute path above
+            const migrationsDir = config.migrationsDir;
+
             const runner = new RepeatableRunner({
-              checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+              checksumTable: resolveChecksumTable(config)
             });
             
             const checker = new DCLIdempotentChecker({
               verbose: false  // Disable verbose output for validate-all
             });
             
-            const context = {
-              dbType: adapter.dbType,
-              connection: adapter.connection,
-              db: adapter.db,
-              client: adapter.client,
-              migrationsDir
-            };
-            
+            const context = buildDCLContext(adapter, migrationsDir);
+
             const files = await runner.getRepeatableFiles(migrationsDir);
             let allPassed = true;
             let passedCount = 0;
             let failedCount = 0;
 
-            // Scaffold: auto-create placeholder DB/tables for table-level GRANTs
-            if (adapter.dbType === 'mariadb' && files.length > 0) {
-              const { DCLScaffold } = await import('./core/dcl-scaffold.js');
-              const scaffold = new DCLScaffold();
-              const scaffoldResult = await scaffold.scaffoldForDCL(
-                adapter.connection,
-                files.map(f => f.content),
-                { verbose: false }
-              );
-              if (scaffoldResult.tables.length > 0) {
-                console.log(chalk.gray(`   [scaffold] Created ${scaffoldResult.tables.length} placeholder table(s): ${scaffoldResult.tables.join(', ')}`));
-              }
-            }
+            await scaffoldDCLPlaceholders(adapter, files);
 
             for (const file of files) {
               console.log(chalk.blue(`📄 ${file.fileName}`));
               
-              const executeScript = async () => {
-                if (adapter.dbType === 'mariadb') {
-                  await adapter.connection.query(file.content);
-                } else if (adapter.dbType === 'mongodb') {
-                  const { resolved, generated } = runner.resolvePlaceholderPasswords(file.content, file.fileName);
-                  let module;
-                  if (generated) {
-                    const baseName = file.fileName.replace(/\.js$/, '.mjs');
-                    const tmpPath = path.join(os.tmpdir(), `validate-all-dcl-${crypto.randomBytes(8).toString('hex')}-${baseName}`);
-                    await fs.writeFile(tmpPath, resolved, 'utf-8');
-                    module = await import(`file://${tmpPath}`);
-                    await fs.unlink(tmpPath).catch(() => {});
-                  } else {
-                    module = await import(`file://${file.filePath}?t=${Date.now()}`);
-                  }
-                  if (typeof module.up === 'function') {
-                    await module.up(adapter.db, adapter.client, mongodbHelpers);
-                  }
-                }
-              };
+              const executeScript = () => executeDCLFile(adapter, runner, file);
               
               const result = await checker.verify(context, executeScript, {
                 database: config.database || config.mongodb?.databaseName,
@@ -1076,7 +1106,7 @@ program
           if (adapter) {
             try {
               await adapter.disconnect();
-            } catch (e) {
+            } catch {
               // Ignore disconnect errors
             }
           }
@@ -1146,7 +1176,7 @@ program
     }
     console.log('');
     
-    const runTest = async ({ name, adapter, config }) => {
+    const runTest = async ({ name, adapter }) => {
       const results = [];
       
       try {
@@ -1423,8 +1453,7 @@ program
               if (entry.name.startsWith('_')) continue; // Skip template directories
               
               const fullPath = path.join(currentDir, entry.name);
-              const relativePath = path.relative(baseDir, fullPath);
-              
+
               if (entry.isDirectory()) {
                 await searchRecursive(fullPath, depth + 1);
               } else if (entry.name === 'config.js') {
@@ -1451,7 +1480,7 @@ program
                 }
               }
             }
-          } catch (error) {
+          } catch {
             // Directory not accessible, skip
           }
         };
@@ -1494,7 +1523,7 @@ program
               continue; // No config file
             }
           }
-        } catch (error) {
+        } catch {
           // Directory doesn't exist, skip
         }
       }
@@ -1563,16 +1592,10 @@ program
             const validateStart = Date.now();
 
             const runner = new RepeatableRunner({
-              checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+              checksumTable: resolveChecksumTable(config)
             });
 
-            const context = {
-              dbType: adapter.dbType,
-              connection: adapter.connection,
-              db: adapter.db,
-              client: adapter.client,
-              migrationsDir: config.migrationsDir
-            };
+            const context = buildDCLContext(adapter, config.migrationsDir);
 
             let validateSuccess = true;
             let validateError = null;
@@ -1622,19 +1645,7 @@ program
             // Step 2: DCLIdempotentChecker — per-file state comparison (run×2 + diff)
             console.log(chalk.blue(`\n[TEST] ${label} (${dbType}) DCL Idempotency...`));
 
-            // Scaffold: auto-create placeholder DB/tables for table-level GRANTs
-            if (adapter.dbType === 'mariadb' && dclFiles.length > 0) {
-              const { DCLScaffold } = await import('./core/dcl-scaffold.js');
-              const scaffold = new DCLScaffold();
-              const scaffoldResult = await scaffold.scaffoldForDCL(
-                adapter.connection,
-                dclFiles.map(f => f.content),
-                { verbose: false }
-              );
-              if (scaffoldResult.tables.length > 0) {
-                console.log(chalk.gray(`   [scaffold] Created ${scaffoldResult.tables.length} placeholder table(s): ${scaffoldResult.tables.join(', ')}`));
-              }
-            }
+            await scaffoldDCLPlaceholders(adapter, dclFiles);
 
             const checker = new DCLIdempotentChecker({ verbose: false });
 
@@ -1642,26 +1653,7 @@ program
               const fileStart = Date.now();
               console.log(chalk.gray(`   📄 ${file.fileName}`));
 
-              const executeScript = async () => {
-                if (adapter.dbType === 'mariadb') {
-                  await adapter.connection.query(file.content);
-                } else if (adapter.dbType === 'mongodb') {
-                  const { resolved, generated } = runner.resolvePlaceholderPasswords(file.content, file.fileName);
-                  let mod;
-                  if (generated) {
-                    const baseName = file.fileName.replace(/\.js$/, '.mjs');
-                    const tmpPath = path.join(os.tmpdir(), `validate-all-${crypto.randomBytes(8).toString('hex')}-${baseName}`);
-                    await fs.writeFile(tmpPath, resolved, 'utf-8');
-                    mod = await import(`file://${tmpPath}`);
-                    await fs.unlink(tmpPath).catch(() => {});
-                  } else {
-                    mod = await import(`file://${file.filePath}?t=${Date.now()}`);
-                  }
-                  if (typeof mod.up === 'function') {
-                    await mod.up(adapter.db, adapter.client, mongodbHelpers);
-                  }
-                }
-              };
+              const executeScript = () => executeDCLFile(adapter, runner, file);
 
               const idempotencyResult = await checker.verify(context, executeScript, {
                 database: config.database || config.mongodb?.databaseName,
@@ -1816,25 +1808,17 @@ program
       await adapter.connect();
       
       const config = await loadConfig(options.config);
-      const configDir = path.dirname(path.resolve(options.config));
-      const migrationsDir = config.migrationsDir && !path.isAbsolute(config.migrationsDir)
-        ? path.resolve(configDir, config.migrationsDir)
-        : config.migrationsDir;
+      const migrationsDir = resolveMigrationsDir(config, options.config);
       
       const runner = new RepeatableRunner({
-        checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+        checksumTable: resolveChecksumTable(config)
       });
       
-      const context = {
-        dbType: adapter.dbType,
-        connection: adapter.connection,
-        db: adapter.db,
-        client: adapter.client,
-        migrationsDir,
-        // Pass validator if validation is enabled
+      // validator is only passed through when --validate is enabled
+      const context = buildDCLContext(adapter, migrationsDir, {
         validator: options.validate ? adapter : null
-      };
-      
+      });
+
       if (options.dryRun) {
         const status = await runner.status(context);
         console.log(chalk.blue('\n[DRY RUN] Would apply these DCL migrations:'));
@@ -1906,22 +1890,13 @@ program
       await adapter.connect();
       
       const config = await loadConfig(options.config);
-      const configDir = path.dirname(path.resolve(options.config));
-      const migrationsDir = config.migrationsDir && !path.isAbsolute(config.migrationsDir)
-        ? path.resolve(configDir, config.migrationsDir)
-        : config.migrationsDir;
+      const migrationsDir = resolveMigrationsDir(config, options.config);
       
       const runner = new RepeatableRunner({
-        checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+        checksumTable: resolveChecksumTable(config)
       });
       
-      const context = {
-        dbType: adapter.dbType,
-        connection: adapter.connection,
-        db: adapter.db,
-        client: adapter.client,
-        migrationsDir
-      };
+      const context = buildDCLContext(adapter, migrationsDir);
       
       const status = await runner.status(context);
       
@@ -1961,26 +1936,17 @@ program
       await adapter.connect();
       
       const config = await loadConfig(options.config);
-      const configDir = path.dirname(path.resolve(options.config));
-      const migrationsDir = config.migrationsDir && !path.isAbsolute(config.migrationsDir)
-        ? path.resolve(configDir, config.migrationsDir)
-        : config.migrationsDir;
+      const migrationsDir = resolveMigrationsDir(config, options.config);
       
       const runner = new RepeatableRunner({
-        checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+        checksumTable: resolveChecksumTable(config)
       });
       
       const checker = new DCLIdempotentChecker({
         verbose: config.idempotencyCheck?.verbose ?? true
       });
       
-      const context = {
-        dbType: adapter.dbType,
-        connection: adapter.connection,
-        db: adapter.db,
-        client: adapter.client,
-        migrationsDir
-      };
+      const context = buildDCLContext(adapter, migrationsDir);
       
       console.log(chalk.blue(`\n[DCL VERIFY] Testing idempotency (${adapter.dbType})...\n`));
       console.log(chalk.gray('═'.repeat(50)));
@@ -1988,44 +1954,12 @@ program
       const files = await runner.getRepeatableFiles(migrationsDir);
       let allPassed = true;
 
-      // Scaffold: auto-create placeholder DB/tables for table-level GRANTs
-      if (adapter.dbType === 'mariadb' && files.length > 0) {
-        const { DCLScaffold } = await import('./core/dcl-scaffold.js');
-        const scaffold = new DCLScaffold();
-        const scaffoldResult = await scaffold.scaffoldForDCL(
-          adapter.connection,
-          files.map(f => f.content),
-          { verbose: false }
-        );
-        if (scaffoldResult.tables.length > 0) {
-          console.log(chalk.gray(`   [scaffold] Created ${scaffoldResult.tables.length} placeholder table(s): ${scaffoldResult.tables.join(', ')}`));
-        }
-      }
+      await scaffoldDCLPlaceholders(adapter, files);
 
       for (const file of files) {
         console.log(chalk.blue(`\n📄 ${file.fileName}`));
         
-        const executeScript = async () => {
-          if (adapter.dbType === 'mariadb') {
-            // Use query instead of execute for multiple statements
-            await adapter.connection.query(file.content);
-          } else if (adapter.dbType === 'mongodb') {
-            const { resolved, generated } = runner.resolvePlaceholderPasswords(file.content, file.fileName);
-            let mod;
-            if (generated) {
-              const baseName = file.fileName.replace(/\.js$/, '.mjs');
-              const tmpPath = path.join(os.tmpdir(), `dcl-verify-${crypto.randomBytes(8).toString('hex')}-${baseName}`);
-              await fs.writeFile(tmpPath, resolved, 'utf-8');
-              mod = await import(`file://${tmpPath}`);
-              await fs.unlink(tmpPath).catch(() => {});
-            } else {
-              mod = await import(`file://${file.filePath}?t=${Date.now()}`);
-            }
-            if (typeof mod.up === 'function') {
-              await mod.up(adapter.db, adapter.client, mongodbHelpers);
-            }
-          }
-        };
+        const executeScript = () => executeDCLFile(adapter, runner, file);
         
         const result = await checker.verify(context, executeScript, {
           database: config.database,
@@ -2079,10 +2013,7 @@ program
     }
     
     const config = await loadConfig(options.config);
-    const configDir = path.dirname(path.resolve(options.config));
-    const migrationsDir = config.migrationsDir && !path.isAbsolute(config.migrationsDir)
-      ? path.resolve(configDir, config.migrationsDir)
-      : config.migrationsDir;
+    const migrationsDir = resolveMigrationsDir(config, options.config);
     
     console.log(chalk.blue(`\n🔐 Running DCL migrations on ${adapters.length} instance(s)...\n`));
     
@@ -2093,17 +2024,12 @@ program
         await adapter.connect();
         
         const runner = new RepeatableRunner({
-          checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+          checksumTable: resolveChecksumTable(config)
         });
         
-        const context = {
-          dbType: adapter.dbType,
-          connection: adapter.connection,
-          db: adapter.db,
-          client: adapter.client,
-          migrationsDir,
+        const context = buildDCLContext(adapter, migrationsDir, {
           validator: options.validate ? adapter : null
-        };
+        });
         
         if (options.dryRun) {
           const status = await runner.status(context);
@@ -2165,10 +2091,7 @@ program
     }
     
     const config = await loadConfig(options.config);
-    const configDir = path.dirname(path.resolve(options.config));
-    const migrationsDir = config.migrationsDir && !path.isAbsolute(config.migrationsDir)
-      ? path.resolve(configDir, config.migrationsDir)
-      : config.migrationsDir;
+    const migrationsDir = resolveMigrationsDir(config, options.config);
     
     console.log(chalk.blue(`\n📊 DCL Status for ${adapters.length} instance(s):\n`));
     console.log(chalk.gray('═'.repeat(60)));
@@ -2178,16 +2101,10 @@ program
         await adapter.connect();
         
         const runner = new RepeatableRunner({
-          checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+          checksumTable: resolveChecksumTable(config)
         });
         
-        const context = {
-          dbType: adapter.dbType,
-          connection: adapter.connection,
-          db: adapter.db,
-          client: adapter.client,
-          migrationsDir
-        };
+        const context = buildDCLContext(adapter, migrationsDir);
         
         const status = await runner.status(context);
         
@@ -2228,10 +2145,7 @@ program
     }
     
     const config = await loadConfig(options.config);
-    const configDir = path.dirname(path.resolve(options.config));
-    const migrationsDir = config.migrationsDir && !path.isAbsolute(config.migrationsDir)
-      ? path.resolve(configDir, config.migrationsDir)
-      : config.migrationsDir;
+    const migrationsDir = resolveMigrationsDir(config, options.config);
     
     console.log(chalk.blue(`\n🔍 Verifying DCL idempotency on ${adapters.length} instance(s)...\n`));
     console.log(chalk.gray('═'.repeat(60)));
@@ -2243,20 +2157,14 @@ program
         await adapter.connect();
         
         const runner = new RepeatableRunner({
-          checksumTable: config.checksumTable || config.checksumCollection || 'repeatable_migrations'
+          checksumTable: resolveChecksumTable(config)
         });
         
         const checker = new DCLIdempotentChecker({
           verbose: config.idempotencyCheck?.verbose ?? true
         });
         
-        const context = {
-          dbType: adapter.dbType,
-          connection: adapter.connection,
-          db: adapter.db,
-          client: adapter.client,
-          migrationsDir
-        };
+        const context = buildDCLContext(adapter, migrationsDir);
         
         console.log(chalk.blue(`\n[${name}] (${adapter.dbType})`));
         console.log(chalk.gray('─'.repeat(40)));
@@ -2266,26 +2174,7 @@ program
         for (const file of files) {
           console.log(chalk.blue(`  📄 ${file.fileName}`));
           
-          const executeScript = async () => {
-            if (adapter.dbType === 'mariadb') {
-              await adapter.connection.query(file.content);
-            } else if (adapter.dbType === 'mongodb') {
-              const { resolved, generated } = runner.resolvePlaceholderPasswords(file.content, file.fileName);
-              let module;
-              if (generated) {
-                const baseName = file.fileName.replace(/\.js$/, '.mjs');
-                const tmpPath = path.join(os.tmpdir(), `dcl-verify-all-${crypto.randomBytes(8).toString('hex')}-${baseName}`);
-                await fs.writeFile(tmpPath, resolved, 'utf-8');
-                module = await import(`file://${tmpPath}`);
-                await fs.unlink(tmpPath).catch(() => {});
-              } else {
-                module = await import(`file://${file.filePath}?t=${Date.now()}`);
-              }
-              if (typeof module.up === 'function') {
-                await module.up(adapter.db, adapter.client, mongodbHelpers);
-              }
-            }
-          };
+          const executeScript = () => executeDCLFile(adapter, runner, file);
           
           const result = await checker.verify(context, executeScript, {
             database: config.database || adapter.config?.mariadb?.database,
