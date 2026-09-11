@@ -80,6 +80,8 @@ export default {
 ```javascript
 export default {
   type: 'mariadb',
+  mode: 'repeatable',   // required — without this, DCL statements (CREATE USER/GRANT) are
+                         // validated under DDL-mode rules and need --allow-forbidden instead
   mariadb: {
     host: process.env.MARIADB_HOST || 'localhost',
     port: parseInt(process.env.MARIADB_PORT || '3306'),
@@ -652,9 +654,10 @@ docker compose run --rm migrate create 'add-missing-audit-table' -c /app/test-fi
 # 1. 建立目錄
 mkdir -p test-fixtures/mariadb/my-project/{ddl,dcl}/migrations
 
-# 2. 建立 config.js (複製模板並修改)
-cp test-fixtures/mariadb/_templates/ddl/config.js test-fixtures/mariadb/my-project/ddl/
-cp test-fixtures/mariadb/_templates/dcl/config.js test-fixtures/mariadb/my-project/dcl/
+# 2. 建立 config.js（沒有現成的 _templates 目錄，直接複製一個真實範例來改，
+#    DCL 記得補上 mode: 'repeatable'，見上方 2.3 節）
+cp test-fixtures/mariadb/test-success/ddl/config.js test-fixtures/mariadb/my-project/ddl/
+cp test-fixtures/mariadb/test-success/dcl/config.js test-fixtures/mariadb/my-project/dcl/
 
 # 3. 匯出現有 Schema 並建立 baseline 檔案
 # ... (手動編輯)

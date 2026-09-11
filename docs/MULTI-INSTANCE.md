@@ -85,9 +85,7 @@ docker compose run --rm migrate up-all -c /app/test-fixtures/mariadb/multi-insta
 
 # Dry Run
 docker compose run --rm migrate up-all --dry-run -c /app/test-fixtures/mariadb/multi-instance/ddl/config.js
-
-# Parallel execution
-docker compose run --rm migrate up-all --parallel -c /app/test-fixtures/mariadb/multi-instance/ddl/config.js
+# (up-all has no --parallel flag — that's test-instances, below)
 
 # Test all instances (Up-Down-Up)
 docker compose run --rm migrate test-instances -c /app/test-fixtures/mariadb/multi-instance/ddl/config.js

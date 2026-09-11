@@ -252,6 +252,7 @@ See [docs/VALIDATION-RULES-REFERENCE.md](docs/VALIDATION-RULES-REFERENCE.md) for
 
 | Document | Description |
 |----------|-------------|
+| [DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md) | **Start here for prod DDL risk** — what causes lock-ups, pre-flight checklist, abort/rollback runbook |
 | [DOCKER-USAGE.md](docs/DOCKER-USAGE.md) | Complete Docker Compose command reference |
 | [DCL-PASSWORD.md](docs/DCL-PASSWORD.md) | DCL auto-generated password mechanism |
 | [MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md) | Multi-instance configuration guide |
@@ -260,6 +261,9 @@ See [docs/VALIDATION-RULES-REFERENCE.md](docs/VALIDATION-RULES-REFERENCE.md) for
 | [CLI-USAGE-GUIDE.md](docs/CLI-USAGE-GUIDE.md) | Detailed CLI usage guide |
 | [EXISTING-DATABASE-ONBOARDING.md](docs/EXISTING-DATABASE-ONBOARDING.md) | Onboarding existing databases |
 | [LOCK-GUARD.md](docs/LOCK-GUARD.md) | MariaDB lock-wait guard: config, error behavior, and its limits |
+| [VALIDATION-RULES-MARIADB.md](docs/VALIDATION-RULES-MARIADB.md) | Full MariaDB validation rule tables, FK integrity checks |
+| [VALIDATION-RULES-MONGODB.md](docs/VALIDATION-RULES-MONGODB.md) | Full MongoDB validation rule tables |
+| [RUNTIME-GATE-PLAN.md](docs/RUNTIME-GATE-PLAN.md) | Pre-flight readiness gates (design, not yet all implemented) |
 
 ---
 

@@ -1,5 +1,7 @@
 # 本地測試 Migration Image 手冊
 
+> ⚠️ **已知過期（2026-09-11 稽核）**：本文件通篇引用 `docker-compose.local-test.yml`，這個檔案**在 repo 裡不存在**（`scripts/local-test.sh` 也依賴同一個不存在的檔案，同樣是壞的）。文中的服務名稱（`mongodb-auth`、`migration-auth` 等）也對不上真實的 `docker-compose.yml`（真實服務是 `mongodb`/`mariadb`/`runner-mongodb`/`runner-mariadb`/`test-all`/`migrate`）。目前想在本機測試，請直接用根目錄的 `docker-compose.yml`（見 [DOCKER-USAGE.md](./DOCKER-USAGE.md)）。是否要重寫本文件或建立缺少的 compose 檔，待確認後再處理。
+
 本手冊說明如何在本地環境測試 Migration Image，包含啟動假 DB 和執行 up/down/up 流程。
 
 ## 目錄

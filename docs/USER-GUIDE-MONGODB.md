@@ -1,5 +1,7 @@
 # MongoDB DDL/DCL 編寫指南
 
+> ⚠️ **未完整核實（2026-09-11 稽核）**：本文件跟已確認過期的 `MIGRATION-MANAGEMENT-GUIDE.md` 同批次撰寫，關鍵字抽查沒發現壞的 flag/code，但沒有逐行對照原始碼——不算「已驗證正確」，只是「沒抽到明顯的錯」。規則細節請以 [VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) 為準。
+
 > 本指南說明如何為 MongoDB 編寫 DDL (資料定義語言) 和 DCL (資料控制語言) Migration 檔案。
 
 ---

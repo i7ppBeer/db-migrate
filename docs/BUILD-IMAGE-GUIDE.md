@@ -1,5 +1,7 @@
 # Build Image 部署遷移檔案指南
 
+> ⚠️ **已知過期（2026-09-11 稽核）**：本文件約三分之二內容（Kubernetes / Helm chart、Azure Pipelines 相關章節）描述的是這個 repo **目前不存在**的基礎設施——沒有 `Dockerfile.migrations`、沒有 `charts/db-migrate/`、沒有 `azure-pipelines-migrations.yml`。唯一真實存在、可用的是文中提到的 `.github/workflows/migrations.yml`。是否要補齊這些缺少的檔案、還是把這些章節移除，待確認後再處理。
+
 本指南說明如何透過 Build Image 方式將 DDL 遷移檔案部署到 Kubernetes 生產環境。
 
 ## 目錄

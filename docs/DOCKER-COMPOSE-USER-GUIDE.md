@@ -68,7 +68,11 @@ services:
 networks:
   migrate-network:
     external: true
-    name: mongodb-migrate_migrate-network
+    # Compose prefixes the network name with the project name (usually the
+    # directory the main docker-compose.yml lives in, e.g. "db-migrate" here,
+    # not "mongodb-migrate") — confirm the real name with:
+    #   docker network ls | grep migrate-network
+    name: db-migrate_migrate-network
 ```
 
 ---
@@ -82,8 +86,8 @@ DCL 使用 **Repeatable** 模式，檔案以 `R__` 開頭，每當內容 (checks
 #### Step 1: 複製範本或建立 DCL 目錄結構
 
 ```bash
-# 方式一：複製範本 (推薦)
-cp -r test-fixtures/mariadb/_templates/dcl test-fixtures/mariadb/my-project/dcl
+# 方式一：複製現成範例來改 (沒有 _templates 目錄，直接拿真實範例當起點)
+cp -r test-fixtures/mariadb/test-success/dcl test-fixtures/mariadb/my-project/dcl
 
 # 方式二：手動建立目錄
 mkdir -p test-fixtures/mariadb/my-project/dcl/migrations
@@ -318,8 +322,8 @@ DDL 使用 **Versioned** 模式，檔案以時間戳開頭 (如 `20250101000001-
 #### Step 1: 複製範本或建立 DDL 目錄結構
 
 ```bash
-# 方式一：複製範本 (推薦)
-cp -r test-fixtures/mariadb/_templates/ddl test-fixtures/mariadb/my-project/ddl
+# 方式一：複製現成範例來改 (沒有 _templates 目錄，直接拿真實範例當起點)
+cp -r test-fixtures/mariadb/test-success/ddl test-fixtures/mariadb/my-project/ddl
 
 # 方式二：手動建立目錄
 mkdir -p test-fixtures/mariadb/my-project/ddl/migrations
@@ -697,6 +701,8 @@ chmod +x full-migration-test.sh
 | 帶 Sanity Check 的 Up | `node src/cli.js up --sanity-check -c <config>` |
 | 查看狀態 | `node src/cli.js status -c <config>` |
 | 驗證 Migration | `node src/cli.js validate -c <config>` |
+| 重置追蹤紀錄（不動實際資料，dry-run 預設） | `node src/cli.js reset -c <config>` |
+| 重置追蹤紀錄（真的刪除） | `node src/cli.js reset --yes -c <config>` |
 | Up-Down-Up 測試 | `node src/cli.js test -c <config>` |
 | 預覽 (Dry Run) | `node src/cli.js up --dry-run -c <config>` |
 
