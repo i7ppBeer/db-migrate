@@ -479,6 +479,50 @@ export class MariaDBAdapter extends BaseAdapter {
     }
   }
 
+  /**
+   * Snapshot the real, current schema — one entry per table with its columns.
+   * Used by the `sync` CLI command to show what the database actually looks like
+   * after applying migrations, rather than trusting the migration files alone.
+   *
+   * @returns {Promise<{table: string, engine: string, rows: number, columns: {name: string, type: string, nullable: boolean, key: string, default: string|null}[]}[]>}
+   */
+  async getSchemaSnapshot() {
+    const dbConfig = this.config.mariadb || this.config;
+    const dbName = dbConfig.database;
+
+    const [tables] = await this.connection.query(
+      `SELECT TABLE_NAME, ENGINE, TABLE_ROWS
+       FROM information_schema.TABLES
+       WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
+       ORDER BY TABLE_NAME`,
+      [dbName]
+    );
+
+    const snapshot = [];
+    for (const t of tables) {
+      const [columns] = await this.connection.query(
+        `SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT
+         FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+         ORDER BY ORDINAL_POSITION`,
+        [dbName, t.TABLE_NAME]
+      );
+      snapshot.push({
+        table: t.TABLE_NAME,
+        engine: t.ENGINE,
+        rows: t.TABLE_ROWS === null ? null : Number(t.TABLE_ROWS),
+        columns: columns.map(c => ({
+          name: c.COLUMN_NAME,
+          type: c.COLUMN_TYPE,
+          nullable: c.IS_NULLABLE === 'YES',
+          key: c.COLUMN_KEY || '',
+          default: c.COLUMN_DEFAULT
+        }))
+      });
+    }
+    return snapshot;
+  }
+
   async up(options = {}) {
     const result = {
       applied: [],

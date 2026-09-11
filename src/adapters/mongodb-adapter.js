@@ -308,6 +308,55 @@ export class MongoDBAdapter extends BaseAdapter {
     return count;
   }
 
+  /**
+   * Best-effort infer a human-readable type label for one field's sample value.
+   * MongoDB is schemaless, so this is inference from one document, not a guarantee
+   * every document in the collection shares this shape.
+   * @private
+   */
+  _describeFieldType(value) {
+    if (value === null) return 'null';
+    if (Array.isArray(value)) return 'array';
+    if (value instanceof Date) return 'date';
+    if (value && typeof value === 'object' && value._bsontype) return value._bsontype.toLowerCase();
+    if (value && typeof value === 'object') return 'object';
+    return typeof value;
+  }
+
+  /**
+   * Snapshot the real, current schema — one entry per collection with its indexes
+   * and a best-effort field shape inferred from a single sample document.
+   * Used by the `sync` CLI command to show what the database actually looks like
+   * after applying migrations, rather than trusting the migration files alone.
+   *
+   * @returns {Promise<{collection: string, count: number, indexes: string[], fields: {name: string, type: string}[]}[]>}
+   */
+  async getSchemaSnapshot() {
+    const collections = await this.db.listCollections().toArray();
+    const snapshot = [];
+
+    for (const c of collections) {
+      const coll = this.db.collection(c.name);
+      const [count, indexes, sample] = await Promise.all([
+        coll.estimatedDocumentCount(),
+        coll.indexes(),
+        coll.findOne({})
+      ]);
+
+      const fields = sample
+        ? Object.keys(sample).map(name => ({ name, type: this._describeFieldType(sample[name]) }))
+        : [];
+
+      snapshot.push({
+        collection: c.name,
+        count,
+        indexes: indexes.map(i => i.name),
+        fields
+      });
+    }
+    return snapshot;
+  }
+
   async up(options = {}) {
     const result = {
       applied: [],

@@ -92,6 +92,49 @@ async function getAdapters(options) {
   return createAdapters(config);
 }
 
+/**
+ * Pretty-print a schema snapshot (from adapter.getSchemaSnapshot()) to the console.
+ * Same shape for both db types at the top level (an array of "containers"), but
+ * MariaDB containers are tables with columns, MongoDB containers are collections
+ * with indexes + an inferred field shape from one sample document.
+ */
+function printSchemaSnapshot(snapshot, dbType) {
+  if (snapshot.length === 0) {
+    console.log(chalk.gray('   (no tables/collections found)'));
+    return;
+  }
+
+  for (const item of snapshot) {
+    if (dbType === 'mariadb') {
+      const rowsLabel = item.rows === null ? 'unknown rows' : `~${item.rows.toLocaleString()} rows`;
+      console.log(chalk.cyan(`\n📦 ${item.table}`) + chalk.gray(` (${item.engine || 'unknown engine'}, ${rowsLabel})`));
+      const nameWidth = Math.max(...item.columns.map(c => c.name.length), 4);
+      const typeWidth = Math.max(...item.columns.map(c => c.type.length), 4);
+      for (const col of item.columns) {
+        const name = col.name.padEnd(nameWidth);
+        const type = col.type.padEnd(typeWidth);
+        const nullable = col.nullable ? 'NULL    ' : 'NOT NULL';
+        const key = col.key ? chalk.yellow(col.key) : '';
+        console.log(`   ${chalk.white(name)}  ${chalk.gray(type)}  ${nullable}  ${key}`);
+      }
+    } else {
+      console.log(chalk.cyan(`\n📦 ${item.collection}`) + chalk.gray(` (~${item.count.toLocaleString()} docs)`));
+      if (item.indexes.length > 0) {
+        console.log(chalk.gray(`   indexes: ${item.indexes.join(', ')}`));
+      }
+      if (item.fields.length === 0) {
+        console.log(chalk.gray('   (empty collection — no sample document to infer shape from)'));
+      } else {
+        const nameWidth = Math.max(...item.fields.map(f => f.name.length), 4);
+        for (const f of item.fields) {
+          console.log(`   ${chalk.white(f.name.padEnd(nameWidth))}  ${chalk.gray(f.type)}`);
+        }
+      }
+    }
+  }
+  console.log('');
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Commands
 // ─────────────────────────────────────────────────────────────────
@@ -226,6 +269,98 @@ program
           console.error(`   ${e}`);
         }
         process.exitCode = 1;
+      }
+    } catch (error) {
+      console.error(chalk.red(`[ERROR] ${error.message}`));
+      process.exitCode = 1;
+    } finally {
+      if (adapter) await adapter.disconnect();
+    }
+  });
+
+// ─────────────────────────────────────────────────────────────────
+// sync: status -> up -> report -> show real current schema.
+// Refuses (as an error, not a silent no-op) when there's nothing pending.
+// ─────────────────────────────────────────────────────────────────
+
+program
+  .command('sync')
+  .description('status -> up -> report what changed -> show the real current schema. Errors out if nothing is pending.')
+  .option('--sanity-check', 'Enable sanity check (pre-check, post-check, auto-rollback)')
+  .option('--no-auto-rollback', 'Disable auto-rollback on sanity check failure')
+  .option('--target <migration>', 'Run migrations up to and including this migration')
+  .option('--only <migration>', 'Run only this specific migration')
+  .action(async (cmdOptions, cmd) => {
+    const options = { ...cmd.parent.opts(), ...cmdOptions };
+    let adapter;
+
+    try {
+      adapter = await getAdapter(options);
+
+      if (options.sanityCheck) {
+        adapter.config.sanityCheck = {
+          ...adapter.config.sanityCheck,
+          enabled: true,
+          autoRollback: options.autoRollback !== false,
+          verbose: true
+        };
+      }
+
+      await adapter.connect();
+
+      console.log(chalk.blue(`\n[SYNC] ${adapter.dbType} — checking status...`));
+      const status = await adapter.status();
+
+      if (status.pending.length === 0) {
+        console.error(chalk.red(`\n❌ [SYNC] Nothing to update — 0 pending migrations.`));
+        console.error(chalk.gray(`   Database is already at the latest applied migration (${status.applied.length} applied total).`));
+        console.error(chalk.gray(`   Stopping here — this is treated as an error, not a silent success.`));
+        process.exitCode = 1;
+        return;
+      }
+
+      console.log(chalk.cyan(`\n   ${status.pending.length} pending migration(s):`));
+      for (const f of status.pending) {
+        console.log(`   ⏳ ${f}`);
+      }
+
+      console.log(chalk.blue(`\n[SYNC] Applying...`));
+      const migrationOptions = { target: options.target, only: options.only, verbose: true };
+
+      let result;
+      if (options.sanityCheck && typeof adapter.upWithSanityCheck === 'function') {
+        result = await adapter.upWithSanityCheck(migrationOptions);
+      } else {
+        result = await adapter.up(migrationOptions);
+      }
+
+      if (result.errors.length > 0) {
+        console.error(chalk.red(`\n❌ [SYNC] Failed — stopping before schema snapshot:`));
+        for (const e of result.errors) {
+          console.error(`   ${e}`);
+        }
+        if (result.applied.length > 0) {
+          console.error(chalk.yellow(`\n   ${result.applied.length} migration(s) DID apply before the failure:`));
+          for (const m of result.applied) console.error(`   ✅ ${m}`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      console.log(chalk.green(`\n✅ [SYNC] Applied ${result.applied.length} migration(s):`));
+      for (const m of result.applied) {
+        console.log(`   ✅ ${m}`);
+      }
+
+      if (typeof adapter.getSchemaSnapshot === 'function') {
+        console.log(chalk.blue(`\n[SYNC] Current schema (${adapter.dbType}):`));
+        console.log(chalk.gray('─'.repeat(60)));
+        const snapshot = await adapter.getSchemaSnapshot();
+        printSchemaSnapshot(snapshot, adapter.dbType);
+        console.log(chalk.gray('─'.repeat(60)));
+        console.log(chalk.gray(`Total: ${snapshot.length} ${adapter.dbType === 'mariadb' ? 'table(s)' : 'collection(s)'}`));
+      } else {
+        console.log(chalk.gray(`\n[SYNC] Schema snapshot not supported for ${adapter.dbType}.`));
       }
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));

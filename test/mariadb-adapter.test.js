@@ -2015,96 +2015,100 @@ describe('fk-test fixtures — ddl-bad/ (invalid scenarios, each must produce ex
       e.code === 'FK_UNRESOLVED_REFERENCE' && e.message.includes("'orders'")
     )).toBe(true);
   });
+});
 
-  // ── executeWithLockGuard: Gate 2 (lock-wait fail-fast + bounded retry) ──
-  describe('executeWithLockGuard', () => {
-    let guardAdapter;
-    let mockConnection;
+// ── executeWithLockGuard: Gate 2 (lock-wait fail-fast + bounded retry) ──
+// Pulled out to top level: it was previously nested inside the "fk-test
+// fixtures — ddl-bad/" describe above (a leftover from an earlier edit), which
+// made no functional difference since it's fully self-contained, but reported
+// misleadingly in test output as if it were part of the FK fixture suite.
+describe('MariaDBAdapter — executeWithLockGuard', () => {
+  let guardAdapter;
+  let mockConnection;
 
-    const lockWaitError = () => {
-      const err = new Error('Lock wait timeout exceeded; try restarting transaction');
-      err.errno = 1205;
-      err.code = 'ER_LOCK_WAIT_TIMEOUT';
-      return err;
+  const lockWaitError = () => {
+    const err = new Error('Lock wait timeout exceeded; try restarting transaction');
+    err.errno = 1205;
+    err.code = 'ER_LOCK_WAIT_TIMEOUT';
+    return err;
+  };
+
+  beforeEach(() => {
+    mockConnection = {
+      execute: vi.fn().mockResolvedValue([[]]),
+      query: vi.fn()
     };
-
-    beforeEach(() => {
-      mockConnection = {
-        execute: vi.fn().mockResolvedValue([[]]),
-        query: vi.fn()
-      };
-      guardAdapter = new MariaDBAdapter({
-        migrationsDir: '/test/migrations',
-        mariadb: { host: 'localhost', port: 3306, user: 'root', password: 'x', database: 'test' },
-        // Fast retry delay so the suite doesn't actually wait 2s per test
-        ddlSafety: { lockGuard: { lockWaitTimeoutSec: 5, innodbLockWaitTimeoutSec: 5, maxRetries: 3, retryDelayMs: 1 } }
-      });
-      guardAdapter.connection = mockConnection;
+    guardAdapter = new MariaDBAdapter({
+      migrationsDir: '/test/migrations',
+      mariadb: { host: 'localhost', port: 3306, user: 'root', password: 'x', database: 'test' },
+      // Fast retry delay so the suite doesn't actually wait 2s per test
+      ddlSafety: { lockGuard: { lockWaitTimeoutSec: 5, innodbLockWaitTimeoutSec: 5, maxRetries: 3, retryDelayMs: 1 } }
     });
+    guardAdapter.connection = mockConnection;
+  });
 
-    it('sets SESSION lock_wait_timeout and innodb_lock_wait_timeout before executing', async () => {
-      mockConnection.query.mockResolvedValueOnce([[]]);
-      await guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
+  it('sets SESSION lock_wait_timeout and innodb_lock_wait_timeout before executing', async () => {
+    mockConnection.query.mockResolvedValueOnce([[]]);
+    await guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
 
-      expect(mockConnection.execute).toHaveBeenCalledWith('SET SESSION lock_wait_timeout = ?', [5]);
-      expect(mockConnection.execute).toHaveBeenCalledWith('SET SESSION innodb_lock_wait_timeout = ?', [5]);
+    expect(mockConnection.execute).toHaveBeenCalledWith('SET SESSION lock_wait_timeout = ?', [5]);
+    expect(mockConnection.execute).toHaveBeenCalledWith('SET SESSION innodb_lock_wait_timeout = ?', [5]);
+  });
+
+  it('retries on ER_LOCK_WAIT_TIMEOUT (errno 1205) and succeeds once the lock frees up', async () => {
+    mockConnection.query
+      .mockRejectedValueOnce(lockWaitError())
+      .mockResolvedValueOnce([[{ ok: 1 }]]);
+
+    const result = await guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
+
+    expect(mockConnection.query).toHaveBeenCalledTimes(2);
+    expect(result).toEqual([[{ ok: 1 }]]);
+  });
+
+  it('retries exactly maxRetries times then propagates the original error', async () => {
+    mockConnection.query.mockRejectedValue(lockWaitError());
+
+    await expect(
+      guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT')
+    ).rejects.toMatchObject({ errno: 1205 });
+
+    expect(mockConnection.query).toHaveBeenCalledTimes(3); // maxRetries = 3
+  });
+
+  it('does not retry a non-lock-wait error — fails on first attempt', async () => {
+    const syntaxError = new Error('You have an error in your SQL syntax');
+    syntaxError.errno = 1064;
+    mockConnection.query.mockRejectedValue(syntaxError);
+
+    await expect(
+      guardAdapter.executeWithLockGuard('ALTER TABLE orders BROKEN SQL')
+    ).rejects.toMatchObject({ errno: 1064 });
+
+    expect(mockConnection.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('ddlSafety.lockGuard.enabled: false bypasses SET SESSION and retry entirely', async () => {
+    guardAdapter.config.ddlSafety.lockGuard.enabled = false;
+    mockConnection.query.mockResolvedValueOnce([[]]);
+
+    await guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
+
+    expect(mockConnection.execute).not.toHaveBeenCalled();
+    expect(mockConnection.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to defaults when ddlSafety.lockGuard is not configured', async () => {
+    const bareAdapter = new MariaDBAdapter({
+      migrationsDir: '/test/migrations',
+      mariadb: { host: 'localhost', port: 3306, user: 'root', password: 'x', database: 'test' }
     });
+    bareAdapter.connection = mockConnection;
+    mockConnection.query.mockResolvedValueOnce([[]]);
 
-    it('retries on ER_LOCK_WAIT_TIMEOUT (errno 1205) and succeeds once the lock frees up', async () => {
-      mockConnection.query
-        .mockRejectedValueOnce(lockWaitError())
-        .mockResolvedValueOnce([[{ ok: 1 }]]);
+    await bareAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
 
-      const result = await guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
-
-      expect(mockConnection.query).toHaveBeenCalledTimes(2);
-      expect(result).toEqual([[{ ok: 1 }]]);
-    });
-
-    it('retries exactly maxRetries times then propagates the original error', async () => {
-      mockConnection.query.mockRejectedValue(lockWaitError());
-
-      await expect(
-        guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT')
-      ).rejects.toMatchObject({ errno: 1205 });
-
-      expect(mockConnection.query).toHaveBeenCalledTimes(3); // maxRetries = 3
-    });
-
-    it('does not retry a non-lock-wait error — fails on first attempt', async () => {
-      const syntaxError = new Error('You have an error in your SQL syntax');
-      syntaxError.errno = 1064;
-      mockConnection.query.mockRejectedValue(syntaxError);
-
-      await expect(
-        guardAdapter.executeWithLockGuard('ALTER TABLE orders BROKEN SQL')
-      ).rejects.toMatchObject({ errno: 1064 });
-
-      expect(mockConnection.query).toHaveBeenCalledTimes(1);
-    });
-
-    it('ddlSafety.lockGuard.enabled: false bypasses SET SESSION and retry entirely', async () => {
-      guardAdapter.config.ddlSafety.lockGuard.enabled = false;
-      mockConnection.query.mockResolvedValueOnce([[]]);
-
-      await guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
-
-      expect(mockConnection.execute).not.toHaveBeenCalled();
-      expect(mockConnection.query).toHaveBeenCalledTimes(1);
-    });
-
-    it('falls back to defaults when ddlSafety.lockGuard is not configured', async () => {
-      const bareAdapter = new MariaDBAdapter({
-        migrationsDir: '/test/migrations',
-        mariadb: { host: 'localhost', port: 3306, user: 'root', password: 'x', database: 'test' }
-      });
-      bareAdapter.connection = mockConnection;
-      mockConnection.query.mockResolvedValueOnce([[]]);
-
-      await bareAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
-
-      expect(mockConnection.execute).toHaveBeenCalledWith('SET SESSION lock_wait_timeout = ?', [5]);
-    });
+    expect(mockConnection.execute).toHaveBeenCalledWith('SET SESSION lock_wait_timeout = ?', [5]);
   });
 });
 
@@ -2184,5 +2188,70 @@ describe('MariaDBAdapter — resetChangelog', () => {
     adapter.connection = conn;
     const count = await adapter.resetChangelog({ dryRun: true });
     expect(count).toBe(0);
+  });
+});
+
+describe('MariaDBAdapter — getSchemaSnapshot', () => {
+  let adapter;
+  beforeEach(() => {
+    adapter = new MariaDBAdapter({
+      migrationsDir: '/test/migrations',
+      mariadb: { host: 'localhost', port: 3306, user: 'root', password: 'password', database: 'test' }
+    });
+  });
+
+  it('returns one entry per table with its columns in ordinal order', async () => {
+    const conn = {
+      query: vi.fn()
+        .mockResolvedValueOnce([[
+          { TABLE_NAME: 'orders', ENGINE: 'InnoDB', TABLE_ROWS: 42 },
+          { TABLE_NAME: 'users', ENGINE: 'InnoDB', TABLE_ROWS: 10 }
+        ]])
+        .mockResolvedValueOnce([[
+          { COLUMN_NAME: 'id', COLUMN_TYPE: 'bigint(20)', IS_NULLABLE: 'NO', COLUMN_KEY: 'PRI', COLUMN_DEFAULT: null },
+          { COLUMN_NAME: 'user_id', COLUMN_TYPE: 'bigint(20)', IS_NULLABLE: 'NO', COLUMN_KEY: 'MUL', COLUMN_DEFAULT: null }
+        ]])
+        .mockResolvedValueOnce([[
+          { COLUMN_NAME: 'id', COLUMN_TYPE: 'bigint(20)', IS_NULLABLE: 'NO', COLUMN_KEY: 'PRI', COLUMN_DEFAULT: null },
+          { COLUMN_NAME: 'email', COLUMN_TYPE: 'varchar(255)', IS_NULLABLE: 'YES', COLUMN_KEY: '', COLUMN_DEFAULT: null }
+        ]])
+    };
+    adapter.connection = conn;
+
+    const snapshot = await adapter.getSchemaSnapshot();
+
+    expect(snapshot).toHaveLength(2);
+    expect(snapshot[0].table).toBe('orders');
+    expect(snapshot[0].engine).toBe('InnoDB');
+    expect(snapshot[0].rows).toBe(42);
+    expect(snapshot[0].columns).toEqual([
+      { name: 'id', type: 'bigint(20)', nullable: false, key: 'PRI', default: null },
+      { name: 'user_id', type: 'bigint(20)', nullable: false, key: 'MUL', default: null }
+    ]);
+    expect(snapshot[1].table).toBe('users');
+    expect(snapshot[1].columns[1]).toEqual({ name: 'email', type: 'varchar(255)', nullable: true, key: '', default: null });
+
+    // Filters to this database's own base tables only
+    expect(conn.query.mock.calls[0][0]).toContain("TABLE_TYPE = 'BASE TABLE'");
+    expect(conn.query.mock.calls[0][1]).toEqual(['test']);
+  });
+
+  it('returns an empty array when the database has no tables', async () => {
+    const conn = { query: vi.fn().mockResolvedValueOnce([[]]) };
+    adapter.connection = conn;
+    const snapshot = await adapter.getSchemaSnapshot();
+    expect(snapshot).toEqual([]);
+    expect(conn.query).toHaveBeenCalledTimes(1); // no per-table column query issued
+  });
+
+  it('reports TABLE_ROWS = NULL as rows: null rather than 0 (unknown, not empty)', async () => {
+    const conn = {
+      query: vi.fn()
+        .mockResolvedValueOnce([[{ TABLE_NAME: 'orders', ENGINE: 'InnoDB', TABLE_ROWS: null }]])
+        .mockResolvedValueOnce([[]])
+    };
+    adapter.connection = conn;
+    const snapshot = await adapter.getSchemaSnapshot();
+    expect(snapshot[0].rows).toBeNull();
   });
 });

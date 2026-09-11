@@ -840,4 +840,59 @@ export const down = async (db) => {};
       expect(m.db.collection).toHaveBeenCalledWith('repeatable_migrations');
     });
   });
+
+  describe('getSchemaSnapshot', () => {
+    function mockCollection({ count, indexes, sample }) {
+      return {
+        estimatedDocumentCount: vi.fn().mockResolvedValue(count),
+        indexes: vi.fn().mockResolvedValue(indexes.map(name => ({ name }))),
+        findOne: vi.fn().mockResolvedValue(sample)
+      };
+    }
+
+    it('returns one entry per collection with indexes and inferred field types', async () => {
+      const usersColl = mockCollection({
+        count: 10,
+        indexes: ['_id_', 'email_1'],
+        sample: { _id: 'abc', email: 'a@b.com', age: 30, createdAt: new Date('2026-01-01'), tags: ['x'], profile: { bio: 'hi' } }
+      });
+      const ordersColl = mockCollection({ count: 0, indexes: ['_id_'], sample: null });
+
+      adapter.db = {
+        listCollections: vi.fn().mockReturnValue({ toArray: vi.fn().mockResolvedValue([{ name: 'users' }, { name: 'orders' }]) }),
+        collection: vi.fn().mockImplementation((name) => (name === 'users' ? usersColl : ordersColl))
+      };
+
+      const snapshot = await adapter.getSchemaSnapshot();
+
+      expect(snapshot).toHaveLength(2);
+      expect(snapshot[0]).toMatchObject({ collection: 'users', count: 10, indexes: ['_id_', 'email_1'] });
+      const fieldTypes = Object.fromEntries(snapshot[0].fields.map(f => [f.name, f.type]));
+      expect(fieldTypes.email).toBe('string');
+      expect(fieldTypes.age).toBe('number');
+      expect(fieldTypes.createdAt).toBe('date');
+      expect(fieldTypes.tags).toBe('array');
+      expect(fieldTypes.profile).toBe('object');
+    });
+
+    it('returns an empty fields array for an empty collection instead of throwing', async () => {
+      const emptyColl = mockCollection({ count: 0, indexes: ['_id_'], sample: null });
+      adapter.db = {
+        listCollections: vi.fn().mockReturnValue({ toArray: vi.fn().mockResolvedValue([{ name: 'empty' }]) }),
+        collection: vi.fn().mockReturnValue(emptyColl)
+      };
+      const snapshot = await adapter.getSchemaSnapshot();
+      expect(snapshot[0].fields).toEqual([]);
+    });
+
+    it('returns an empty array when there are no collections', async () => {
+      adapter.db = {
+        listCollections: vi.fn().mockReturnValue({ toArray: vi.fn().mockResolvedValue([]) }),
+        collection: vi.fn()
+      };
+      const snapshot = await adapter.getSchemaSnapshot();
+      expect(snapshot).toEqual([]);
+      expect(adapter.db.collection).not.toHaveBeenCalled();
+    });
+  });
 });
