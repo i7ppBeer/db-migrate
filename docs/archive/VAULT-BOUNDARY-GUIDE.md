@@ -1,6 +1,6 @@
 # HashiCorp Vault & Boundary 完整指南
 
-> ⚠️ **範圍提醒（2026-09-11 稽核）**：這個 repo（db-migrate）目前**沒有任何** Vault/Boundary 整合程式碼——本文件是關於這兩個外部工具本身的概念性介紹，不是 db-migrate 已實作的功能說明。閱讀時請不要誤以為 db-migrate 已經串接 Vault/Boundary。是否保留作為未來規劃參考、或移出這個 repo 的技術文件目錄，待確認。
+> 📦 **已搬到 `docs/archive/`（2026-09-11）**：這個 repo（db-migrate）目前**沒有任何** Vault/Boundary 整合程式碼——本文件是關於這兩個外部工具本身的概念性介紹，不是 db-migrate 已實作的功能說明。從 `docs/` 移到這裡，避免跟其他描述目前實際行為的文件混在一起、被誤以為是已實作功能。要重新啟用/實作這個方向，再移回 `docs/` 並補上實際整合狀態即可。
 
 > 🎯 本文件整理了 Vault 與 Boundary 的核心概念、架構設計與實作方式，適合技術團隊與 PM 閱讀。
 

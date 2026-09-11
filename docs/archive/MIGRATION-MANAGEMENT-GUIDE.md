@@ -1,6 +1,6 @@
 # 📋 SQL/MongoDB 資料庫遷移管理系統企劃案
 
-> ⚠️ **部分內容已過期（2026-09-11 稽核）**：本文件多處引用重構前的舊架構，例如 `src/testers/up-down-up-tester.js`、`src/validators/mql-validator.js`（這兩個目錄現在都不存在，邏輯已經整併進 `src/adapters/*.js`），以及不存在的指令如 `npm run test:up-down-up`、`scripts/docker-test.sh --up-down-up`。文件篇幅很大（2500+ 行），只做過抽樣核對，未逐段驗證——**規則代碼（`--allow` codes）抽查是對的，但流程/指令描述不要照抄，先對照 [CLI-USAGE-GUIDE.md](./CLI-USAGE-GUIDE.md)、[VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md)、[VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) 確認**。是否要全文重寫或裁減，待確認。
+> 📦 **已搬到 `docs/archive/`（2026-09-11）**：本文件是這個工具早期的規劃/企劃文件，多處引用重構前的舊架構（`src/testers/up-down-up-tester.js`、`src/validators/mql-validator.js` 等目錄現在都不存在，邏輯已整併進 `src/adapters/*.js`），以及不存在的指令如 `npm run test:up-down-up`。目前實際、準確的說明請改看：[CLI-USAGE-GUIDE.md](../CLI-USAGE-GUIDE.md)、[VALIDATION-RULES-MARIADB.md](../VALIDATION-RULES-MARIADB.md)、[VALIDATION-RULES-MONGODB.md](../VALIDATION-RULES-MONGODB.md)、[DDL-PRODUCTION-SAFETY.md](../DDL-PRODUCTION-SAFETY.md)、[TESTING-GUIDE.md](../TESTING-GUIDE.md)。這份保留下來是為了原始設計脈絡/決策理由，不是操作指南——內容篇幅很大（2500+ 行）只做過抽樣核對，不要照抄裡面的指令或流程描述。
 
 > 本文件說明如何使用 Migration 工具管理 DDL（Data Definition Language）和 DCL（Data Control Language），包含驗證規則、冪等性設計、危險指令檢查、Sanity Check 與 DCL Repeatable 模式。
 

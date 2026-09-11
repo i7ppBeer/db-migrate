@@ -1,6 +1,9 @@
 # Build Image 部署遷移檔案指南
 
-> ⚠️ **已知過期（2026-09-11 稽核）**：本文件約三分之二內容（Kubernetes / Helm chart、Azure Pipelines 相關章節）描述的是這個 repo **目前不存在**的基礎設施——沒有 `Dockerfile.migrations`、沒有 `charts/db-migrate/`、沒有 `azure-pipelines-migrations.yml`。唯一真實存在、可用的是文中提到的 `.github/workflows/migrations.yml`。是否要補齊這些缺少的檔案、還是把這些章節移除，待確認後再處理。
+> ⚠️ **部分過期（2026-09-11 稽核，Kubernetes 章節已修正）**：
+> - **Kubernetes 部署**章節已改成指向真正存在、可用的 [`k8s/`](../k8s/README.md)（kubectl + ConfigMap/Secret/Job），原本教的 `./charts/db-migrate` Helm chart從來沒被建立過。
+> - **Azure DevOps Pipeline** 章節提到的 `azure-pipelines-migrations.yml` 仍然**不存在**（`Dockerfile.azure` 倒是真的存在，是給 Azure DevOps agent 用的 image）——這節內容未經驗證，先當作草稿看待，要用的話得自己補上實際的 pipeline YAML。
+> - `.github/workflows/migrations.yml` 已同步修正（原本 build/deploy job 也引用了不存在的 `Dockerfile.migrations` 和 Helm chart）。
 
 本指南說明如何透過 Build Image 方式將 DDL 遷移檔案部署到 Kubernetes 生產環境。
 
@@ -192,103 +195,15 @@ jobs:
 
 ## Kubernetes 部署
 
-### 1. 建立 Secret (一次性)
+> ⚠️ **2026-09-11 更新**：這個章節原本教用 `helm upgrade ./charts/db-migrate` 部署，但那個 Helm chart 從來沒有被建立過，實際照做會直接失敗——`.github/workflows/migrations.yml` 的 deploy job 也曾經犯一樣的錯，已經一起修掉了。目前實際可用、有經過設計討論的部署方式是 **kubectl + ConfigMap/Secret/Job**（不用 Helm），完整範例在 [`k8s/`](../k8s/README.md)，這裡不重複貼——內容包含：
+> - Job（含 `backoffLimit: 0` 的理由，見下方提醒）
+> - ConfigMap 掛載 migration 檔案（適合檔案小、多專案共用的情況）
+> - Secret 範本 + 該用哪個 DB 帳號
+> - ServiceAccount/RBAC
+>
+> 監控遷移執行一樣是標準 `kubectl wait` / `kubectl logs`，範例見 `k8s/README.md` 的「工作流程」章節。
 
-```bash
-# Staging
-kubectl create namespace staging
-kubectl create secret generic mongodb-staging-secret \
-  --namespace staging \
-  --from-literal=mongodb-password=<staging-password>
-
-# Production
-kubectl create namespace production
-kubectl create secret generic mongodb-production-secret \
-  --namespace production \
-  --from-literal=mongodb-password=<production-password>
-```
-
-### 2. 使用 Helm 部署
-
-```bash
-# Staging 部署
-helm upgrade --install db-migrate-staging ./charts/db-migrate \
-  --namespace staging \
-  --set image.repository=myregistry.azurecr.io/db-migrate \
-  --set image.tag=v1.2.3 \
-  --set mongodb.host=mongodb-staging.staging.svc.cluster.local \
-  --set mongodb.database=staging_db \
-  --set mongodb.auth.enabled=true \
-  --set mongodb.auth.username=admin \
-  --set mongodb.auth.existingSecret=mongodb-staging-secret
-
-# Production 部署
-helm upgrade --install db-migrate-production ./charts/db-migrate \
-  --namespace production \
-  --set image.repository=myregistry.azurecr.io/db-migrate \
-  --set image.tag=v1.2.3 \
-  --set mongodb.host=mongodb-production.production.svc.cluster.local \
-  --set mongodb.database=production_db \
-  --set mongodb.auth.enabled=true \
-  --set mongodb.auth.username=admin \
-  --set mongodb.auth.existingSecret=mongodb-production-secret \
-  --set migration.validation.enabled=true \
-  --set migration.validation.allowDangerous=false
-```
-
-### 3. 使用 Values 檔案 (推薦)
-
-建立 `values-production.yaml`：
-
-```yaml
-image:
-  repository: myregistry.azurecr.io/db-migrate
-  tag: "v1.2.3"  # ✅ 指定版本，不用 latest
-  pullPolicy: Always
-
-mongodb:
-  enabled: true
-  host: mongodb-production.production.svc.cluster.local
-  database: production_db
-  auth:
-    enabled: true
-    username: admin
-    existingSecret: mongodb-production-secret
-
-migration:
-  command: up
-  validation:
-    enabled: true
-    allowDangerous: false
-
-job:
-  backoffLimit: 5
-  ttlSecondsAfterFinished: 86400  # 保留 24 小時
-```
-
-部署：
-
-```bash
-helm upgrade --install db-migrate-production ./charts/db-migrate \
-  --namespace production \
-  -f values-production.yaml
-```
-
-### 4. 監控遷移執行
-
-```bash
-# 查看 Job 狀態
-kubectl get jobs -n production -l app.kubernetes.io/name=db-migrate
-
-# 等待完成
-kubectl wait --for=condition=complete job \
-  -l app.kubernetes.io/instance=db-migrate-production \
-  -n production \
-  --timeout=300s
-
-# 查看日誌
-kubectl logs -l app.kubernetes.io/instance=db-migrate-production -n production
-```
+⚠️ **不要把 Job 的 `backoffLimit` 設成大於 0 的值**（本文件先前的範例曾寫 `backoffLimit: 5`，是錯誤示範）。DDL migration 失敗可能留下「SQL 已執行、changelog 未寫入」的半套狀態，自動重試等於讓排程器對著不確定的狀態盲目重跑——細節見 [docs/DDL-PRODUCTION-SAFETY.md](./DDL-PRODUCTION-SAFETY.md) 第 1.8 節。失敗就該停下來讓人看，不是交給 Job controller 自動重來。
 
 ---
 
