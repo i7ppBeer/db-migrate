@@ -93,6 +93,28 @@ node src/cli.js -c <config-path> sync -o ./reports
 
 `-o <dir>` 會產生 `sync-report-<timestamp>.json` 跟 `.html` 兩份檔案，內容包含：這次套用了哪些 migration、有沒有錯誤、以及套用後資料庫的真實 schema（MariaDB 是逐表列欄位，MongoDB 是逐 collection 列索引 + 從一筆文件推斷出的欄位形狀）。失敗時只存下錯誤資訊，不會附上不確定狀態下的 schema 快照。
 
+### 6. DCL 帳號/權限變更對比
+
+`dcl` 指令執行前後會各拍一次帳號/權限快照（重用 `dcl:verify` 冪等性檢查本來就有的狀態擷取邏輯），有套用任何 migration 就自動顯示差異：
+
+```bash
+node src/cli.js -c <config-path> dcl
+```
+
+```
+[DCL] Account/permission changes (mariadb):
+────────────────────────────────────────────────────────
++ 👤 app_writer@%（新帳號）
+   + GRANT INSERT, UPDATE ON mydb.* TO ... (app_writer@%)
+- 👤 old_service@%（帳號已刪除）
+~ 👤 app@%（權限變更）
+   + GRANT INSERT ON mydb.* TO ...
+   - GRANT DELETE ON mydb.* TO ...
+────────────────────────────────────────────────────────
+```
+
+MongoDB 顯示帳號 + roles 變更（`+`/`-`/`~` 同一套風格）；MariaDB 顯示帳號 + GRANT 變更。**Rename 不會被特別標出來**——`RENAME USER`（或 Mongo 的先刪後建）在這套快照對比下，看起來就是「一個帳號被刪、一個新帳號出現」，因為單純比對前後狀態沒辦法判斷這是真的改名還是巧合的一刪一建。
+
 ---
 
 ## 🎯 指定特定遷移

@@ -187,6 +187,58 @@ function printSchemaDiff(diff, dbType) {
 }
 
 /**
+ * Pretty-print a DCL diff (from DCLIdempotentChecker.diffStates()) — which
+ * accounts/roles were added or dropped, and which permissions changed on
+ * accounts that still exist, git-diff style. Covers both a straight DROP
+ * USER (shows up as removedUsers) and a REVOKE that leaves the account in
+ * place (shows up as removedGrants/removedRoles on an unchanged user) --
+ * a rename isn't detected as such, it shows up as one removed + one added
+ * account, since a dropped-then-recreated name and an actual rename aren't
+ * distinguishable from state alone.
+ */
+function printDCLDiff(diff, dbType) {
+  if (dbType === 'mariadb') {
+    const { addedUsers, removedUsers, addedGrants, removedGrants } = diff;
+    if (addedUsers.length === 0 && removedUsers.length === 0 && addedGrants.length === 0 && removedGrants.length === 0) {
+      console.log(chalk.gray('   (no account/permission changes)'));
+      return;
+    }
+    for (const u of addedUsers) console.log(chalk.green(`+ 👤 ${u}`) + chalk.gray(' (new account)'));
+    for (const u of removedUsers) console.log(chalk.red(`- 👤 ${u}`) + chalk.gray(' (account dropped)'));
+    // Grants on accounts that were newly added/removed are implied by the
+    // account line above -- only show grant-level detail for accounts that
+    // still exist on both sides, so an account rename doesn't also spam a
+    // dozen redundant "+ GRANT .../- GRANT ..." lines.
+    const addedUsersSet = new Set(addedUsers);
+    const removedUsersSet = new Set(removedUsers);
+    const grantsToShow = (grants, isAdded) => grants.filter(g => isAdded ? !addedUsersSet.has(g.user) : !removedUsersSet.has(g.user));
+    for (const g of grantsToShow(addedGrants, true)) console.log(chalk.green(`   + ${g.grant}`) + chalk.gray(` (${g.user})`));
+    for (const g of grantsToShow(removedGrants, false)) console.log(chalk.red(`   - ${g.grant}`) + chalk.gray(` (${g.user})`));
+    return;
+  }
+
+  if (dbType === 'mongodb') {
+    const { addedUsers, removedUsers, changedUsers, addedRoles, removedRoles } = diff;
+    if (addedUsers.length === 0 && removedUsers.length === 0 && changedUsers.length === 0 && addedRoles.length === 0 && removedRoles.length === 0) {
+      console.log(chalk.gray('   (no account/permission changes)'));
+      return;
+    }
+    for (const u of addedUsers) console.log(chalk.green(`+ 👤 ${u.user}@${u.db}`) + chalk.gray(` (new account, roles: ${u.roles.join(', ') || 'none'})`));
+    for (const u of removedUsers) console.log(chalk.red(`- 👤 ${u.user}@${u.db}`) + chalk.gray(' (account dropped)'));
+    for (const c of changedUsers) {
+      console.log(chalk.yellow(`~ 👤 ${c.user}@${c.db}`) + chalk.gray(' (roles changed)'));
+      for (const r of c.addedRoles) console.log(chalk.green(`   + ${r}`));
+      for (const r of c.removedRoles) console.log(chalk.red(`   - ${r}`));
+    }
+    for (const r of addedRoles) console.log(chalk.green(`+ 🔑 ${r.role}@${r.db}`) + chalk.gray(' (new custom role)'));
+    for (const r of removedRoles) console.log(chalk.red(`- 🔑 ${r.role}@${r.db}`) + chalk.gray(' (custom role dropped)'));
+    return;
+  }
+
+  console.log(chalk.gray(`   (DCL diff not supported for ${dbType})`));
+}
+
+/**
  * Build the context object RepeatableRunner / DCLIdempotentChecker expect.
  * `extra` can add fields like `validator` that only some call sites need.
  */
@@ -199,6 +251,20 @@ function buildDCLContext(adapter, migrationsDir, extra = {}) {
     migrationsDir,
     ...extra
   };
+}
+
+/**
+ * Capture the current accounts/permissions state for whichever adapter type
+ * is connected, via DCLIdempotentChecker's existing state-capture logic
+ * (originally built for idempotency verification, reused here for
+ * before/after diffing around a `dcl` run).
+ */
+async function captureDCLState(checker, adapter, config) {
+  if (adapter.dbType === 'mariadb') {
+    const dbConfig = adapter.config.mariadb || adapter.config;
+    return checker.captureMariaDBState(adapter.connection, dbConfig.database || config.database);
+  }
+  return checker.captureMongoDBState(adapter.db);
 }
 
 /**
@@ -1921,19 +1987,31 @@ program
           console.log(chalk.red('   --allow-forbidden: Forbidden operations allowed (REQUIRES APPROVAL)'));
         }
       }
-      
+
+      // Snapshot accounts/permissions before applying, so we can show what
+      // actually changed afterward instead of just "N migrations applied".
+      const dclChecker = new DCLIdempotentChecker({ verbose: false });
+      const beforeDCLState = await captureDCLState(dclChecker, adapter, config);
+
       const result = await runner.run(context);
-      
+
       if (result.applied.length > 0) {
         console.log(chalk.green(`\n✅ Applied ${result.applied.length} DCL migration(s):`));
         for (const m of result.applied) {
           const annotationInfo = m.annotations?.allowDangerous ? chalk.yellow(' [allow-dangerous]') : '';
           console.log(`   ${m.fileName} (${m.reason})${annotationInfo}`);
         }
+
+        const afterDCLState = await captureDCLState(dclChecker, adapter, config);
+        const dclDiff = dclChecker.diffStates(beforeDCLState, afterDCLState, adapter.dbType);
+        console.log(chalk.blue(`\n[DCL] Account/permission changes (${adapter.dbType}):`));
+        console.log(chalk.gray('─'.repeat(60)));
+        printDCLDiff(dclDiff, adapter.dbType);
+        console.log(chalk.gray('─'.repeat(60)));
       } else if (!result.skipped || result.skipped.length === 0) {
         console.log(chalk.gray('\n   All DCL migrations are up-to-date.'));
       }
-      
+
       // Show skipped migrations
       if (result.skipped && result.skipped.length > 0) {
         console.log(chalk.yellow(`\n⏭️  Skipped ${result.skipped.length} migration(s) due to validation:`));
