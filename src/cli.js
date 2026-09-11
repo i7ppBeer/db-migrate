@@ -10,7 +10,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { createAdapter, createAdapters, loadConfig } from './adapters/index.js';
-import { Reporter } from './core/reporter.js';
+import { Reporter, buildSyncReport, saveSyncReport } from './core/reporter.js';
 import { RepeatableRunner, mongodbHelpers } from './core/repeatable-runner.js';
 import { DCLIdempotentChecker } from './core/dcl-idempotent-checker.js';
 import fs from 'fs/promises';
@@ -362,12 +362,27 @@ program
   .option('--no-auto-rollback', 'Disable auto-rollback on sanity check failure')
   .option('--target <migration>', 'Run migrations up to and including this migration')
   .option('--only <migration>', 'Run only this specific migration')
+  .option('-o, --output <dir>', 'Save a JSON+HTML report to this directory (sync-report-<timestamp>.{json,html})')
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
+    const startedAt = Date.now();
     let adapter;
+
+    const saveReportIfRequested = async (reportData) => {
+      if (!options.output) return;
+      const report = buildSyncReport({ ...reportData, durationMs: Date.now() - startedAt });
+      try {
+        const files = await saveSyncReport(options.output, report);
+        console.log(chalk.gray(`\n📄 Report saved: ${files.join(', ')}`));
+      } catch (reportError) {
+        console.error(chalk.red(`\n[ERROR] Failed to save report: ${reportError.message}`));
+      }
+    };
 
     try {
       adapter = await getAdapter(options);
+      const dbConfig = adapter.config.mariadb || adapter.config.mongodb || adapter.config;
+      const databaseName = dbConfig.database || dbConfig.databaseName;
 
       if (options.sanityCheck) {
         adapter.config.sanityCheck = {
@@ -387,6 +402,7 @@ program
         console.error(chalk.red(`\n❌ [SYNC] Nothing to update — 0 pending migrations.`));
         console.error(chalk.gray(`   Database is already at the latest applied migration (${status.applied.length} applied total).`));
         console.error(chalk.gray(`   Stopping here — this is treated as an error, not a silent success.`));
+        await saveReportIfRequested({ dbType: adapter.dbType, database: databaseName, status: 'no-pending', pending: [] });
         process.exitCode = 1;
         return;
       }
@@ -415,6 +431,10 @@ program
           console.error(chalk.yellow(`\n   ${result.applied.length} migration(s) DID apply before the failure:`));
           for (const m of result.applied) console.error(`   ✅ ${m}`);
         }
+        await saveReportIfRequested({
+          dbType: adapter.dbType, database: databaseName, status: 'failed',
+          pending: status.pending, applied: result.applied, errors: result.errors
+        });
         process.exitCode = 1;
         return;
       }
@@ -424,16 +444,22 @@ program
         console.log(`   ✅ ${m}`);
       }
 
+      let snapshot = null;
       if (typeof adapter.getSchemaSnapshot === 'function') {
         console.log(chalk.blue(`\n[SYNC] Current schema (${adapter.dbType}):`));
         console.log(chalk.gray('─'.repeat(60)));
-        const snapshot = await adapter.getSchemaSnapshot();
+        snapshot = await adapter.getSchemaSnapshot();
         printSchemaSnapshot(snapshot, adapter.dbType);
         console.log(chalk.gray('─'.repeat(60)));
         console.log(chalk.gray(`Total: ${snapshot.length} ${adapter.dbType === 'mariadb' ? 'table(s)' : 'collection(s)'}`));
       } else {
         console.log(chalk.gray(`\n[SYNC] Schema snapshot not supported for ${adapter.dbType}.`));
       }
+
+      await saveReportIfRequested({
+        dbType: adapter.dbType, database: databaseName, status: 'applied',
+        pending: status.pending, applied: result.applied, schema: snapshot
+      });
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
       process.exitCode = 1;

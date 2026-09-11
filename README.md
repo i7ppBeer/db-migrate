@@ -80,6 +80,7 @@ node src/cli.js test -c test-fixtures/mariadb/test-success/ddl/config.js
 |---------|-------------|
 | `status` | Show migration status |
 | `up` | Apply pending migrations |
+| `sync [-o <dir>]` | status → up → report what changed → show the real current schema. Errors out (non-zero exit) if nothing is pending. `-o` saves a JSON+HTML report |
 | `down -n <N>` | Rollback last N migrations |
 | `create <name>` | Create a new DDL migration file |
 | `validate` | Validate migration files |

@@ -77,6 +77,22 @@ node src/cli.js -c <config-path> reset --yes
 
 ⚠️ 只清紀錄、不清實際資料，代表重置後再跑 `up` 極可能因為表格/collection 已存在而失敗（除非migration 本身有用 `IF NOT EXISTS`）。**通常只在會被整個重置的開發/測試用資料庫上使用**，正式環境幾乎不會需要。
 
+### 5. 一次到位：檢查、套用、看結果 (SYNC)
+
+把 `status` → `up` → 印出實際套用了什麼 → 顯示資料庫真正的目前 schema 串成一步。**如果沒有任何 pending migration，會直接視為錯誤中止**（非 0 exit code），不會靜默通過——部署情境下「預期要更新卻沒東西可更新」通常代表哪裡出錯了。
+
+```bash
+node src/cli.js -c <config-path> sync
+
+# 帶 sanity check
+node src/cli.js -c <config-path> sync --sanity-check
+
+# 順便存一份 JSON + HTML 報告到指定目錄
+node src/cli.js -c <config-path> sync -o ./reports
+```
+
+`-o <dir>` 會產生 `sync-report-<timestamp>.json` 跟 `.html` 兩份檔案，內容包含：這次套用了哪些 migration、有沒有錯誤、以及套用後資料庫的真實 schema（MariaDB 是逐表列欄位，MongoDB 是逐 collection 列索引 + 從一筆文件推斷出的欄位形狀）。失敗時只存下錯誤資訊，不會附上不確定狀態下的 schema 快照。
+
 ---
 
 ## 🎯 指定特定遷移
