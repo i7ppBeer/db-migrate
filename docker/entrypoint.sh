@@ -129,7 +129,7 @@ main() {
             echo -e "\n${BLUE}[INFO] Running $command (no database connection required)${NC}"
             run_command "$command" "$@"
             ;;
-        up|down|status|test|baseline|dcl|dcl:status|dcl:verify|status-all|up-all|dcl-all|dcl:status-all|dcl:verify-all|test-instances)
+        up|down|status|sync|reset|test|baseline|dcl|dcl:status|dcl:verify|status-all|up-all|dcl-all|dcl:status-all|dcl:verify-all|test-instances)
             setup_db_from_args "$@"
             wait_for_database
             run_command "$command" "$@"
