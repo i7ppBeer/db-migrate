@@ -11,6 +11,7 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { createAdapter, createAdapters, loadConfig } from './adapters/index.js';
 import { Reporter, buildSyncReport, saveSyncReport } from './core/reporter.js';
+import { diffSchemaSnapshots, isDiffEmpty } from './core/schema-diff.js';
 import { RepeatableRunner, mongodbHelpers } from './core/repeatable-runner.js';
 import { DCLIdempotentChecker } from './core/dcl-idempotent-checker.js';
 import fs from 'fs/promises';
@@ -141,6 +142,48 @@ function printSchemaSnapshot(snapshot, dbType) {
     }
   }
   console.log('');
+}
+
+/**
+ * Pretty-print a schema diff (from diffSchemaSnapshots()) — what actually
+ * changed between two snapshots, git-diff style, instead of two full listings
+ * a reader has to compare by hand.
+ */
+function printSchemaDiff(diff, dbType) {
+  if (isDiffEmpty(diff)) {
+    console.log(chalk.gray('   (schema unchanged)'));
+    return;
+  }
+
+  const label = dbType === 'mariadb' ? { one: 'table', many: 'tables' } : { one: 'collection', many: 'collections' };
+  const fieldLabel = dbType === 'mariadb' ? 'column' : 'field';
+
+  for (const item of diff.added) {
+    const name = item.table ?? item.collection;
+    console.log(chalk.green(`+ 📦 ${name}`) + chalk.gray(` (new ${label.one})`));
+  }
+  for (const item of diff.removed) {
+    const name = item.table ?? item.collection;
+    console.log(chalk.red(`- 📦 ${name}`) + chalk.gray(` (${label.one} removed)`));
+  }
+  for (const c of diff.changed) {
+    const total = c.addedFields.length + c.removedFields.length + c.changedFields.length;
+    console.log(chalk.yellow(`~ 📦 ${c.name}`) + chalk.gray(` (${total} ${fieldLabel}${total === 1 ? '' : 's'} changed)`));
+    for (const f of c.addedFields) {
+      console.log(chalk.green(`   + ${f.name.padEnd(20)}`) + chalk.gray(` ${f.type}${f.nullable === false ? ' NOT NULL' : ''}`));
+    }
+    for (const f of c.removedFields) {
+      console.log(chalk.red(`   - ${f.name}`));
+    }
+    for (const f of c.changedFields) {
+      const beforeDesc = f.before.type ?? '';
+      const afterDesc = f.after.type ?? '';
+      console.log(chalk.yellow(`   ~ ${f.name.padEnd(20)}`) + chalk.gray(` ${beforeDesc} → ${afterDesc}`));
+    }
+  }
+  if (diff.unchangedCount > 0) {
+    console.log(chalk.gray(`\n   Unchanged: ${diff.unchangedCount} ${diff.unchangedCount === 1 ? label.one : label.many}`));
+  }
 }
 
 /**
@@ -412,6 +455,11 @@ program
         console.log(`   ⏳ ${f}`);
       }
 
+      // Snapshot before applying anything, so the schema section afterward
+      // can show what actually changed instead of just the final state.
+      const supportsSchema = typeof adapter.getSchemaSnapshot === 'function';
+      const beforeSnapshot = supportsSchema ? await adapter.getSchemaSnapshot() : null;
+
       console.log(chalk.blue(`\n[SYNC] Applying...`));
       const migrationOptions = { target: options.target, only: options.only, verbose: true };
 
@@ -445,10 +493,18 @@ program
       }
 
       let snapshot = null;
-      if (typeof adapter.getSchemaSnapshot === 'function') {
+      let diff = null;
+      if (supportsSchema) {
+        snapshot = await adapter.getSchemaSnapshot();
+        diff = diffSchemaSnapshots(beforeSnapshot, snapshot);
+
+        console.log(chalk.blue(`\n[SYNC] Schema changes (${adapter.dbType}):`));
+        console.log(chalk.gray('─'.repeat(60)));
+        printSchemaDiff(diff, adapter.dbType);
+        console.log(chalk.gray('─'.repeat(60)));
+
         console.log(chalk.blue(`\n[SYNC] Current schema (${adapter.dbType}):`));
         console.log(chalk.gray('─'.repeat(60)));
-        snapshot = await adapter.getSchemaSnapshot();
         printSchemaSnapshot(snapshot, adapter.dbType);
         console.log(chalk.gray('─'.repeat(60)));
         console.log(chalk.gray(`Total: ${snapshot.length} ${adapter.dbType === 'mariadb' ? 'table(s)' : 'collection(s)'}`));
@@ -458,7 +514,7 @@ program
 
       await saveReportIfRequested({
         dbType: adapter.dbType, database: databaseName, status: 'applied',
-        pending: status.pending, applied: result.applied, schema: snapshot
+        pending: status.pending, applied: result.applied, schema: snapshot, schemaDiff: diff
       });
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));

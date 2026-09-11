@@ -37,6 +37,7 @@ function escapeHtml(str) {
  * @param {string[]} [data.errors] - error messages, if status === 'failed'
  * @param {number} data.durationMs
  * @param {Array} [data.schema] - adapter.getSchemaSnapshot() result, omitted on failure/no-pending
+ * @param {Object} [data.schemaDiff] - diffSchemaSnapshots() result (before vs. after), omitted on failure/no-pending
  * @returns {Object} plain JSON-serializable report object
  */
 export function buildSyncReport(data) {
@@ -49,7 +50,8 @@ export function buildSyncReport(data) {
     pending: data.pending ?? [],
     applied: data.applied ?? [],
     errors: data.errors ?? [],
-    schema: data.schema ?? null
+    schema: data.schema ?? null,
+    schemaDiff: data.schemaDiff ?? null
   };
 }
 
@@ -61,6 +63,24 @@ export function buildSyncReport(data) {
 export function syncReportToHTML(report) {
   const statusLabel = { applied: '✅ APPLIED', 'no-pending': '⚠️ NO PENDING', failed: '❌ FAILED' }[report.status] || report.status;
   const statusClass = { applied: 'pass', 'no-pending': 'warn', failed: 'fail' }[report.status] || '';
+
+  const diff = report.schemaDiff;
+  const diffIsEmpty = diff && diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0;
+  const diffHTML = !diff ? '' : (diffIsEmpty ? '<p class="diff-empty">(schema unchanged)</p>' : `
+    <ul class="diff-list">
+      ${diff.added.map(item => `<li class="diff-added">+ 📦 ${escapeHtml(item.table ?? item.collection)} <span class="badge">new</span></li>`).join('')}
+      ${diff.removed.map(item => `<li class="diff-removed">- 📦 ${escapeHtml(item.table ?? item.collection)} <span class="badge">removed</span></li>`).join('')}
+      ${diff.changed.map(c => `
+      <li class="diff-changed">~ 📦 ${escapeHtml(c.name)}
+        <ul class="diff-fields">
+          ${c.addedFields.map(f => `<li class="diff-added">+ ${escapeHtml(f.name)} <code>${escapeHtml(f.type ?? '')}</code></li>`).join('')}
+          ${c.removedFields.map(f => `<li class="diff-removed">- ${escapeHtml(f.name)}</li>`).join('')}
+          ${c.changedFields.map(f => `<li class="diff-changed">~ ${escapeHtml(f.name)}: <code>${escapeHtml(f.before.type ?? '')}</code> → <code>${escapeHtml(f.after.type ?? '')}</code></li>`).join('')}
+        </ul>
+      </li>`).join('')}
+    </ul>
+    ${diff.unchangedCount > 0 ? `<p class="diff-empty">Unchanged: ${diff.unchangedCount}</p>` : ''}
+  `);
 
   const schemaHTML = !report.schema ? '' : report.schema.map(item => {
     if ('table' in item) {
@@ -118,6 +138,13 @@ export function syncReportToHTML(report) {
     th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #eee; }
     th { background: #f9fafb; font-weight: 600; color: #374151; }
     code { font-family: 'SF Mono', Consolas, monospace; background: #f3f4f6; padding: 1px 5px; border-radius: 3px; }
+    .diff-list { list-style: none; font-size: 13px; }
+    .diff-list > li { margin-bottom: 6px; }
+    .diff-fields { list-style: none; margin: 4px 0 4px 20px; }
+    .diff-added { color: #166534; }
+    .diff-removed { color: #991b1b; }
+    .diff-changed { color: #854d0e; }
+    .diff-empty { color: #6b7280; font-size: 13px; }
   </style>
 </head>
 <body>
@@ -141,6 +168,12 @@ export function syncReportToHTML(report) {
 
     ${report.status === 'no-pending' ? `
     <div class="card"><h2>Pending</h2><ul><li>(none — already up to date)</li></ul></div>` : ''}
+
+    ${diff ? `
+    <div class="card">
+      <h2>Schema Changes</h2>
+      ${diffHTML}
+    </div>` : ''}
 
     ${report.schema ? `
     <div class="card">

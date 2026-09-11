@@ -10,6 +10,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { buildSyncReport, syncReportToHTML, saveSyncReport } from '../src/core/reporter.js';
+import { diffSchemaSnapshots } from '../src/core/schema-diff.js';
 
 describe('buildSyncReport', () => {
   it('fills in defaults for omitted optional fields', () => {
@@ -98,6 +99,43 @@ describe('syncReportToHTML', () => {
     const html = syncReportToHTML(report);
     expect(html).toContain('NO PENDING');
     expect(html).toContain('already up to date');
+  });
+
+  it('renders an added table, a removed table, and a changed column in the diff section', () => {
+    const before = [
+      { table: 'legacy', engine: 'InnoDB', rows: 0, columns: [] },
+      { table: 'users', engine: 'InnoDB', rows: 5, columns: [{ name: 'email', type: 'varchar(255)', nullable: false, key: '' }] }
+    ];
+    const after = [
+      { table: 'users', engine: 'InnoDB', rows: 5, columns: [{ name: 'email', type: 'varchar(320)', nullable: false, key: '' }] },
+      { table: 'orders', engine: 'InnoDB', rows: 0, columns: [] }
+    ];
+    const report = buildSyncReport({
+      dbType: 'mariadb', status: 'applied', applied: ['x.sql'], durationMs: 1,
+      schema: after, schemaDiff: diffSchemaSnapshots(before, after)
+    });
+    const html = syncReportToHTML(report);
+    expect(html).toContain('Schema Changes');
+    expect(html).toContain('orders');   // added
+    expect(html).toContain('legacy');   // removed
+    expect(html).toContain('varchar(255)');
+    expect(html).toContain('varchar(320)');
+  });
+
+  it('renders "(schema unchanged)" when the diff is empty', () => {
+    const same = [{ table: 'users', engine: 'InnoDB', rows: 0, columns: [{ name: 'id', type: 'bigint' }] }];
+    const report = buildSyncReport({
+      dbType: 'mariadb', status: 'applied', durationMs: 1,
+      schema: same, schemaDiff: diffSchemaSnapshots(same, structuredClone(same))
+    });
+    const html = syncReportToHTML(report);
+    expect(html).toContain('schema unchanged');
+  });
+
+  it('omits the Schema Changes card entirely when no diff was computed (e.g. adapter has no getSchemaSnapshot)', () => {
+    const report = buildSyncReport({ dbType: 'mariadb', status: 'applied', durationMs: 1 });
+    const html = syncReportToHTML(report);
+    expect(html).not.toContain('Schema Changes');
   });
 });
 
