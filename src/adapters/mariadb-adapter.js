@@ -241,13 +241,23 @@ export class MariaDBAdapter extends BaseAdapter {
       return this.connection.query(sql);
     }
 
-    const lockWaitTimeoutSec = cfg.lockWaitTimeoutSec ?? 5;
-    const innodbLockWaitTimeoutSec = cfg.innodbLockWaitTimeoutSec ?? 5;
+    const requirePositiveInt = (value, name) => {
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new Error(`ddlSafety.lockGuard.${name} must be a positive integer, got: ${value}`);
+      }
+      return value;
+    };
+    const lockWaitTimeoutSec = requirePositiveInt(cfg.lockWaitTimeoutSec ?? 5, 'lockWaitTimeoutSec');
+    const innodbLockWaitTimeoutSec = requirePositiveInt(cfg.innodbLockWaitTimeoutSec ?? 5, 'innodbLockWaitTimeoutSec');
     const maxRetries = cfg.maxRetries ?? 3;
     const retryDelayMs = cfg.retryDelayMs ?? 2000;
 
-    await this.connection.execute('SET SESSION lock_wait_timeout = ?', [lockWaitTimeoutSec]);
-    await this.connection.execute('SET SESSION innodb_lock_wait_timeout = ?', [innodbLockWaitTimeoutSec]);
+    // MariaDB's SET statement doesn't support bound parameters over the
+    // prepared-statement (binary) protocol — connection.execute() fails with
+    // "Incorrect argument type to variable". Use query() (text protocol) with
+    // a value we've already validated as a positive integer.
+    await this.connection.query(`SET SESSION lock_wait_timeout = ${lockWaitTimeoutSec}`);
+    await this.connection.query(`SET SESSION innodb_lock_wait_timeout = ${innodbLockWaitTimeoutSec}`);
 
     let attempt = 0;
     for (;;) {
@@ -1275,6 +1285,28 @@ export class MariaDBAdapter extends BaseAdapter {
         (match, ident) => `\`${ident}\``
       );
 
+    // ALTER TABLE ... ADD [CONSTRAINT name] FOREIGN KEY — node-sql-parser only
+    // supports foreign keys declared inline inside CREATE TABLE; the ALTER-TABLE
+    // form (used to add/re-add a constraint after the table already exists) hits
+    // its ALTER grammar and fails to parse even though it's valid MariaDB SQL.
+    const hasAlterAddForeignKey = (sql) =>
+      /\bALTER\s+TABLE\b[\s\S]*?\bADD\b(?:\s+CONSTRAINT\s+[`\w]+)?\s+FOREIGN\s+KEY\b/i.test(sql);
+
+    // Known column names node-sql-parser's MariaDB grammar misparses as reserved
+    // words outside of a CREATE TABLE column-type context — e.g. in an INSERT
+    // column list. Backtick-quote them there too so the parser treats them as
+    // plain identifiers.
+    const INSERT_COLUMN_RESERVED_WORDS = ['status', 'type', 'end', 'session', 'global'];
+    const quoteReservedInInsertColumnList = (sql) =>
+      sql.replace(/(\bINSERT\s+INTO\s+[`\w.]+\s*)\(([^)]*)\)/gi, (match, prefix, cols) => {
+        const quotedCols = cols.split(',').map(col => {
+          const trimmed = col.trim();
+          const bare = trimmed.replace(/^`|`$/g, '');
+          return INSERT_COLUMN_RESERVED_WORDS.includes(bare.toLowerCase()) ? `\`${bare}\`` : trimmed;
+        }).join(', ');
+        return `${prefix}(${quotedCols})`;
+      });
+
     const checkSQL = (sql, label, code) => {
       const clean = cleanUnicode(sql);
       if (!clean) return;
@@ -1286,7 +1318,14 @@ export class MariaDBAdapter extends BaseAdapter {
         });
         return;
       }
-      const normalized = quoteReservedIdentifiers(clean);
+      if (hasAlterAddForeignKey(clean)) {
+        warnings.push({
+          type: 'syntax-check-skipped',
+          message: `⚠️ SQL syntax check skipped (${label}): ALTER TABLE ADD FOREIGN KEY detected (not supported by parser)`
+        });
+        return;
+      }
+      const normalized = quoteReservedInInsertColumnList(quoteReservedIdentifiers(clean));
       try {
         const parser = new SQLParser();
         parser.astify(normalized, { database: 'MariaDB' });

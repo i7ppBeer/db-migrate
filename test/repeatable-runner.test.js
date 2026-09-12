@@ -4,9 +4,15 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fsNative from 'fs/promises';
+import * as os from 'os';
+import * as path from 'path';
 import { RepeatableRunner } from '../src/core/repeatable-runner.js';
 
-const SECRET_FILE = '/tmp/secret-test-runner';
+// Test-only path — the real runner always writes to the hardcoded '/tmp/secret'
+// (a documented contract, see docs/DCL-PASSWORD.md), but TestableRepeatableRunner
+// below overrides saveGeneratedPasswords() to write here instead, so this only
+// needs to be a writable scratch path and not match production's path.
+const SECRET_FILE = path.join(os.tmpdir(), 'secret-test-runner');
 
 async function readSecretFile() {
   try { return await fsNative.readFile(SECRET_FILE, 'utf-8'); } catch { return null; }

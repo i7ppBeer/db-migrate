@@ -2048,44 +2048,55 @@ describe('MariaDBAdapter — executeWithLockGuard', () => {
   });
 
   it('sets SESSION lock_wait_timeout and innodb_lock_wait_timeout before executing', async () => {
-    mockConnection.query.mockResolvedValueOnce([[]]);
+    mockConnection.query.mockResolvedValue([[]]);
     await guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
 
-    expect(mockConnection.execute).toHaveBeenCalledWith('SET SESSION lock_wait_timeout = ?', [5]);
-    expect(mockConnection.execute).toHaveBeenCalledWith('SET SESSION innodb_lock_wait_timeout = ?', [5]);
+    // Sent via query() (text protocol), not execute() — MariaDB's prepared-statement
+    // protocol rejects a bound parameter on a SET session-variable statement.
+    expect(mockConnection.query).toHaveBeenCalledWith('SET SESSION lock_wait_timeout = 5');
+    expect(mockConnection.query).toHaveBeenCalledWith('SET SESSION innodb_lock_wait_timeout = 5');
+    expect(mockConnection.execute).not.toHaveBeenCalled();
   });
 
   it('retries on ER_LOCK_WAIT_TIMEOUT (errno 1205) and succeeds once the lock frees up', async () => {
     mockConnection.query
+      .mockResolvedValueOnce([[]]) // SET lock_wait_timeout
+      .mockResolvedValueOnce([[]]) // SET innodb_lock_wait_timeout
       .mockRejectedValueOnce(lockWaitError())
       .mockResolvedValueOnce([[{ ok: 1 }]]);
 
     const result = await guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
 
-    expect(mockConnection.query).toHaveBeenCalledTimes(2);
+    expect(mockConnection.query).toHaveBeenCalledTimes(4); // 2 SET + 1 failed attempt + 1 successful attempt
     expect(result).toEqual([[{ ok: 1 }]]);
   });
 
   it('retries exactly maxRetries times then propagates the original error', async () => {
-    mockConnection.query.mockRejectedValue(lockWaitError());
+    mockConnection.query
+      .mockResolvedValueOnce([[]]) // SET lock_wait_timeout
+      .mockResolvedValueOnce([[]]) // SET innodb_lock_wait_timeout
+      .mockRejectedValue(lockWaitError());
 
     await expect(
       guardAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT')
     ).rejects.toMatchObject({ errno: 1205 });
 
-    expect(mockConnection.query).toHaveBeenCalledTimes(3); // maxRetries = 3
+    expect(mockConnection.query).toHaveBeenCalledTimes(2 + 3); // 2 SET + maxRetries(3) attempts
   });
 
   it('does not retry a non-lock-wait error — fails on first attempt', async () => {
     const syntaxError = new Error('You have an error in your SQL syntax');
     syntaxError.errno = 1064;
-    mockConnection.query.mockRejectedValue(syntaxError);
+    mockConnection.query
+      .mockResolvedValueOnce([[]]) // SET lock_wait_timeout
+      .mockResolvedValueOnce([[]]) // SET innodb_lock_wait_timeout
+      .mockRejectedValue(syntaxError);
 
     await expect(
       guardAdapter.executeWithLockGuard('ALTER TABLE orders BROKEN SQL')
     ).rejects.toMatchObject({ errno: 1064 });
 
-    expect(mockConnection.query).toHaveBeenCalledTimes(1);
+    expect(mockConnection.query).toHaveBeenCalledTimes(3); // 2 SET + 1 failed attempt
   });
 
   it('ddlSafety.lockGuard.enabled: false bypasses SET SESSION and retry entirely', async () => {
@@ -2104,11 +2115,11 @@ describe('MariaDBAdapter — executeWithLockGuard', () => {
       mariadb: { host: 'localhost', port: 3306, user: 'root', password: 'x', database: 'test' }
     });
     bareAdapter.connection = mockConnection;
-    mockConnection.query.mockResolvedValueOnce([[]]);
+    mockConnection.query.mockResolvedValue([[]]);
 
     await bareAdapter.executeWithLockGuard('ALTER TABLE orders ADD COLUMN foo INT');
 
-    expect(mockConnection.execute).toHaveBeenCalledWith('SET SESSION lock_wait_timeout = ?', [5]);
+    expect(mockConnection.query).toHaveBeenCalledWith('SET SESSION lock_wait_timeout = 5');
   });
 });
 

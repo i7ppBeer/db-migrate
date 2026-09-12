@@ -1808,8 +1808,16 @@ program
                 scriptName: file.fileName
               });
 
+              // @expect-fail files are intentionally non-idempotent fixtures —
+              // NOT IDEMPOTENT is the correct, expected outcome there, so flip
+              // the reported pass/fail rather than treating it as a real failure.
+              const expectFail = file.annotations?.expectFail === true;
+              const reportSuccess = expectFail ? !idempotencyResult.success : idempotencyResult.success;
+
               if (idempotencyResult.success) {
                 console.log(chalk.green(`      ✅ IDEMPOTENT`));
+              } else if (expectFail) {
+                console.log(chalk.green(`      ✅ NOT IDEMPOTENT (expected): ${idempotencyResult.error}`));
               } else {
                 console.log(chalk.red(`      ❌ NOT IDEMPOTENT: ${idempotencyResult.error}`));
               }
@@ -1818,9 +1826,13 @@ program
                 database: `${label} [${file.fileName}]`,
                 dbType,
                 testType: 'dcl-idempotency',
-                success: idempotencyResult.success,
+                success: reportSuccess,
                 duration: Date.now() - fileStart,
-                error: idempotencyResult.success ? null : idempotencyResult.error
+                error: reportSuccess
+                  ? null
+                  : (idempotencyResult.success
+                      ? 'Expected this migration to fail idempotency check, but it passed'
+                      : idempotencyResult.error)
               });
             }
 
@@ -1829,29 +1841,40 @@ program
             // DDL: Validate + Up-Down-Up Test
             // ═══════════════════════════════════════════════════════
 
+            // expectFailure fixtures are intentionally broken/dangerous migrations
+            // used to test that validate/execution correctly reject them — failing
+            // there is the correct, expected outcome, so flip the reported pass/fail.
+            const expectFailure = config.expectFailure === true;
+
             // Run validation
             console.log(chalk.blue(`\n[VALIDATE] ${label} (${dbType})...`));
             const validateStart = Date.now();
             const validateResult = await adapter.validate();
+            const validateReportSuccess = expectFailure ? !validateResult.valid : validateResult.valid;
             reporter.addResult({
               database: label,
               dbType,
               testType: 'validate',
-              success: validateResult.valid,
+              success: validateReportSuccess,
               duration: Date.now() - validateStart,
-              error: validateResult.valid ? null : 'Validation failed'
+              error: validateReportSuccess
+                ? null
+                : (validateResult.valid ? 'Expected validation to fail, but it passed' : 'Validation failed')
             });
 
             // Run Up-Down-Up test
             console.log(chalk.blue(`\n[TEST] ${label} (${dbType}) Up-Down-Up...`));
             const testResult = await adapter.runUpDownUpTest();
+            const upDownReportSuccess = expectFailure ? !testResult.success : testResult.success;
             reporter.addResult({
               database: label,
               dbType,
               testType: 'up-down-up',
-              success: testResult.success,
+              success: upDownReportSuccess,
               duration: testResult.duration,
-              error: testResult.error || null
+              error: upDownReportSuccess
+                ? null
+                : (testResult.success ? 'Expected up-down-up to fail, but it passed' : testResult.error)
             });
 
             // ═══════════════════════════════════════════════════════

@@ -109,7 +109,8 @@ export class RepeatableRunner {
       allowForbidden: false,
       allowedCodes: [],
       description: '',
-      type: 'unknown'
+      type: 'unknown',
+      expectFail: false
     };
 
     const isSQL = fileName.endsWith('.sql');
@@ -155,6 +156,14 @@ export class RepeatableRunner {
       const typeMatch = trimmedLine.match(new RegExp(`${commentPrefix}\\s*@type\\s*:\\s*(.+)`, 'i'));
       if (typeMatch) {
         annotations.type = typeMatch[1].trim().toLowerCase();
+      }
+
+      // Parse @expect-fail — test-only marker: this migration is intentionally
+      // non-idempotent, so test-all should report NOT IDEMPOTENT as a pass.
+      const expectFailMatch = trimmedLine.match(new RegExp(`${commentPrefix}\\s*@expect-fail\\s*:\\s*(.+)`, 'i'));
+      if (expectFailMatch) {
+        const value = expectFailMatch[1].trim().toLowerCase();
+        annotations.expectFail = ['true', 'yes', '1'].includes(value);
       }
     }
 
