@@ -223,7 +223,7 @@ DROP TABLE users;
       ddlAdapter.config.migrationsDir = '/tmp';
 
       // Will throw because /tmp has no .sql files, but execute WAS called
-      try { await ddlAdapter.status(); } catch {}
+      try { await ddlAdapter.status(); } catch { /* expected: no .sql files under /tmp */ }
       expect(executeSpy).toHaveBeenCalled();
     });
 

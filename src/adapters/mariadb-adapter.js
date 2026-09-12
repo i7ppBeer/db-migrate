@@ -1268,6 +1268,7 @@ export class MariaDBAdapter extends BaseAdapter {
 
     // Helper: clean unicode noise from SQL before parsing
     const cleanUnicode = (sql) => sql
+      // eslint-disable-next-line no-misleading-character-class -- distinct zero-width codepoints to strip, not a joined sequence
       .replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '')
       .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
       .trim();
@@ -1772,6 +1773,7 @@ export class MariaDBAdapter extends BaseAdapter {
     if (!sql) return [];
 
     // Fix B: Strip zero-width characters (Unicode confusion bypass prevention)
+    // eslint-disable-next-line no-misleading-character-class -- distinct zero-width codepoints to strip, not a joined sequence
     sql = sql.replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '');
     // Fix C: Convert fullwidth characters to halfwidth (align with normalizeSQL)
     sql = sql.replace(/[\uFF01-\uFF5E]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
@@ -1843,7 +1845,7 @@ export class MariaDBAdapter extends BaseAdapter {
       const upSQL = this.extractSection(content, 'Up') || content;
 
       const createdNow = this.extractCreatedTables(upSQL).map(t => t.toLowerCase());
-      let droppedNow = this.extractDroppedTables(upSQL).map(t => t.toLowerCase());
+      const droppedNow = this.extractDroppedTables(upSQL).map(t => t.toLowerCase());
       const fkRefs = this.extractFKReferences(upSQL);
 
       // RENAME TABLE old TO new — treat old name as dropped for cross-file tracking  (Bug 3)
@@ -1922,6 +1924,7 @@ export class MariaDBAdapter extends BaseAdapter {
     return sql
       // Remove zero-width characters (Unicode confusion attack prevention)
       // Step 1: Remove zero-width characters (Unicode confusion attack prevention)
+      // eslint-disable-next-line no-misleading-character-class -- distinct zero-width codepoints to strip, not a joined sequence
       .replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '')
       // Step 2: Convert fullwidth characters to halfwidth (Unicode normalization)
       .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))

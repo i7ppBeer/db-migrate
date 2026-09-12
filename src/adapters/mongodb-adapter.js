@@ -1182,6 +1182,7 @@ export async function down(db, client) {
     if (!js) return '';
     return js
       // Remove zero-width characters (Unicode confusion attack prevention)
+      // eslint-disable-next-line no-misleading-character-class -- distinct zero-width codepoints to strip, not a joined sequence
       .replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '')
       // Convert fullwidth characters to halfwidth (Unicode normalization)
       .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))

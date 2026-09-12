@@ -336,7 +336,7 @@ export class RepeatableRunner {
           if (!isCreate && !isAlter) continue;
           if (!stmt.includes(PLACEHOLDER)) continue;
           // SQL pattern: 'username'@host  or  `username`@host
-          const m = stmt.match(/['"\`]([^'"\`@\s]+)['"\`]\s*@/);
+          const m = stmt.match(/['"`]([^'"`@\s]+)['"`]\s*@/);
           if (m) usernames.push({ name: m[1], isReset: isAlter && !isCreate });
         }
       }
@@ -516,7 +516,7 @@ export class RepeatableRunner {
       // so alreadyExists would always be true and incorrectly suppress /tmp/secret writes.
       if (!/\bCREATE\s+USER\b/i.test(stmt)) continue;
       if (!stmt.includes(PLACEHOLDER)) continue;
-      const m = stmt.match(/['"\`]([^'"\`@\s]+)['"\`]\s*@/);
+      const m = stmt.match(/['"`]([^'"`@\s]+)['"`]\s*@/);
       if (m) usernames.push(m[1]);
     }
     if (usernames.length === 0) return false;
