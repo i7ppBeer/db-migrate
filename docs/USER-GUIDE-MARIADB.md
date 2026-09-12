@@ -1,54 +1,54 @@
-# MariaDB/MySQL DDL/DCL 編寫指南
+# MariaDB/MySQL DDL/DCL Writing Guide
 
-> ⚠️ **未完整核實（2026-09-11 稽核）**：本文件跟已確認過期的 `MIGRATION-MANAGEMENT-GUIDE.md` 同批次撰寫，關鍵字抽查沒發現壞的 flag/code，但沒有逐行對照原始碼——不算「已驗證正確」，只是「沒抽到明顯的錯」。規則細節請以 [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md) 為準。
+> ⚠️ **Not fully verified (audited 2026-09-11)**: This document was written in the same batch as `MIGRATION-MANAGEMENT-GUIDE.md`, which has already been confirmed outdated. Spot-checking keywords turned up no broken flags/code, but it has not been checked line-by-line against the source — this counts as "no obvious errors found," not "verified correct." For rule details, defer to [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md).
 
-> 本指南說明如何為 MariaDB/MySQL 編寫 DDL (資料定義語言) 和 DCL (資料控制語言) Migration 檔案。
-
----
-
-## 📋 目錄
-
-1. [檔案類型說明](#1-檔案類型說明)
-2. [Versioned vs Repeatable 語法對照](#2-versioned-vs-repeatable-語法對照)
-3. [Migration 檔案結構詳解](#3-migration-檔案結構詳解)
-4. [危險指令列表](#4-危險指令列表)
-5. [如何允許危險指令](#5-如何允許危險指令)
-6. [Sanity Check 機制](#6-sanity-check-機制)
-7. [Docker 環境設定與 CLI 使用](#7-docker-環境設定與-cli-使用)
-8. [情境範例教學](#8-情境範例教學)
+> This guide explains how to write DDL (Data Definition Language) and DCL (Data Control Language) migration files for MariaDB/MySQL.
 
 ---
 
-## 1. 檔案類型說明
+## 📋 Table of Contents
+
+1. [File Types](#1-file-types)
+2. [Versioned vs Repeatable Syntax Comparison](#2-versioned-vs-repeatable-syntax-comparison)
+3. [Migration File Structure in Detail](#3-file-structure-in-detail)
+4. [Dangerous Command List](#4-dangerous-command-list)
+5. [How to Allow Dangerous Commands](#5-how-to-allow-dangerous-commands)
+6. [Sanity Check Mechanism](#6-sanity-check-mechanism)
+7. [Docker Environment Setup and CLI Usage](#7-docker-environment-setup-and-cli-usage)
+8. [Scenario Walkthroughs](#8-scenario-walkthroughs)
+
+---
+
+## 1. File Types
 
 ### DDL (Versioned Migration)
-- **用途**：Schema 變更（建表、改欄位、加索引）
-- **檔名格式**：`YYYYMMDDHHMMSS-description.sql`
-- **特性**：每個檔案只執行一次，有版本順序
-- **範例**：`20250101000001-create-users.sql`
+- **Purpose**: Schema changes (creating tables, altering columns, adding indexes)
+- **Filename format**: `YYYYMMDDHHMMSS-description.sql`
+- **Characteristics**: Each file runs exactly once, in version order
+- **Example**: `20250101000001-create-users.sql`
 
 ### DCL (Repeatable Migration)
-- **用途**：權限管理（使用者、角色、授權）
-- **檔名格式**：`R__NNN_description.sql`
-- **特性**：checksum 變更時重新執行，必須是冪等操作
-- **範例**：`R__001_create_app_user.sql`
+- **Purpose**: Permission management (users, roles, grants)
+- **Filename format**: `R__NNN_description.sql`
+- **Characteristics**: Re-runs whenever its checksum changes; must be idempotent
+- **Example**: `R__001_create_app_user.sql`
 
 ---
 
-## 2. Versioned vs Repeatable 語法對照
+## 2. Versioned vs Repeatable Syntax Comparison
 
-### 📁 Versioned (DDL) - 一次性執行
+### 📁 Versioned (DDL) - Runs Once
 
-| 操作類型 | 語法範例 | 說明 |
+| Operation Type | Syntax Example | Notes |
 |---------|---------|------|
-| 建立資料表 | `CREATE TABLE users (...)` | ✅ 標準用法 |
-| 修改資料表 | `ALTER TABLE users ADD COLUMN email VARCHAR(255)` | ✅ 標準用法 |
-| 建立索引 | `CREATE INDEX idx_email ON users(email)` | ✅ 標準用法 |
-| 刪除資料表 | `DROP TABLE IF EXISTS temp_table` | ⚠️ 需在 DOWN 區塊 |
-| 新增外鍵 | `ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users(id)` | ✅ 標準用法 |
-| 修改欄位 | `ALTER TABLE users MODIFY COLUMN name VARCHAR(500)` | ⚠️ 可能影響資料 |
+| Create a table | `CREATE TABLE users (...)` | ✅ Standard usage |
+| Alter a table | `ALTER TABLE users ADD COLUMN email VARCHAR(255)` | ✅ Standard usage |
+| Create an index | `CREATE INDEX idx_email ON users(email)` | ✅ Standard usage |
+| Drop a table | `DROP TABLE IF EXISTS temp_table` | ⚠️ Belongs in the DOWN block |
+| Add a foreign key | `ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users(id)` | ✅ Standard usage |
+| Modify a column | `ALTER TABLE users MODIFY COLUMN name VARCHAR(500)` | ⚠️ May affect existing data |
 
-**檔案結構：**
+**File structure:**
 ```sql
 -- +migrate Up
 CREATE TABLE users (
@@ -61,19 +61,19 @@ CREATE TABLE users (
 DROP TABLE IF EXISTS users;
 ```
 
-### 📁 Repeatable (DCL) - 可重複執行
+### 📁 Repeatable (DCL) - Re-Runnable
 
-| 操作類型 | 語法範例 | 說明 |
+| Operation Type | Syntax Example | Notes |
 |---------|---------|------|
-| 建立使用者 | `CREATE USER IF NOT EXISTS 'app'@'%'` | ✅ 必須冪等 |
-| 刪除使用者 | `DROP USER IF EXISTS 'old_user'@'%'` | ✅ 必須冪等 |
-| 授權 | `GRANT SELECT ON db.* TO 'app'@'%'` | ✅ 天生冪等 |
-| 撤銷權限 | `REVOKE ALL ON db.* FROM 'app'@'%'` | ✅ 天生冪等 |
-| 刷新權限 | `FLUSH PRIVILEGES` | ✅ 天生冪等 |
-| Stored Procedure | `DROP PROCEDURE IF EXISTS ... CREATE PROCEDURE ...` | ✅ 需用 DELIMITER |
-| Function | `DROP FUNCTION IF EXISTS ... CREATE FUNCTION ...` | ✅ 需用 DELIMITER |
+| Create a user | `CREATE USER IF NOT EXISTS 'app'@'%'` | ✅ Must be idempotent |
+| Drop a user | `DROP USER IF EXISTS 'old_user'@'%'` | ✅ Must be idempotent |
+| Grant | `GRANT SELECT ON db.* TO 'app'@'%'` | ✅ Naturally idempotent |
+| Revoke | `REVOKE ALL ON db.* FROM 'app'@'%'` | ✅ Naturally idempotent |
+| Flush privileges | `FLUSH PRIVILEGES` | ✅ Naturally idempotent |
+| Stored procedure | `DROP PROCEDURE IF EXISTS ... CREATE PROCEDURE ...` | ✅ Requires DELIMITER |
+| Function | `DROP FUNCTION IF EXISTS ... CREATE FUNCTION ...` | ✅ Requires DELIMITER |
 
-**檔案結構：**
+**File structure:**
 ```sql
 -- @description: Application users management
 -- @type: dcl
@@ -86,34 +86,34 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 3. 檔案結構詳解
+## 3. File Structure in Detail
 
-### 3.1 完整檔案結構圖
+### 3.1 Full File Structure Diagram
 
-#### MariaDB Migration 檔案結構
+#### MariaDB Migration File Structure
 
-**📄 ANNOTATION 區塊** *(可選)*
-> 檔案開頭的 metadata 設定
+**📄 ANNOTATION block** *(optional)*
+> Metadata settings at the top of the file
 
 ```sql
--- @description: 說明這個 migration 的用途
+-- @description: Describes what this migration does
 -- @allow-dangerous: true
 ```
 
 ---
 
-**🔵 UP 區塊** *(必要)*
-> 標記：`-- +migrate Up`
+**🔵 UP block** *(required)*
+> Marker: `-- +migrate Up`
 
-包含以下子區塊：
+Contains the following sub-blocks:
 
-| 區塊 | 標記 | 必要性 | 說明 |
+| Block | Marker | Required? | Description |
 |------|------|--------|------|
-| 🟡 **PreCheck** | `-- +sanity PreCheck` ... `-- -sanity PreCheck` | 可選 | 執行前的狀態檢查 |
-| 🟢 **主要 SQL** | 無標記 | 必要 | 實際要執行的 DDL 語句 |
-| 🟡 **PostCheck** | `-- +sanity PostCheck` ... `-- -sanity PostCheck` | 可選 | 執行後的結果驗證 |
+| 🟡 **PreCheck** | `-- +sanity PreCheck` ... `-- -sanity PreCheck` | Optional | Checks state before running |
+| 🟢 **Main SQL** | No marker | Required | The actual DDL statements to run |
+| 🟡 **PostCheck** | `-- +sanity PostCheck` ... `-- -sanity PostCheck` | Optional | Validates the result after running |
 
-**PreCheck 範例：**
+**PreCheck example:**
 ```sql
 -- +sanity PreCheck
 -- EXPECT_NO_ROWS: SELECT 1 FROM ... WHERE ...
@@ -121,13 +121,13 @@ FLUSH PRIVILEGES;
 -- -sanity PreCheck
 ```
 
-**主要 SQL 範例：**
+**Main SQL example:**
 ```sql
 ALTER TABLE users ADD COLUMN phone VARCHAR(20);
 CREATE INDEX idx_phone ON users(phone);
 ```
 
-**PostCheck 範例：**
+**PostCheck example:**
 ```sql
 -- +sanity PostCheck
 -- EXPECT_ROWS: SELECT 1 FROM information_schema...
@@ -136,8 +136,8 @@ CREATE INDEX idx_phone ON users(phone);
 
 ---
 
-**🔴 DOWN 區塊** *(建議有)*
-> 標記：`-- +migrate Down`
+**🔴 DOWN block** *(recommended)*
+> Marker: `-- +migrate Down`
 
 ```sql
 DROP INDEX idx_phone ON users;
@@ -146,44 +146,44 @@ ALTER TABLE users DROP COLUMN phone;
 
 ---
 
-#### 完整範例結構
+#### Complete Example Structure
 
 ```sql
--- @description: ...        -- ANNOTATION 區塊
+-- @description: ...        -- ANNOTATION block
 -- @allow-dangerous: true
 
--- +migrate Up              -- UP 區塊開始
+-- +migrate Up              -- Start of UP block
 
--- +sanity PreCheck         -- PreCheck 開始
+-- +sanity PreCheck         -- Start of PreCheck
 -- EXPECT_NO_ROWS: ...
--- -sanity PreCheck         -- PreCheck 結束
+-- -sanity PreCheck         -- End of PreCheck
 
-ALTER TABLE ...             -- 主要 SQL
+ALTER TABLE ...             -- Main SQL
 
--- +sanity PostCheck        -- PostCheck 開始
+-- +sanity PostCheck        -- Start of PostCheck
 -- EXPECT_ROWS: ...
--- -sanity PostCheck        -- PostCheck 結束
+-- -sanity PostCheck        -- End of PostCheck
 
--- +migrate Down            -- DOWN 區塊開始
+-- +migrate Down            -- Start of DOWN block
 DROP TABLE ...
 ```
 
-### 3.2 各區塊說明
+### 3.2 Block Reference
 
-| 區塊 | 標記 | 必要性 | 用途 |
+| Block | Marker | Required? | Purpose |
 |------|------|--------|------|
-| **Up** | `-- +migrate Up` | ✅ 必要 | 定義「正向遷移」要執行的 SQL |
-| **Down** | `-- +migrate Down` | ⚠️ 建議 | 定義「回滾」要執行的 SQL |
-| **PreCheck** | `-- +sanity PreCheck` | ❌ 可選 | 執行前的狀態檢查 |
-| **PostCheck** | `-- +sanity PostCheck` | ❌ 可選 | 執行後的結果驗證 |
+| **Up** | `-- +migrate Up` | ✅ Required | Defines the SQL run for the "forward migration" |
+| **Down** | `-- +migrate Down` | ⚠️ Recommended | Defines the SQL run for the "rollback" |
+| **PreCheck** | `-- +sanity PreCheck` | ❌ Optional | Checks state before running |
+| **PostCheck** | `-- +sanity PostCheck` | ❌ Optional | Validates the result after running |
 
-### 3.3 執行流程
+### 3.3 Execution Flow
 
-![MariaDB 執行流程](images/mariadb-execution-flow.drawio.svg)
+![MariaDB execution flow](images/mariadb-execution-flow.drawio.svg)
 
-> 💡 **提示**：此圖表可使用 VS Code 的 [Draw.io Integration](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio) 擴充套件直接編輯。
+> 💡 **Tip**: This diagram can be edited directly with VS Code's [Draw.io Integration](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio) extension.
 
-### 3.4 基本範例 (只有 Up/Down)
+### 3.4 Basic Example (Up/Down Only)
 
 ```sql
 -- +migrate Up
@@ -201,31 +201,31 @@ CREATE TABLE users (
 DROP TABLE IF EXISTS users;
 ```
 
-### 3.5 完整範例 (含 PreCheck/PostCheck)
+### 3.5 Complete Example (With PreCheck/PostCheck)
 
 ```sql
--- @description: 新增 phone 欄位
+-- @description: Add a phone column
 -- @allow-dangerous: true
 
 -- +migrate Up
 
 -- +sanity PreCheck
--- 確認 users 表存在
+-- Confirm the users table exists
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'
--- 確認 phone 欄位不存在（避免重複執行）
+-- Confirm the phone column does not already exist (avoid re-running)
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'phone'
 -- -sanity PreCheck
 
--- 主要 SQL：新增欄位
+-- Main SQL: add the column
 ALTER TABLE users ADD COLUMN phone VARCHAR(20) DEFAULT NULL AFTER email;
 
--- 建立索引
+-- Create an index
 CREATE INDEX idx_users_phone ON users(phone);
 
 -- +sanity PostCheck
--- 確認 phone 欄位已建立
+-- Confirm the phone column was created
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'phone'
--- 確認索引已建立
+-- Confirm the index was created
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND INDEX_NAME = 'idx_users_phone'
 -- -sanity PostCheck
 
@@ -234,10 +234,10 @@ DROP INDEX idx_users_phone ON users;
 ALTER TABLE users DROP COLUMN phone;
 ```
 
-### 3.6 Stored Procedure 範例 (使用 DELIMITER)
+### 3.6 Stored Procedure Example (Using DELIMITER)
 
 ```sql
--- @description: 建立訂單統計 Stored Procedure
+-- @description: Create an order-statistics stored procedure
 -- @type: procedure
 
 -- +migrate Up
@@ -272,103 +272,103 @@ DROP FUNCTION IF EXISTS fn_calculate_discount;
 DROP PROCEDURE IF EXISTS sp_get_user_order_stats;
 ```
 
-### 3.7 DCL (Repeatable) 範例
+### 3.7 DCL (Repeatable) Example
 
 ```sql
--- @description: 建立應用程式使用者
+-- @description: Create application users
 -- @type: dcl
 -- @allow-dangerous: true
 
--- 注意：DCL 檔案不需要 +migrate Up/Down 標記
--- 因為 DCL 是 Repeatable，每次 checksum 改變都會重新執行
+-- Note: DCL files do not need +migrate Up/Down markers
+-- because DCL is Repeatable and re-runs whenever the checksum changes
 
--- 建立應用程式帳號
+-- Create the application account
 CREATE USER IF NOT EXISTS 'app_user'@'%' IDENTIFIED BY 'secure_password';
 
--- 授予權限
+-- Grant privileges
 GRANT SELECT, INSERT, UPDATE, DELETE ON mydb.* TO 'app_user'@'%';
 GRANT EXECUTE ON mydb.* TO 'app_user'@'%';
 
--- 建立唯讀帳號
+-- Create a read-only account
 CREATE USER IF NOT EXISTS 'readonly_user'@'%' IDENTIFIED BY 'readonly_password';
 GRANT SELECT ON mydb.* TO 'readonly_user'@'%';
 
--- 刷新權限
+-- Flush privileges
 FLUSH PRIVILEGES;
 ```
 
-### 3.8 關鍵規則總結
+### 3.8 Key Rules Summary
 
-| 規則 | 說明 |
+| Rule | Description |
 |------|------|
-| `-- +migrate Up` | **必須**在 DDL 檔案中，標記正向遷移區塊開始 |
-| `-- +migrate Down` | **建議**有，標記回滾區塊開始 |
-| `-- +sanity PreCheck` / `-- -sanity PreCheck` | **可選**，成對出現，包裹前置檢查 |
-| `-- +sanity PostCheck` / `-- -sanity PostCheck` | **可選**，成對出現，包裹後置檢查 |
-| `EXPECT_ROWS:` | 期望查詢**有**返回資料，否則檢查失敗 |
-| `EXPECT_NO_ROWS:` | 期望查詢**無**返回資料，否則檢查失敗 |
-| `DELIMITER` | Stored Procedure/Function **必須**使用 |
-| DCL 檔案 | **不需要** `+migrate Up/Down`，整個檔案就是要執行的內容 |
+| `-- +migrate Up` | **Required** in DDL files; marks the start of the forward migration block |
+| `-- +migrate Down` | **Recommended**; marks the start of the rollback block |
+| `-- +sanity PreCheck` / `-- -sanity PreCheck` | **Optional**, must appear in pairs, wraps the pre-check |
+| `-- +sanity PostCheck` / `-- -sanity PostCheck` | **Optional**, must appear in pairs, wraps the post-check |
+| `EXPECT_ROWS:` | Expects the query to **return** rows, otherwise the check fails |
+| `EXPECT_NO_ROWS:` | Expects the query to return **no** rows, otherwise the check fails |
+| `DELIMITER` | **Required** for stored procedures/functions |
+| DCL files | **Do not need** `+migrate Up/Down` — the entire file is what gets executed |
 
 ---
 
-## 4. 危險指令列表
+## 4. Dangerous Command List
 
-### 🔴 絕對禁止 (Forbidden) - 需 `--allow-forbidden`
+### 🔴 Strictly Forbidden (Forbidden) - Requires `--allow-forbidden`
 
-| 代碼 | 語法 | 風險說明 |
+| Code | Syntax | Risk |
 |-----|------|---------|
-| `DROP_DATABASE` | `DROP DATABASE xxx` | 刪除整個資料庫 |
-| `DROP_SCHEMA` | `DROP SCHEMA xxx` | 刪除整個 Schema |
-| `CREATE_USER` | `CREATE USER 'xxx'@'%'` | 應在 DCL 專案管理 |
-| `DROP_USER` | `DROP USER 'xxx'@'%'` | 應在 DCL 專案管理 |
-| `ALTER_USER` | `ALTER USER 'xxx'@'%'` | 應在 DCL 專案管理 |
-| `SET_PASSWORD` | `SET PASSWORD FOR 'xxx'@'%'` | 應在 DCL 專案管理 |
-| `GRANT` | `GRANT xxx ON xxx TO xxx` | 應在 DCL 專案管理 |
-| `REVOKE` | `REVOKE xxx ON xxx FROM xxx` | 應在 DCL 專案管理 |
-| `FLUSH_PRIVILEGES` | `FLUSH PRIVILEGES` | 應在 DCL 專案管理 |
-| `INTO_OUTFILE` | `SELECT ... INTO OUTFILE` | 資料外洩風險 |
-| `LOAD_DATA` | `LOAD DATA INFILE` | 資料注入風險 |
-| `SHUTDOWN` | `SHUTDOWN` | 關閉資料庫 |
-| `SET_GLOBAL` | `SET GLOBAL xxx` | 變更系統設定 |
-| `RESET_MASTER` | `RESET MASTER` | 破壞複製設定 |
+| `DROP_DATABASE` | `DROP DATABASE xxx` | Deletes an entire database |
+| `DROP_SCHEMA` | `DROP SCHEMA xxx` | Deletes an entire schema |
+| `CREATE_USER` | `CREATE USER 'xxx'@'%'` | Should be managed in the DCL project |
+| `DROP_USER` | `DROP USER 'xxx'@'%'` | Should be managed in the DCL project |
+| `ALTER_USER` | `ALTER USER 'xxx'@'%'` | Should be managed in the DCL project |
+| `SET_PASSWORD` | `SET PASSWORD FOR 'xxx'@'%'` | Should be managed in the DCL project |
+| `GRANT` | `GRANT xxx ON xxx TO xxx` | Should be managed in the DCL project |
+| `REVOKE` | `REVOKE xxx ON xxx FROM xxx` | Should be managed in the DCL project |
+| `FLUSH_PRIVILEGES` | `FLUSH PRIVILEGES` | Should be managed in the DCL project |
+| `INTO_OUTFILE` | `SELECT ... INTO OUTFILE` | Data exfiltration risk |
+| `LOAD_DATA` | `LOAD DATA INFILE` | Data injection risk |
+| `SHUTDOWN` | `SHUTDOWN` | Shuts down the database |
+| `SET_GLOBAL` | `SET GLOBAL xxx` | Changes system settings |
+| `RESET_MASTER` | `RESET MASTER` | Breaks replication configuration |
 
-### 🟠 危險操作 (Dangerous) - 需 `--allow-dangerous` 或 `@allow-dangerous`
+### 🟠 Dangerous Operations (Dangerous) - Requires `--allow-dangerous` or `@allow-dangerous`
 
-| 代碼 | 語法 | 風險說明 | 建議 |
+| Code | Syntax | Risk | Recommendation |
 |-----|------|---------|------|
-| `TRUNCATE_TABLE` | `TRUNCATE TABLE xxx` | 清空全表資料 | 用 DELETE + WHERE |
-| `DELETE_ALL` | `DELETE FROM xxx` (無 WHERE) | 刪除全表資料 | 加上 WHERE 條件 |
-| `UPDATE_ALL` | `UPDATE xxx SET ...` (無 WHERE) | 更新全表資料 | 加上 WHERE 條件 |
-| `DROP_COLUMN` | `ALTER TABLE xxx DROP COLUMN` | 永久刪除欄位 | 先確認無使用 |
-| `DROP_INDEX` | `DROP INDEX xxx` | 影響查詢效能 | 先確認無查詢使用 |
-| `RENAME_TABLE` | `RENAME TABLE xxx` | 破壞應用程式 | 確認所有引用已更新 |
-| `MODIFY_COLUMN` | `MODIFY COLUMN xxx` | 資料轉換失敗 | 先在測試環境驗證 |
-| `LOCK_TABLE` | `LOCK TABLE xxx` | 阻塞所有查詢 | 使用交易或行鎖 |
-| `ALTER_TABLE_MODIFY` | `ALTER TABLE MODIFY/CHANGE COLUMN` | 重建表並長時間鎖表 | 先在測試環境驗證 |
-| `ALTER_TABLE_REBUILD` | `ALTER TABLE CONVERT TO / ENGINE=` | 完整重建表 | 大表用 pt-osc |
-| `INSERT_SELECT` | `INSERT ... SELECT` (無 WHERE / 無 ON DUPLICATE KEY) | 鎖定整張來源表 | 加 WHERE 或分批處理 |
+| `TRUNCATE_TABLE` | `TRUNCATE TABLE xxx` | Wipes the entire table | Use DELETE + WHERE |
+| `DELETE_ALL` | `DELETE FROM xxx` (no WHERE) | Deletes all rows in the table | Add a WHERE condition |
+| `UPDATE_ALL` | `UPDATE xxx SET ...` (no WHERE) | Updates all rows in the table | Add a WHERE condition |
+| `DROP_COLUMN` | `ALTER TABLE xxx DROP COLUMN` | Permanently deletes a column | Confirm it's unused first |
+| `DROP_INDEX` | `DROP INDEX xxx` | Affects query performance | Confirm no queries rely on it first |
+| `RENAME_TABLE` | `RENAME TABLE xxx` | Breaks the application | Confirm all references are updated |
+| `MODIFY_COLUMN` | `MODIFY COLUMN xxx` | Data conversion may fail | Validate in a test environment first |
+| `LOCK_TABLE` | `LOCK TABLE xxx` | Blocks all queries | Use a transaction or row locks |
+| `ALTER_TABLE_MODIFY` | `ALTER TABLE MODIFY/CHANGE COLUMN` | Rebuilds the table and locks it for a long time | Validate in a test environment first |
+| `ALTER_TABLE_REBUILD` | `ALTER TABLE CONVERT TO / ENGINE=` | Fully rebuilds the table | Use pt-osc for large tables |
+| `INSERT_SELECT` | `INSERT ... SELECT` (no WHERE / no ON DUPLICATE KEY) | Locks the entire source table | Add a WHERE clause or batch it |
 
-### 🟡 警告提示 (Warnings) - 不阻擋但提醒
+### 🟡 Advisory Warnings (Warnings) - Does Not Block, But Flags an Issue
 
-| 語法 | 警告說明 |
+| Syntax | Warning |
 |------|---------|
-| `ALTER TABLE ADD COLUMN` | 大表上可能需要較長時間 |
-| `ADD NOT NULL` (無 DEFAULT) | 建議搭配 DEFAULT 值 |
-| `AUTO_INCREMENT=xxx` | 手動設定可能造成 ID 衝突 |
-| `ENGINE=MyISAM` | 不支援交易，建議用 InnoDB |
-| `CHARSET=latin1/utf8` | 建議使用 utf8mb4 |
-| `FLOAT/DOUBLE` | 精度問題，金額建議用 DECIMAL |
-| `ON DELETE CASCADE` | 可能造成連鎖刪除 |
+| `ALTER TABLE ADD COLUMN` | May take a long time on large tables |
+| `ADD NOT NULL` (no DEFAULT) | Should be paired with a DEFAULT value |
+| `AUTO_INCREMENT=xxx` | Setting it manually can cause ID collisions |
+| `ENGINE=MyISAM` | Does not support transactions; use InnoDB instead |
+| `CHARSET=latin1/utf8` | Use utf8mb4 instead |
+| `FLOAT/DOUBLE` | Precision issues; use DECIMAL for monetary values |
+| `ON DELETE CASCADE` | Can trigger cascading deletes |
 
 ---
 
-## 5. 如何允許危險指令
+## 5. How to Allow Dangerous Commands
 
-### 方法一：在檔案中加入 Annotation（推薦）
+### Option 1: Add an Annotation to the File (Recommended)
 
 ```sql
--- @description: 資料清理腳本
+-- @description: Data cleanup script
 -- @type: maintenance
 -- @allow-dangerous: true
 -- @allow: TRUNCATE_TABLE,DELETE_ALL
@@ -377,73 +377,73 @@ TRUNCATE TABLE temp_logs;
 DELETE FROM audit_logs WHERE created_at < DATE_SUB(NOW(), INTERVAL 90 DAY);
 ```
 
-### 方法二：CLI 參數
+### Option 2: CLI Flags
 
 ```bash
-# 允許所有危險操作
+# Allow all dangerous operations
 docker compose run --rm migrate dcl --validate --allow-dangerous -c <config>
 
-# 允許所有禁止操作（需團隊審批）
+# Allow all forbidden operations (requires team approval)
 docker compose run --rm migrate dcl --validate --allow-forbidden -c <config>
 
-# 允許特定操作代碼
+# Allow specific operation codes
 docker compose run --rm migrate validate --allow TRUNCATE_TABLE,DROP_INDEX -c <config>
 ```
 
-### Annotation 完整說明
+### Annotation Reference
 
-| Annotation | 值 | 說明 |
+| Annotation | Value | Description |
 |------------|---|------|
-| `@allow-dangerous` | `true` / `false` | 允許所有危險操作 |
-| `@allow-forbidden` | `true` / `false` | 允許所有禁止操作 |
-| `@allow` | `CODE1,CODE2,...` | 允許特定操作代碼 |
-| `@description` | 文字 | 描述此 migration |
-| `@type` | `procedure` / `maintenance` / `dcl` | 類型標記 |
+| `@allow-dangerous` | `true` / `false` | Allow all dangerous operations |
+| `@allow-forbidden` | `true` / `false` | Allow all forbidden operations |
+| `@allow` | `CODE1,CODE2,...` | Allow specific operation codes |
+| `@description` | text | Describes this migration |
+| `@type` | `procedure` / `maintenance` / `dcl` | Type marker |
 
 ---
 
-## 6. Sanity Check 機制
+## 6. Sanity Check Mechanism
 
-Sanity Check 提供 **Pre-Check（前置檢查）** 和 **Post-Check（後置檢查）** 機制，確保 migration 執行前後的狀態正確，並支援**自動回滾**。
+Sanity checks provide **Pre-Check** and **Post-Check** mechanisms to ensure the state before and after a migration is correct, and support **automatic rollback**.
 
-### 6.1 Sanity Check 語法格式
+### 6.1 Sanity Check Syntax
 
 ```sql
 -- +migrate Up
 
 -- +sanity PreCheck
--- 前置檢查：確認執行條件
--- EXPECT_ROWS: <SQL>      -- 預期有回傳結果
--- EXPECT_NO_ROWS: <SQL>   -- 預期沒有回傳結果
+-- Pre-check: confirm the preconditions
+-- EXPECT_ROWS: <SQL>      -- Expect a result to be returned
+-- EXPECT_NO_ROWS: <SQL>   -- Expect no result to be returned
 -- -sanity PreCheck
 
--- 主要 Migration SQL
+-- Main migration SQL
 ALTER TABLE users ADD COLUMN phone VARCHAR(20);
 
 -- +sanity PostCheck
--- 後置檢查：確認執行結果
--- EXPECT_ROWS: <SQL>      -- 預期有回傳結果
--- EXPECT_NO_ROWS: <SQL>   -- 預期沒有回傳結果
+-- Post-check: confirm the result
+-- EXPECT_ROWS: <SQL>      -- Expect a result to be returned
+-- EXPECT_NO_ROWS: <SQL>   -- Expect no result to be returned
 -- -sanity PostCheck
 
 -- +migrate Down
 ALTER TABLE users DROP COLUMN phone;
 ```
 
-### 6.2 檢查指令說明
+### 6.2 Check Directive Reference
 
-| 指令 | 語法 | 說明 |
+| Directive | Syntax | Description |
 |------|------|------|
-| `EXPECT_ROWS` | `-- EXPECT_ROWS: SELECT ...` | 預期查詢**有**回傳結果，否則失敗 |
-| `EXPECT_NO_ROWS` | `-- EXPECT_NO_ROWS: SELECT ...` | 預期查詢**沒有**回傳結果，否則失敗 |
+| `EXPECT_ROWS` | `-- EXPECT_ROWS: SELECT ...` | Expects the query to return results, otherwise it fails |
+| `EXPECT_NO_ROWS` | `-- EXPECT_NO_ROWS: SELECT ...` | Expects the query to return no results, otherwise it fails |
 
-### 6.3 執行流程
+### 6.3 Execution Flow
 
 ```
 ┌─────────────────┐
-│   Pre-Check     │ ── 失敗 ──→ 停止，不執行 Migration
+│   Pre-Check     │ ── Fail ──→ Stop, migration does not run
 └────────┬────────┘
-         │ 成功
+         │ Success
          ▼
 ┌─────────────────┐
 │ Execute Migration│
@@ -451,39 +451,39 @@ ALTER TABLE users DROP COLUMN phone;
          │
          ▼
 ┌─────────────────┐
-│   Post-Check    │ ── 失敗 ──→ 自動回滾 (如果啟用)
+│   Post-Check    │ ── Fail ──→ Automatic rollback (if enabled)
 └────────┬────────┘
-         │ 成功
+         │ Success
          ▼
-      完成 ✅
+      Done ✅
 ```
 
-### 6.4 CLI 使用方式
+### 6.4 CLI Usage
 
 ```bash
-# 啟用 Sanity Check 執行遷移
+# Run a migration with sanity checks enabled
 docker compose run --rm migrate up --sanity-check -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
-# 停用自動回滾（Post-Check 失敗時不回滾）
+# Disable automatic rollback (don't roll back when Post-Check fails)
 docker compose run --rm migrate up --sanity-check --no-auto-rollback -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 ```
 
-### 6.5 Sanity Check 情境範例
+### 6.5 Sanity Check Scenario Examples
 
-#### 範例 1：新增欄位前確認不存在
+#### Example 1: Confirm a Column Doesn't Exist Before Adding It
 
 ```sql
 -- +migrate Up
 
 -- +sanity PreCheck
--- 確認 phone 欄位不存在
+-- Confirm the phone column does not exist
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'phone'
 -- -sanity PreCheck
 
 ALTER TABLE users ADD COLUMN phone VARCHAR(20) AFTER email;
 
 -- +sanity PostCheck
--- 確認 phone 欄位已建立
+-- Confirm the phone column was created
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'phone'
 -- -sanity PostCheck
 
@@ -491,22 +491,22 @@ ALTER TABLE users ADD COLUMN phone VARCHAR(20) AFTER email;
 ALTER TABLE users DROP COLUMN phone;
 ```
 
-#### 範例 2：建立索引前確認資料表存在
+#### Example 2: Confirm the Table Exists Before Creating an Index
 
 ```sql
 -- +migrate Up
 
 -- +sanity PreCheck
--- 確認 products 資料表存在
+-- Confirm the products table exists
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products'
--- 確認索引不存在
+-- Confirm the index does not exist
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND INDEX_NAME = 'idx_products_category'
 -- -sanity PreCheck
 
 CREATE INDEX idx_products_category ON products(category_id, created_at DESC);
 
 -- +sanity PostCheck
--- 確認索引已建立
+-- Confirm the index was created
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND INDEX_NAME = 'idx_products_category'
 -- -sanity PostCheck
 
@@ -514,22 +514,22 @@ CREATE INDEX idx_products_category ON products(category_id, created_at DESC);
 DROP INDEX idx_products_category ON products;
 ```
 
-#### 範例 3：修改欄位型態前確認資料相容
+#### Example 3: Confirm Data Compatibility Before Changing a Column Type
 
 ```sql
 -- +migrate Up
 
 -- +sanity PreCheck
--- 確認所有 price 都是正數（可以轉換為 DECIMAL）
+-- Confirm all price values are positive (safe to convert to DECIMAL)
 -- EXPECT_NO_ROWS: SELECT 1 FROM products WHERE price < 0 OR price IS NULL LIMIT 1
--- 確認沒有超長的 price 值
+-- Confirm there are no overly large price values
 -- EXPECT_NO_ROWS: SELECT 1 FROM products WHERE price > 99999999.99 LIMIT 1
 -- -sanity PreCheck
 
 ALTER TABLE products MODIFY COLUMN price DECIMAL(10, 2) NOT NULL;
 
 -- +sanity PostCheck
--- 確認欄位型態已變更
+-- Confirm the column type was changed
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'price' AND DATA_TYPE = 'decimal'
 -- -sanity PostCheck
 
@@ -537,22 +537,22 @@ ALTER TABLE products MODIFY COLUMN price DECIMAL(10, 2) NOT NULL;
 ALTER TABLE products MODIFY COLUMN price FLOAT;
 ```
 
-#### 範例 4：刪除欄位前確認已無使用
+#### Example 4: Confirm a Column Is Unused Before Dropping It
 
 ```sql
 -- +migrate Up
 
 -- +sanity PreCheck
--- 確認 deprecated_field 欄位存在
+-- Confirm the deprecated_field column exists
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'deprecated_field'
--- 確認該欄位全部為 NULL（表示已無使用）
+-- Confirm the column is entirely NULL (meaning it's unused)
 -- EXPECT_NO_ROWS: SELECT 1 FROM users WHERE deprecated_field IS NOT NULL LIMIT 1
 -- -sanity PreCheck
 
 ALTER TABLE users DROP COLUMN deprecated_field;
 
 -- +sanity PostCheck
--- 確認欄位已刪除
+-- Confirm the column was dropped
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'deprecated_field'
 -- -sanity PostCheck
 
@@ -560,13 +560,13 @@ ALTER TABLE users DROP COLUMN deprecated_field;
 ALTER TABLE users ADD COLUMN deprecated_field VARCHAR(255);
 ```
 
-#### 範例 5：建立新資料表並確認結構
+#### Example 5: Create a New Table and Confirm Its Structure
 
 ```sql
 -- +migrate Up
 
 -- +sanity PreCheck
--- 確認資料表不存在
+-- Confirm the table does not exist
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'audit_logs'
 -- -sanity PreCheck
 
@@ -586,9 +586,9 @@ CREATE TABLE audit_logs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- +sanity PostCheck
--- 確認資料表已建立
+-- Confirm the table was created
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'audit_logs'
--- 確認所有索引都建立了
+-- Confirm all indexes were created
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'audit_logs' AND INDEX_NAME = 'idx_table_action'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'audit_logs' AND INDEX_NAME = 'idx_created_at'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'audit_logs' AND INDEX_NAME = 'idx_user_id'
@@ -598,31 +598,31 @@ CREATE TABLE audit_logs (
 DROP TABLE IF EXISTS audit_logs;
 ```
 
-#### 範例 6：資料遷移確認完整性
+#### Example 6: Confirm Data Integrity for a Data Migration
 
 ```sql
 -- +migrate Up
 
 -- +sanity PreCheck
--- 確認來源資料存在
+-- Confirm the source data exists
 -- EXPECT_ROWS: SELECT 1 FROM old_users LIMIT 1
--- 確認目標表已建立
+-- Confirm the target table has been created
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'new_users'
 -- -sanity PreCheck
 
--- 遷移資料
+-- Migrate data
 INSERT INTO new_users (id, name, email, created_at)
 SELECT id, CONCAT(first_name, ' ', last_name), email, created_at
 FROM old_users
 WHERE migrated = 0;
 
--- 標記已遷移
+-- Mark as migrated
 UPDATE old_users SET migrated = 1 WHERE migrated = 0;
 
 -- +sanity PostCheck
--- 確認所有資料都已遷移
+-- Confirm all rows were migrated
 -- EXPECT_NO_ROWS: SELECT 1 FROM old_users WHERE migrated = 0 LIMIT 1
--- 確認目標表有資料
+-- Confirm the target table has data
 -- EXPECT_ROWS: SELECT 1 FROM new_users LIMIT 1
 -- -sanity PostCheck
 
@@ -633,23 +633,23 @@ UPDATE old_users SET migrated = 0 WHERE migrated = 1;
 
 ---
 
-## 7. Docker 環境設定與 CLI 使用
+## 7. Docker Environment Setup and CLI Usage
 
-### 7.1 取得 Docker Image
+### 7.1 Getting the Docker Image
 
 ```bash
-# 方法一：從 Registry 拉取（如果已發布）
+# Option 1: Pull from a registry (if published)
 docker pull your-registry/ddl-migrate:latest
 
-# 方法二：本地建置
+# Option 2: Build locally
 git clone https://github.com/your-org/ddl-migrate.git
 cd ddl-migrate
 docker compose build migrate
 ```
 
-### 7.2 本地環境準備
+### 7.2 Local Environment Setup
 
-**目錄結構：**
+**Directory structure:**
 ```
 your-project/
 ├── docker-compose.yml
@@ -668,7 +668,7 @@ your-project/
                     └── R__002_readonly_users.sql
 ```
 
-**config.js 範例：**
+**config.js example:**
 ```javascript
 export default {
   type: 'mariadb',
@@ -680,69 +680,69 @@ export default {
     password: process.env.MARIADB_PASSWORD || 'password'
   },
   migrationsDir: './migrations',
-  changelogTable: '_migrations'  // DDL 用
-  // checksumTable: '_dcl_migrations'  // DCL 用
+  changelogTable: '_migrations'  // for DDL
+  // checksumTable: '_dcl_migrations'  // for DCL
 };
 ```
 
-### 7.3 CLI 命令大全
+### 7.3 Full CLI Command Reference
 
 ```bash
 # ═══════════════════════════════════════════════════════════
-# DDL (Versioned) 操作
+# DDL (Versioned) operations
 # ═══════════════════════════════════════════════════════════
 
-# 查看狀態
+# Check status
 docker compose run --rm migrate status -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
-# 執行遷移
+# Run migrations
 docker compose run --rm migrate up -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
-# 執行遷移（啟用 Sanity Check）
+# Run migrations (with sanity checks enabled)
 docker compose run --rm migrate up --sanity-check -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
-# Dry Run（預覽）
+# Dry run (preview)
 docker compose run --rm migrate up --dry-run -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
-# 回滾 1 個遷移
+# Roll back 1 migration
 docker compose run --rm migrate down -n 1 -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
-# 驗證遷移檔案
+# Validate migration files
 docker compose run --rm migrate validate -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
-# 建立新的 DDL 遷移檔案
+# Create a new DDL migration file
 docker compose run --rm migrate create "add-email-to-users" -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
 # ═══════════════════════════════════════════════════════════
-# DCL (Repeatable) 操作
+# DCL (Repeatable) operations
 # ═══════════════════════════════════════════════════════════
 
-# 查看 DCL 狀態
+# Check DCL status
 docker compose run --rm migrate dcl:status -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 
-# 執行 DCL（無驗證）
+# Run DCL (no validation)
 docker compose run --rm migrate dcl -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 
-# 執行 DCL（啟用驗證）
+# Run DCL (with validation enabled)
 docker compose run --rm migrate dcl --validate -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 
-# 執行 DCL（允許危險操作）
+# Run DCL (allow dangerous operations)
 docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 
-# Dry Run（預覽）
+# Dry run (preview)
 docker compose run --rm migrate dcl --dry-run -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 
-# 建立新的 DCL 遷移檔案
+# Create a new DCL migration file
 docker compose run --rm migrate create-dcl "create-app-user" -n 001 -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 ```
 
 ---
 
-## 8. 情境範例教學
+## 8. Scenario Walkthroughs
 
-### 情境 1：建立新資料表 (DDL)
+### Scenario 1: Create a New Table (DDL)
 
-**檔案**：`20250126000001-create-products.sql`
+**File**: `20250126000001-create-products.sql`
 
 ```sql
 -- +migrate Up
@@ -763,9 +763,9 @@ CREATE TABLE products (
 DROP TABLE IF EXISTS products;
 ```
 
-### 情境 2：修改現有資料表 (DDL)
+### Scenario 2: Modify an Existing Table (DDL)
 
-**檔案**：`20250126000002-add-product-description.sql`
+**File**: `20250126000002-add-product-description.sql`
 
 ```sql
 -- +migrate Up
@@ -782,9 +782,9 @@ ALTER TABLE products
     DROP COLUMN is_active;
 ```
 
-### 情境 3：建立應用程式使用者 (DCL)
+### Scenario 3: Create Application Users (DCL)
 
-**檔案**：`R__001_app_users.sql`
+**File**: `R__001_app_users.sql`
 
 ```sql
 -- @description: Application database users
@@ -816,9 +816,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON your_database.* TO 'app_readwrite'@'%';
 FLUSH PRIVILEGES;
 ```
 
-### 情境 4：建立 Stored Procedure (DCL)
+### Scenario 4: Create Stored Procedures (DCL)
 
-**檔案**：`R__010_stored_procedures.sql`
+**File**: `R__010_stored_procedures.sql`
 
 ```sql
 -- @description: Application stored procedures
@@ -898,9 +898,9 @@ END$$
 DELIMITER ;
 ```
 
-### 情境 5：危險操作 - 資料清理 (DCL)
+### Scenario 5: Dangerous Operation - Data Cleanup (DCL)
 
-**檔案**：`R__020_data_cleanup.sql`
+**File**: `R__020_data_cleanup.sql`
 
 ```sql
 -- @description: Periodic data cleanup job
@@ -939,9 +939,9 @@ DELETE FROM user_sessions
 WHERE expires_at < NOW();
 ```
 
-### 情境 6：帶有 Sanity Check 的 Migration (DDL)
+### Scenario 6: Migration With Sanity Checks (DDL)
 
-**檔案**：`20250126000003-add-phone-with-sanity.sql`
+**File**: `20250126000003-add-phone-with-sanity.sql`
 
 ```sql
 -- +migrate Up
@@ -960,9 +960,9 @@ ALTER TABLE users ADD COLUMN phone VARCHAR(20) AFTER email;
 ALTER TABLE users DROP COLUMN phone;
 ```
 
-### 情境 7：多環境權限管理 (DCL)
+### Scenario 7: Multi-Environment Permission Management (DCL)
 
-**檔案**：`R__003_environment_users.sql`
+**File**: `R__003_environment_users.sql`
 
 ```sql
 -- @description: Environment-specific users with dynamic passwords
@@ -1004,19 +1004,19 @@ FLUSH PRIVILEGES;
 
 ---
 
-## 📝 最佳實踐
+## 📝 Best Practices
 
-1. **DDL 檔案一定要有 Down 區塊**，確保可以回滾
-2. **DCL 檔案必須是冪等的**，使用 `IF EXISTS` / `IF NOT EXISTS`
-3. **大表操作加上 ALGORITHM=INPLACE**，避免長時間鎖表
-4. **密碼不要硬編碼**，使用環境變數或 Secret Management
-5. **危險操作要有明確的 Annotation**，說明為什麼需要
-6. **測試環境先跑過**，再到正式環境執行
+1. **DDL files must always have a Down block** to allow rollback
+2. **DCL files must be idempotent** — use `IF EXISTS` / `IF NOT EXISTS`
+3. **Add ALGORITHM=INPLACE for large-table operations** to avoid long table locks
+4. **Never hardcode passwords** — use environment variables or a secret manager
+5. **Dangerous operations need an explicit annotation** explaining why they're needed
+6. **Test in a non-production environment first**, then run in production
 
 ---
 
-## 🔗 相關文件
+## 🔗 Related Documents
 
-- [CLI 使用指南](CLI-USAGE-GUIDE.md)
-- [Docker Compose 使用指南](DOCKER-COMPOSE-USER-GUIDE.md)
-- [Migration 管理指南](MIGRATION-MANAGEMENT-GUIDE.md)
+- [CLI Usage Guide](CLI-USAGE-GUIDE.md)
+- [Docker Compose User Guide](DOCKER-COMPOSE-USER-GUIDE.md)
+- [Migration Management Guide](MIGRATION-MANAGEMENT-GUIDE.md)

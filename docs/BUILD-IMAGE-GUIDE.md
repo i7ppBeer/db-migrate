@@ -1,91 +1,91 @@
-# Build Image 部署遷移檔案指南
+# Build Image Guide for Deploying Migration Files
 
-> ⚠️ **部分過期（2026-09-11 稽核，Kubernetes 章節已修正）**：
-> - **Kubernetes 部署**章節已改成指向真正存在、可用的 [`k8s/`](../k8s/README.md)（kubectl + ConfigMap/Secret/Job），原本教的 `./charts/db-migrate` Helm chart從來沒被建立過。
-> - **Azure DevOps Pipeline** 章節提到的 `azure-pipelines-migrations.yml` 仍然**不存在**（`Dockerfile.azure` 倒是真的存在，是給 Azure DevOps agent 用的 image）——這節內容未經驗證，先當作草稿看待，要用的話得自己補上實際的 pipeline YAML。
-> - `.github/workflows/migrations.yml` 已同步修正（原本 build/deploy job 也引用了不存在的 `Dockerfile.migrations` 和 Helm chart）。
+> ⚠️ **Partially outdated (audited 2026-09-11, Kubernetes section corrected)**:
+> - The **Kubernetes Deployment** section has been changed to point at the real, working [`k8s/`](../k8s/README.md) setup (kubectl + ConfigMap/Secret/Job) — the `./charts/db-migrate` Helm chart it originally taught was never actually created.
+> - The `azure-pipelines-migrations.yml` referenced in the **Azure DevOps Pipeline** section still **does not exist** (`Dockerfile.azure` does exist, though — it's the image used for the Azure DevOps agent) — that section is unverified; treat it as a draft. If you want to use it, you'll need to write the actual pipeline YAML yourself.
+> - `.github/workflows/migrations.yml` has been corrected to match (its build/deploy job also used to reference a nonexistent `Dockerfile.migrations` and Helm chart).
 
-本指南說明如何透過 Build Image 方式將 DDL 遷移檔案部署到 Kubernetes 生產環境。
+This guide explains how to deploy DDL migration files to a Kubernetes production environment using the Build Image approach.
 
-## 目錄
+## Table of Contents
 
-1. [流程概覽](#流程概覽)
-2. [本地建置](#本地建置)
-3. [CI/CD 自動化](#cicd-自動化)
-4. [Kubernetes 部署](#kubernetes-部署)
-5. [最佳實踐](#最佳實踐)
+1. [Process Overview](#process-overview)
+2. [Local Build](#local-build)
+3. [CI/CD Automation](#cicd-automation)
+4. [Kubernetes Deployment](#kubernetes-deployment)
+5. [Best Practices](#best-practices)
 
 ---
 
-## 流程概覽
+## Process Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    Production 部署流程                               │
+│                    Production Deployment Flow                        │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
 │   Developer         CI/CD              Staging        Production    │
 │      │                │                   │               │         │
-│      │  1. 新增遷移檔案並 commit           │               │         │
+│      │  1. Add migration file & commit    │               │         │
 │      │───────────────>│                   │               │         │
 │      │                │                   │               │         │
-│      │                │  2. 自動測試 & 驗證              │         │
+│      │                │  2. Automated test & validate     │         │
 │      │                │──────────────────>│               │         │
 │      │                │                   │               │         │
 │      │                │  3. Build Image (v1.2.3)         │         │
 │      │                │──────────────────>│               │         │
 │      │                │                   │               │         │
-│      │                │  4. 自動部署到 Staging            │         │
+│      │                │  4. Auto-deploy to Staging         │         │
 │      │                │──────────────────>│               │         │
 │      │                │                   │               │         │
-│      │                │                   │  5. 測試驗證  │         │
+│      │                │                   │  5. Test & validate  │  │
 │      │                │                   │──────>│       │         │
 │      │                │                   │       │ OK    │         │
 │      │                │                   │<──────│       │         │
 │      │                │                   │               │         │
-│      │                │  6. 手動審批後部署 Production      │         │
+│      │                │  6. Deploy to Production after manual approval │
 │      │                │──────────────────────────────────>│         │
 │      │                │                   │               │         │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-## 專案結構
+## Project Structure
 
 ```
 your-project/
-├── migrations/                    # ✅ 遷移檔案目錄 (打包進 Image)
+├── migrations/                    # ✅ Migration files directory (bundled into the Image)
 │   ├── 20250101000001-create-users.js
 │   ├── 20250101000002-seed-users.js
-│   └── 20250120000001-add-new-column.js  ← 新增的 DDL
-├── src/                           # 遷移工具原始碼
+│   └── 20250120000001-add-new-column.js  ← Newly added DDL
+├── src/                           # Migration tool source code
 ├── charts/db-migrate/             # Helm Chart
-├── Dockerfile                     # 基礎映像
-├── Dockerfile.migrations          # 遷移映像 (包含遷移檔案)
+├── Dockerfile                     # Base image
+├── Dockerfile.migrations          # Migration image (includes migration files)
 ├── scripts/
-│   └── build-migration-image.sh   # 建置腳本
+│   └── build-migration-image.sh   # Build script
 ├── azure-pipelines-migrations.yml # Azure DevOps Pipeline
 └── .github/workflows/migrations.yml # GitHub Actions
 ```
 
 ---
 
-## 本地建置
+## Local Build
 
-### 快速開始
+### Quick Start
 
 ```bash
-# 1. 新增遷移檔案
+# 1. Add a migration file
 vim migrations/20250120000001-add-user-status.js
 
-# 2. 建置映像
+# 2. Build the image
 ./scripts/build-migration-image.sh -t v1.0.0
 
-# 3. 驗證映像
+# 3. Verify the image
 docker run --rm db-migrate:v1.0.0 --help
 ```
 
-### 建置腳本參數
+### Build script parameters
 
 ```bash
 ./scripts/build-migration-image.sh [options]
@@ -99,22 +99,22 @@ Options:
   -h, --help         Show help
 ```
 
-### 建置範例
+### Build examples
 
 ```bash
-# 建置並推送到 Azure Container Registry
+# Build and push to Azure Container Registry
 ./scripts/build-migration-image.sh \
   -t v1.2.3 \
   -r myregistry.azurecr.io \
   -p
 
-# 建置並推送到 GitHub Container Registry
+# Build and push to GitHub Container Registry
 ./scripts/build-migration-image.sh \
   -t v1.2.3 \
   -r ghcr.io/myorg \
   -p
 
-# 使用特定的遷移目錄
+# Use a specific migrations directory
 ./scripts/build-migration-image.sh \
   -t v1.2.3 \
   -m ./test-fixtures/mongodb/production/migrations \
@@ -124,123 +124,123 @@ Options:
 
 ---
 
-## CI/CD 自動化
+## CI/CD Automation
 
 ### Azure DevOps Pipeline
 
-使用 `azure-pipelines-migrations.yml`：
+Uses `azure-pipelines-migrations.yml`:
 
 ```yaml
-# 關鍵配置
+# Key configuration
 variables:
   containerRegistry: 'YourAzureContainerRegistry'  # Service Connection
   imageRepository: 'db-migrate'
 
 stages:
-  - CI      # 測試 & 驗證
-  - Build   # 建置 Image
-  - DeployStaging    # 自動部署到 Staging
-  - DeployProduction # 手動審批後部署 Production
+  - CI      # Test & validate
+  - Build   # Build the image
+  - DeployStaging    # Auto-deploy to Staging
+  - DeployProduction # Deploy to Production after manual approval
 ```
 
-#### 設定步驟
+#### Setup steps
 
-1. **建立 Azure Container Registry Service Connection**
+1. **Create an Azure Container Registry Service Connection**
    - Azure DevOps > Project Settings > Service Connections
    - New > Docker Registry > Azure Container Registry
 
-2. **建立 Kubernetes Service Connection**
+2. **Create a Kubernetes Service Connection**
    - New > Kubernetes
-   - 設定 staging 和 production 連線
+   - Configure the staging and production connections
 
-3. **設定 Environment Approval**
+3. **Configure Environment Approval**
    - Pipelines > Environments > production
    - Approvals and checks > Add approval
 
-4. **設定 Variable Group (機密)**
+4. **Configure a Variable Group (secrets)**
    - Library > Variable Groups
-   - 新增 `STAGING_DB_PASSWORD`, `PRODUCTION_DB_PASSWORD`
+   - Add `STAGING_DB_PASSWORD`, `PRODUCTION_DB_PASSWORD`
 
 ### GitHub Actions
 
-使用 `.github/workflows/migrations.yml`：
+Uses `.github/workflows/migrations.yml`:
 
 ```yaml
-# 關鍵配置
+# Key configuration
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/db-migrate
 
 jobs:
-  test:           # 測試
-  build:          # 建置 & 推送
-  deploy-staging: # 部署 Staging
-  deploy-production:  # 需要手動審批
+  test:           # Test
+  build:          # Build & push
+  deploy-staging: # Deploy to Staging
+  deploy-production:  # Requires manual approval
 ```
 
-#### 設定步驟
+#### Setup steps
 
-1. **設定 Repository Secrets**
+1. **Configure Repository Secrets**
    ```
    STAGING_KUBECONFIG     # Staging K8s kubeconfig (base64)
    PRODUCTION_KUBECONFIG  # Production K8s kubeconfig (base64)
    ```
 
-2. **設定 Environments**
+2. **Configure Environments**
    - Settings > Environments
-   - 建立 `staging` 和 `production`
-   - production 環境設定 Required reviewers
+   - Create `staging` and `production`
+   - Set Required reviewers on the production environment
 
 ---
 
-## Kubernetes 部署
+## Kubernetes Deployment
 
-> ⚠️ **2026-09-11 更新**：這個章節原本教用 `helm upgrade ./charts/db-migrate` 部署，但那個 Helm chart 從來沒有被建立過，實際照做會直接失敗——`.github/workflows/migrations.yml` 的 deploy job 也曾經犯一樣的錯，已經一起修掉了。目前實際可用、有經過設計討論的部署方式是 **kubectl + ConfigMap/Secret/Job**（不用 Helm），完整範例在 [`k8s/`](../k8s/README.md)，這裡不重複貼——內容包含：
-> - Job（含 `backoffLimit: 0` 的理由，見下方提醒）
-> - ConfigMap 掛載 migration 檔案（適合檔案小、多專案共用的情況）
-> - Secret 範本 + 該用哪個 DB 帳號
+> ⚠️ **Update, 2026-09-11**: This section used to teach deploying with `helm upgrade ./charts/db-migrate`, but that Helm chart was never actually created — following it as written would just fail. The deploy job in `.github/workflows/migrations.yml` used to make the same mistake and has been fixed alongside this doc. The approach that's actually working today, and that went through a real design discussion, is **kubectl + ConfigMap/Secret/Job** (no Helm). The full example lives in [`k8s/`](../k8s/README.md) and isn't duplicated here — it covers:
+> - The Job (including the reasoning for `backoffLimit: 0`, see the warning below)
+> - A ConfigMap mounting the migration files (suited to small files shared across multiple projects)
+> - A Secret template + which DB account to use
 > - ServiceAccount/RBAC
 >
-> 監控遷移執行一樣是標準 `kubectl wait` / `kubectl logs`，範例見 `k8s/README.md` 的「工作流程」章節。
+> Monitoring the migration run still uses the standard `kubectl wait` / `kubectl logs`; see the "Workflow" section of `k8s/README.md` for examples.
 
-⚠️ **不要把 Job 的 `backoffLimit` 設成大於 0 的值**（本文件先前的範例曾寫 `backoffLimit: 5`，是錯誤示範）。DDL migration 失敗可能留下「SQL 已執行、changelog 未寫入」的半套狀態，自動重試等於讓排程器對著不確定的狀態盲目重跑——細節見 [docs/DDL-PRODUCTION-SAFETY.md](./DDL-PRODUCTION-SAFETY.md) 第 1.8 節。失敗就該停下來讓人看，不是交給 Job controller 自動重來。
+⚠️ **Do not set the Job's `backoffLimit` to anything greater than 0** (an earlier version of this document had an example with `backoffLimit: 5` — that was wrong). A failed DDL migration can leave behind a partial state where "the SQL ran but the changelog wasn't written," and an automatic retry just means the scheduler blindly reruns against an uncertain state. See Section 1.8 of [docs/DDL-PRODUCTION-SAFETY.md](./DDL-PRODUCTION-SAFETY.md) for details. A failure should stop and get a human to look at it, not get handed back to the Job controller for an automatic retry.
 
 ---
 
-## 最佳實踐
+## Best Practices
 
-### ✅ 建議做法
+### ✅ Recommended practices
 
-| 實踐 | 說明 |
+| Practice | Notes |
 |------|------|
-| **版本化 Image Tag** | 使用語義化版本 (v1.2.3)，不用 `latest` |
-| **先 Staging 後 Production** | 所有變更先在 Staging 驗證 |
-| **Production 手動審批** | 使用 Environment Approval Gate |
-| **驗證開啟** | `migration.validation.enabled=true` |
-| **禁止危險操作** | `migration.validation.allowDangerous=false` |
-| **保留 Job 日誌** | `ttlSecondsAfterFinished: 86400` |
-| **密碼從 Secret** | 永不在 values 中設定密碼 |
+| **Version the image tag** | Use semantic versioning (v1.2.3), not `latest` |
+| **Staging before Production** | Validate every change in Staging first |
+| **Manual approval for Production** | Use an Environment Approval Gate |
+| **Keep validation enabled** | `migration.validation.enabled=true` |
+| **Forbid dangerous operations** | `migration.validation.allowDangerous=false` |
+| **Retain Job logs** | `ttlSecondsAfterFinished: 86400` |
+| **Passwords from Secrets** | Never set passwords in values |
 
-### ❌ 避免做法
+### ❌ Practices to avoid
 
-| 避免 | 原因 |
+| Avoid | Why |
 |------|------|
-| 使用 `latest` tag | 無法回滾，難以追蹤 |
-| 跳過 Staging | 風險太高 |
-| 自動部署 Production | 需要人工確認 |
-| 直接修改 Production | 應該走 CI/CD |
+| Using the `latest` tag | Can't roll back, hard to track |
+| Skipping Staging | Too risky |
+| Auto-deploying to Production | Needs human confirmation |
+| Editing Production directly | Should go through CI/CD |
 
-### 回滾策略
+### Rollback strategy
 
 ```bash
-# 如果遷移失敗，使用上一個版本重新部署
+# If the migration fails, redeploy the previous version
 helm upgrade --install db-migrate-production ./charts/db-migrate \
   --namespace production \
-  --set image.tag=v1.2.2 \  # 上一個已知正常的版本
-  --set migration.command=status  # 先檢查狀態
+  --set image.tag=v1.2.2 \  # Last known-good version
+  --set migration.command=status  # Check status first
   -f values-production.yaml
 
-# 或執行 down 回滾
+# Or run a down rollback
 helm upgrade --install db-migrate-rollback ./charts/db-migrate \
   --namespace production \
   --set image.tag=v1.2.3 \
@@ -251,12 +251,12 @@ helm upgrade --install db-migrate-rollback ./charts/db-migrate \
 
 ---
 
-## 完整流程範例
+## Complete Workflow Example
 
-### 開發者新增遷移
+### Developer adds a migration
 
 ```bash
-# 1. 建立新的遷移檔案
+# 1. Create a new migration file
 cat > migrations/20250120000001-add-user-status.js << 'EOF'
 export const up = async (db) => {
   await db.collection('users').updateMany(
@@ -275,30 +275,30 @@ export const down = async (db) => {
 };
 EOF
 
-# 2. 本地測試
+# 2. Test locally
 npm run test:migration
 
-# 3. Commit & Push
+# 3. Commit & push
 git add migrations/
 git commit -m "feat: add user status field"
 git push origin main
 ```
 
-### CI/CD 自動執行
+### CI/CD runs automatically
 
-1. **CI 階段**: 自動執行測試和驗證
-2. **Build 階段**: 建立 `db-migrate:v1.2.3` 映像並推送到 Registry
-3. **Staging 部署**: 自動部署到 Staging 環境
-4. **驗證**: 在 Staging 確認遷移成功
-5. **Production 審批**: 審批人確認後觸發 Production 部署
-6. **Production 部署**: 部署到 Production 環境
+1. **CI stage**: automatically runs tests and validation
+2. **Build stage**: builds the `db-migrate:v1.2.3` image and pushes it to the registry
+3. **Staging deploy**: automatically deploys to the Staging environment
+4. **Validation**: confirm the migration succeeded in Staging
+5. **Production approval**: approver confirms, which triggers the Production deployment
+6. **Production deploy**: deploys to the Production environment
 
 ---
 
-## 相關檔案
+## Related Files
 
-- [Dockerfile.migrations](../Dockerfile.migrations) - 遷移映像建置檔
-- [build-migration-image.sh](../scripts/build-migration-image.sh) - 本地建置腳本
+- [Dockerfile.migrations](../Dockerfile.migrations) - Migration image build file
+- [build-migration-image.sh](../scripts/build-migration-image.sh) - Local build script
 - [azure-pipelines-migrations.yml](../azure-pipelines-migrations.yml) - Azure DevOps Pipeline
 - [.github/workflows/migrations.yml](../.github/workflows/migrations.yml) - GitHub Actions
-- [charts/db-migrate/values.yaml](../charts/db-migrate/values.yaml) - Helm Chart Values
+- [charts/db-migrate/values.yaml](../charts/db-migrate/values.yaml) - Helm Chart values

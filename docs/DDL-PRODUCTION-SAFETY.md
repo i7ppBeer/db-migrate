@@ -1,104 +1,104 @@
-# DDL 對正式環境的風險與安全手冊
+# DDL Production Risk & Safety Handbook
 
-這篇是這個 repo「DDL 安全」相關工作的總覽與操作手冊：什麼情況會讓正式環境的 DB 卡住、目前有哪些防護已經做了、還缺哪些、跑 DDL 前該檢查什麼、真的出事了要怎麼中止或回滾。細節規則另外寫在專門的文件裡，這裡負責把它們串起來、講清楚彼此的關係。
-
----
-
-## 1. 會導致線上 DB 卡住的情境
-
-### 1.1 MDL 佇列 FIFO 卡死（本手冊的起源事件）
-
-MariaDB 的 metadata lock（MDL）佇列是 **FIFO**：任何一個 `ALTER TABLE` 排隊等 exclusive 鎖時，後面所有新進來的查詢——包含單純的 `SELECT`——都會被迫排在它後面，不管它們彼此原本相不相容。這件事跟「誰先誰後」無關，兩個方向都會發生：
-
-- **大 DELETE/長交易先到**：ALTER 排隊等它放手，排隊期間新進來的 SELECT 又排在 ALTER 後面 → 全部卡住。
-- **ALTER 先到**：DELETE 沒開始執行前就要排隊等 ALTER，一樣全部卡住。
-
-詳細時間軸與四種情境比較，見 Artifact〈[鎖衝突防禦地圖](https://claude.ai/code/artifact/58c23985-91d9-45dd-a137-93819f6f940f)〉。
-
-### 1.2 大表 rebuild 型 ALTER 本身鎖很久
-
-`MODIFY/CHANGE COLUMN`、`ENGINE=`、`CONVERT TO CHARACTER SET` 這類需要整表重建的 ALTER（`ALGORITHM=COPY`），從開始到結束**全程**持有會擋寫入的鎖，時間長短等於重建整張表要多久。跟 1.1 不同：這裡就算完全沒人跟它搶鎖，光是它自己執行的時間，其他查詢就得等。
-
-### 1.3 Online DDL 收尾瞬間撞期
-
-MariaDB 10.0+ 的線上建索引、10.4+ 的 instant 加減欄位，大部分時間允許併發讀寫，**但收尾那一瞬間**需要短暫升級成 exclusive lock。如果剛好有長交易在那一刻還沒 commit，一樣會卡（只是視窗通常很短）。
-
-### 1.4 「跑很久」跟「反覆重試」疊加
-
-Lock Guard（見第 3 節）用短逾時+重試來避免無限期排隊，但**重試是整句重新執行，不是續跑**。如果一個 ALTER 是「跑很久、快結束時才需要搶鎖」的類型（1.3），重試策略反而可能讓它反覆跑到一半就被打斷、重新開始，浪費時間又不會成功。
-
-### 1.5 DDL/DCL 混用
-
-在 DDL 專案裡寫 `CREATE USER`/`GRANT`，或在 DCL 專案裡寫 `ALTER TABLE`，本身雖然不會直接鎖表，但會讓兩種完全不同生命週期的變更（結構變更 vs. 權限管理）混在一起執行，出問題時很難判斷是哪一類操作造成的。
-
-### 1.6 連到錯誤的資料庫/環境
-
-Config 裡的環境變數解析錯誤，導致連線實際指向的資料庫跟預期不同（例如以為是 staging，其實連到 production）。這種狀況下，前面所有的鎖防護都沒有意義——因為你根本是在錯的地方做正確的事。
-
-### 1.7 changelog / checksum 跟磁碟檔案對不上
-
-Migration 檔案被刪除、改名，或 changelog 資料被手動改過，導致工具誤判哪些該執行、哪些已執行——可能重複套用，也可能漏掉。
-
-### 1.8 中斷造成的半套狀態（本次稽核新發現，記錄在此）
-
-`up()` 的執行順序是：**先跑 DDL SQL，成功後才寫入 changelog**。如果在這兩步中間手動中斷（Ctrl+C、程序被殺），SQL 可能已經真的執行成功，但 changelog 沒寫進去——下次 `status`/`up` 還是會把它當成「pending」再跑一次。
-
-這不是這個工具獨有的 bug，是**所有 DDL migration 工具的共同限制**：MariaDB 的 DDL 陳述式會觸發隱性 commit，就算把 SQL 執行跟 changelog 寫入包在同一個 transaction 裡，DDL 本身還是會立刻 commit，兩件事無法真正原子化。
-
-**緩解方式**：UP 區塊盡量寫成冪等的（`CREATE TABLE IF NOT EXISTS`、`ADD COLUMN IF NOT EXISTS` 或先查 `information_schema` 再決定要不要執行），這樣就算重跑一次也不會出錯。
+This is the overview and operations handbook for this repo's "DDL safety" work: what situations can get a production DB stuck, what protections already exist, what's still missing, what to check before running DDL, and how to abort or roll back when something actually goes wrong. Detailed rules live in dedicated documents; this one's job is to tie them together and explain how they relate.
 
 ---
 
-## 2. 誤用 `reset` 造成的風險
+## 1. Situations that can get a production DB stuck
 
-`reset` 指令（`node src/cli.js reset --yes -c <config>`）**只清空追蹤紀錄，不動實際的表格/collection/資料**。如果在正式環境誤用：
+### 1.1 MDL queue FIFO deadlock (the incident that started this handbook)
 
-- 清完之後 `up` 會把所有 migration 當成 pending 重跑，但表格早就存在 → 大機率直接失敗（除非全部 UP 都寫成 `IF NOT EXISTS`）。
-- 如果剛好有幾個 UP 是冪等的、幾個不是，會出現「跑一半就停」的不一致狀態，比完全失敗更難排查。
+MariaDB's metadata lock (MDL) queue is **FIFO**: once an `ALTER TABLE` is queued waiting for an exclusive lock, every new query that arrives afterward — including plain `SELECT`s — is forced to queue behind it, regardless of whether they're actually compatible with each other. This has nothing to do with "who arrived first" — it happens in both directions:
 
-**這個指令基本上只該用在會被整個重置的開發/測試資料庫上**——這點已經寫進 `docs/CLI-USAGE-GUIDE.md`，這裡再強調一次因為它直接關聯到「危險操作」的主題。
+- **A big DELETE / long transaction arrives first**: the ALTER queues waiting for it to release, and while it waits, new SELECTs queue behind the ALTER → everything stalls.
+- **The ALTER arrives first**: the DELETE has to queue for the ALTER before it can even start → same stall.
+
+For a detailed timeline and a comparison of all four scenarios, see the Artifact [Lock Conflict Defense Map](https://claude.ai/code/artifact/58c23985-91d9-45dd-a137-93819f6f940f).
+
+### 1.2 Table-rebuilding ALTERs hold the lock for a long time by themselves
+
+ALTERs that require a full table rebuild (`ALGORITHM=COPY`) — `MODIFY/CHANGE COLUMN`, `ENGINE=`, `CONVERT TO CHARACTER SET` — hold a write-blocking lock for their **entire duration**, which is as long as it takes to rebuild the whole table. Unlike 1.1: even with zero lock contention from anyone else, other queries still have to wait purely because of how long this statement takes to run.
+
+### 1.3 Online DDL collides at the finalization instant
+
+MariaDB's online index creation (10.0+) and instant column add/drop (10.4+) allow concurrent reads/writes for most of their duration, **but the finalization instant** requires briefly upgrading to an exclusive lock. If a long transaction happens to still be uncommitted at that exact moment, it stalls too (though the window is usually short).
+
+### 1.4 "Runs a long time" stacked with "retries repeatedly"
+
+Lock Guard (see Section 3) uses a short timeout plus retries to avoid indefinite queueing, but **a retry re-executes the whole statement — it does not resume**. If an ALTER is the "runs a long time, only needs the lock right at the end" type (1.3), the retry strategy can actually make things worse: it gets interrupted partway through repeatedly and restarts each time, wasting time without ever succeeding.
+
+### 1.5 Mixing DDL and DCL
+
+Writing `CREATE USER`/`GRANT` in a DDL project, or `ALTER TABLE` in a DCL project, doesn't directly lock a table by itself, but it mixes two changes with completely different lifecycles (schema changes vs. permission management) into the same execution flow, making it hard to tell which kind of operation caused a problem when one occurs.
+
+### 1.6 Connecting to the wrong database/environment
+
+An environment variable resolution error in the config causes the connection to actually point at a different database than intended (e.g., thinking it's staging but actually connecting to production). In this situation, every lock protection described earlier is meaningless — because you're doing the right thing in the wrong place.
+
+### 1.7 changelog / checksum out of sync with files on disk
+
+Migration files get deleted or renamed, or changelog data gets manually edited, causing the tool to misjudge what should run and what has already run — it might reapply something, or skip something.
+
+### 1.8 Partial state caused by an interruption (newly found in this audit, recorded here)
+
+`up()` executes in this order: **run the DDL SQL first, then write to the changelog only after it succeeds**. If you interrupt manually between these two steps (Ctrl+C, the process gets killed), the SQL may have already executed successfully but the changelog entry never got written — the next `status`/`up` will still treat it as "pending" and run it again.
+
+This isn't a bug unique to this tool — it's **a limitation shared by all DDL migration tools**: MariaDB DDL statements trigger an implicit commit, so even if you wrap the SQL execution and the changelog write in the same transaction, the DDL itself still commits immediately, and the two steps can never truly be made atomic.
+
+**Mitigation**: write UP blocks to be idempotent wherever possible (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, or check `information_schema` first before deciding whether to run), so a re-run won't error out.
 
 ---
 
-## 3. 目前已建置的防護
+## 2. Risk from misusing `reset`
 
-| 防護 | 對應情境 | 狀態 | 詳細文件 |
+The `reset` command (`node src/cli.js reset --yes -c <config>`) **only clears tracking records — it does not touch the actual tables/collections/data**. Misusing it in production:
+
+- After clearing, `up` will treat every migration as pending and rerun them all, but the tables already exist → most likely fails outright (unless every UP is written as `IF NOT EXISTS`).
+- If some UP blocks happen to be idempotent and others aren't, you get a "stopped partway through" inconsistent state, which is harder to diagnose than a clean failure.
+
+**This command should basically only ever be used on a dev/test database that's meant to be reset entirely** — this is already documented in `docs/CLI-USAGE-GUIDE.md`; it's repeated here because it directly relates to the "dangerous operation" theme.
+
+---
+
+## 3. Protections currently in place
+
+| Protection | Addresses | Status | Detailed doc |
 |---|---|---|---|
-| 靜態驗證分級（🔴禁止／🟠危險／🟡警告）+ annotation | 1.5（DDL/DCL 混用）、意外的危險操作 | ✅ 已上線 | [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md)、[VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) |
-| Lock Guard（session `lock_wait_timeout` + 有限重試） | 1.1、1.2（不改變執行時間，只改變等鎖時間） | ✅ 已上線（`feat/mariadb-lock-guard`） | [LOCK-GUARD.md](./LOCK-GUARD.md) |
-| Sanity Check Pre/PostCheck + Auto-Rollback | 執行後驗證結果是否符合預期，不符合就自動回滾 | ✅ 已上線（既有機制） | `src/core/sanity-checker.js` |
-| `reset` 指令 | 1.7 的其中一種修復手段（配合完整重置環境） | ✅ 已上線 | 見第 2 節 |
-| `validate` 指令的 `[FORCE ALLOWED]`/`[ALLOWED]` 留痕機制 | 任何放行的危險操作都留下審計紀錄，不是靜默通過 | ✅ 已上線 | 同上驗證規則文件 |
+| Tiered static validation (🔴 forbidden / 🟠 dangerous / 🟡 warning) + annotations | 1.5 (mixing DDL/DCL), unintentional dangerous operations | ✅ Live | [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md), [VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) |
+| Lock Guard (session `lock_wait_timeout` + bounded retries) | 1.1, 1.2 (doesn't change execution time, only changes lock-wait time) | ✅ Live (`feat/mariadb-lock-guard`) | [LOCK-GUARD.md](./LOCK-GUARD.md) |
+| Sanity Check Pre/PostCheck + Auto-Rollback | Validates the result after execution against expectations, auto-rolls back if it doesn't match | ✅ Live (existing mechanism) | `src/core/sanity-checker.js` |
+| `reset` command | One remediation option for 1.7 (paired with a full environment reset) | ✅ Live | See Section 2 |
+| `validate` command's `[FORCE ALLOWED]`/`[ALLOWED]` audit trail | Every dangerous operation that gets allowed through leaves an audit record instead of passing silently | ✅ Live | Same validation rule docs as above |
 
-**本次稽核也發現兩個現有的邏輯 bug**（會誤判合法的 migration 為錯誤），跟本手冊主題相關但不是「危險操作漏放行」而是「安全操作被誤擋」，細節見 [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md#confirmed-logic-bugs-traced-by-hand-not-inspection-guesses)。
+**This audit also found two existing logic bugs** (which misclassify legitimate migrations as errors) — related to this handbook's theme but the opposite problem: not "a dangerous operation slipping through" but "a safe operation being wrongly blocked." Details in [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md#confirmed-logic-bugs-traced-by-hand-not-inspection-guesses).
 
 ---
 
-## 4. 還沒建置的防護（設計中）
+## 4. Protections not yet built (in design)
 
-完整規格見 [RUNTIME-GATE-PLAN.md](./RUNTIME-GATE-PLAN.md)，這裡只列摘要：
+Full spec is in [RUNTIME-GATE-PLAN.md](./RUNTIME-GATE-PLAN.md); this is just the summary:
 
-| Gate | 檢查什麼 | 對應情境 | 能不能 `--force` |
+| Gate | Checks | Addresses | `--force`-able? |
 |---|---|---|---|
-| R0 連線身份 | 連線真的指向 config 說的那個資料庫嗎 | 1.6 | ❌ 不能 |
-| R1 changelog 一致性 | changelog/checksum 跟磁碟檔案對得起來嗎 | 1.7 | ❌ 不能 |
-| R2 長交易/鎖等待 | 執行前有沒有已經卡住的交易或 MDL 等待 | 1.1 | ✅ 可以 |
-| R3 可寫性/複本檢查 | target 是不是唯讀複本 | 1.6 的變體 | 唯讀 → ❌；延遲 → ✅ |
-| R4 磁碟/binlog 空間 | 大型 ALTER 會不會把空間耗盡 | 1.2 | ✅ 可以 |
+| R0 Connection identity | Does the connection actually point at the database the config says it should? | 1.6 | ❌ No |
+| R1 changelog consistency | Does the changelog/checksum match the files on disk? | 1.7 | ❌ No |
+| R2 Long transactions / lock waits | Are there already stuck transactions or MDL waits before execution? | 1.1 | ✅ Yes |
+| R3 Writability / replica check | Is the target a read-only replica? | Variant of 1.6 | Read-only → ❌; lagging → ✅ |
+| R4 Disk/binlog space | Could a large ALTER exhaust available space? | 1.2 | ✅ Yes |
 
-R0/R1 完全沒有覆寫選項，是刻意設計——連錯資料庫、changelog 對不上，都是「有人該去看一眼」的狀況，不是「風險可接受就跳過」的狀況。
+R0/R1 deliberately have no override option — connecting to the wrong database or a mismatched changelog is a "someone needs to go look at this" situation, not a "skip it if the risk is acceptable" situation.
 
 ---
 
-## 5. 事前檢查清單（跑正式環境 DDL 前）
+## 5. Pre-flight checklist (before running DDL in production)
 
-在 Gate R0-R4 自動化之前，這是目前該手動做的檢查，直接可以複製執行：
+Until Gates R0-R4 are automated, here's what should be checked manually — ready to copy and run:
 
 ```sql
--- 1. 確認連到的是預期的資料庫
+-- 1. Confirm you're connected to the expected database
 SELECT DATABASE();
 
--- 2. 有沒有長交易還沒 commit
+-- 2. Are there long-running transactions that haven't committed
 SELECT trx_id, trx_mysql_thread_id,
        TIMESTAMPDIFF(SECOND, trx_started, NOW()) AS duration_sec,
        trx_rows_modified, trx_query
@@ -106,86 +106,86 @@ FROM information_schema.INNODB_TRX
 WHERE TIMESTAMPDIFF(SECOND, trx_started, NOW()) > 5
 ORDER BY duration_sec DESC;
 
--- 3. 有沒有連線正在等 MDL
+-- 3. Are there any connections currently waiting on an MDL
 SELECT id, user, host, time, state, info
 FROM information_schema.PROCESSLIST
 WHERE state LIKE '%metadata lock%' OR state LIKE '%Waiting for table%';
 
--- 4. 這個連線是不是唯讀複本（是的話任何寫入都會失敗，先確認連對節點）
+-- 4. Is this connection a read-only replica (if so, any write will fail — confirm you're on the right node first)
 SELECT @@global.read_only, @@global.innodb_read_only;
 
--- 5.（大表 ALTER 才需要）確認表大小，決定要不要走 pt-online-schema-change
+-- 5. (Only needed for large-table ALTERs) Check table size to decide whether to use pt-online-schema-change
 SELECT table_name, table_rows,
        ROUND(data_length/1024/1024, 1) AS data_mb
 FROM information_schema.TABLES
-WHERE table_schema = DATABASE() AND table_name = '<要改的表>';
+WHERE table_schema = DATABASE() AND table_name = '<table to change>';
 ```
 
-**判斷標準**：2、3 兩項都回傳空結果，才代表現在適合跑。4 回傳 `1` 就先別跑，去接對節點。5 如果表很大且要做的是 `MODIFY/CHANGE COLUMN`/`ENGINE=`，改用 pt-online-schema-change（見下方連結），不要直接跑。
+**Criteria**: it's safe to proceed only if both queries 2 and 3 return empty results. If query 4 returns `1`, stop and connect to the correct node instead. For query 5, if the table is large and you're doing `MODIFY/CHANGE COLUMN`/`ENGINE=`, use pt-online-schema-change instead (see link below) rather than running it directly.
 
-再跑一次 `node src/cli.js validate -c <config>`，確認沒有未放行的 🔴/🟠 操作，也沒有意外的 `ALTER_TABLE_MODIFY`/`ALTER_TABLE_REBUILD` 警告。
-
----
-
-## 6. 執行中的防護
-
-MariaDB DDL 專案預設就有 Lock Guard：每句 migration SQL 執行時，連線先設定短逾時（預設 5 秒 `lock_wait_timeout`），卡鎖就重試最多 3 次、每次間隔 2 秒，全部失敗才真正報錯——不會無限期排隊拖累其他查詢。細節、config 選項、跟「DDL 本身要跑很久會不會被誤判失敗」的問題，見 [LOCK-GUARD.md](./LOCK-GUARD.md)。
+Also re-run `node src/cli.js validate -c <config>` to confirm there are no un-allowed 🔴/🟠 operations, and no unexpected `ALTER_TABLE_MODIFY`/`ALTER_TABLE_REBUILD` warnings.
 
 ---
 
-## 7. 事後中止 / 回滾程序
+## 6. Protection during execution
 
-### 7.1 自動層面（已經有的機制）
+MariaDB DDL projects have Lock Guard enabled by default: before each migration SQL statement runs, the connection sets a short timeout first (default 5-second `lock_wait_timeout`); if it hits a lock, it retries up to 3 times with a 2-second interval, and only reports a real error once all retries are exhausted — it will not queue indefinitely and drag down other queries. For details, config options, and the question of whether a DDL statement that's just naturally slow could be misclassified as a failure, see [LOCK-GUARD.md](./LOCK-GUARD.md).
 
-`up --sanity-check` 執行時，如果 migration 檔案有寫 `PostCheck`，失敗會自動觸發 `down()` 回滾：
+---
 
-- 回滾成功 → 回報失敗原因，資料庫恢復到執行前狀態。
-- **回滾也失敗** → 標記為 `critical`，工具會明確印出「需要人工介入」，這種狀況下**不要**再對同一個連線重跑任何指令，先手動確認資料庫實際狀態。
+## 7. Abort / rollback procedure after the fact
 
-### 7.2 手動中止正在卡住的 migration
+### 7.1 Automatic layer (existing mechanism)
 
-1. 先判斷卡住的是**誰**：用第 5 節的查詢 2、3 找出長交易或等鎖的 session。
-2. **優先考慮 KILL 造成阻塞的那個交易**（如果它是可以重跑的批次作業），而不是 KILL migration 本身——migration 被強制中斷，容易落入 1.8 講的「SQL 跑了、changelog 沒寫」半套狀態。
+When `up --sanity-check` runs, if the migration file has a `PostCheck` defined, a failure automatically triggers a `down()` rollback:
+
+- Rollback succeeds → reports the failure reason; the database returns to its pre-execution state.
+- **Rollback also fails** → marked as `critical`; the tool explicitly prints that "manual intervention is required." In this case, **do not** rerun any command against the same connection — manually confirm the database's actual state first.
+
+### 7.2 Manually aborting a stuck migration
+
+1. First figure out **who** is stuck: use queries 2 and 3 from Section 5 to find the long transaction or the session waiting on the lock.
+2. **Prefer killing the blocking transaction** (if it's a batch job that can safely be rerun) **rather than killing the migration itself** — force-interrupting the migration is likely to land you in the 1.8 "SQL ran, changelog didn't get written" partial state.
    ```sql
-   KILL <thread_id>;  -- 對應第 5 節查詢 2、3 找到的 trx_mysql_thread_id / id
+   KILL <thread_id>;  -- matches the trx_mysql_thread_id / id found via queries 2, 3 in Section 5
    ```
-3. 如果真的必須中止 migration 本身（例如它自己卡死、判斷錯誤），中斷後**先檢查實際 DB 狀態**再決定下一步：
+3. If you truly must abort the migration itself (e.g., it's stuck by itself, or it was a misjudgment), **check the actual DB state first** after interrupting, before deciding what to do next:
    ```bash
    node src/cli.js status -c <config>
    ```
-   如果狀態顯示 pending 但你懷疑 SQL 其實已經跑過（看 `information_schema` 確認該有的表/欄位是否已存在），**不要**直接重跑 `up`——先手動核對，必要時用 `baseline` 手動標記為已套用，或修正 migration 讓它冪等後再跑。
+   If the status shows pending but you suspect the SQL actually already ran (check `information_schema` to confirm whether the expected tables/columns already exist), **do not** just rerun `up` — manually verify first, and if needed use `baseline` to manually mark it as applied, or fix the migration to be idempotent before rerunning.
 
-### 7.3 造成阻塞的是別人（不是 migration 本身）
+### 7.3 The blocker is someone else (not the migration itself)
 
-如果卡住 migration 的是別的應用程式的長交易（就是本手冊起源的那個情境）：
+If a different application's long transaction is blocking the migration (the exact scenario that originated this handbook):
 
-- 找出該交易的來源（`trx_query`、`host`），評估能不能請對方 commit/rollback，而不是直接 KILL 別人的交易——除非已確認那是可以安全中斷的批次作業。
-- 批次作業（大 DELETE/UPDATE）本身應該分批 commit、自己設定合理的 `innodb_lock_wait_timeout`，這是應用團隊的責任，不在 db-migrate 的控制範圍內，但值得在这次事件后一并跟对方团队沟通。
+- Find the source of that transaction (`trx_query`, `host`), and evaluate whether that team can commit/rollback it rather than killing someone else's transaction directly — unless you've already confirmed it's a batch job that's safe to interrupt.
+- Batch jobs (large DELETE/UPDATE) should commit in batches and set a reasonable `innodb_lock_wait_timeout` themselves — that's the responsibility of the application team, not something db-migrate controls, but it's worth raising with that team after an incident like this.
 
 ---
 
-## 8. 怎麼知道這些防護是有效的（原理驗證現況）
+## 8. How do we know these protections actually work (current validation status)
 
-誠實列出目前的驗證程度，不要照單全收：
+An honest account of the current level of validation — don't take any of it at face value:
 
-| 項目 | 驗證方式 | 狀態 |
+| Item | Validation method | Status |
 |---|---|---|
-| Lock Guard 的程式邏輯 | 逐行對照原始碼 + 6 個 mock 單元測試 | ✅ 已驗證 |
-| Lock Guard 在真實 MariaDB 上的行為（3 個 e2e 情境） | `test/integration.test.js`，邏輯已 review | ⚠️ 尚未實際跑過（此環境沒有 Docker/MariaDB） |
-| 驗證規則的分級/annotation 機制 | 對照原始碼逐條核對 + 實際 CLI 執行截圖 | ✅ 已驗證 |
-| FK / orphan-drop 兩個邏輯 bug | 逐步推演 + 具體 SQL 反例 | ✅ 已驗證是真的 bug，尚未修復 |
-| Runtime Gate R0-R4 | 純設計文件 | ❌ 完全未實作，無從驗證 |
-| `reset` 指令 | 13 個 mock 單元測試 | ✅ 已驗證邏輯；未對真實 DB 測過 |
+| Lock Guard's code logic | Line-by-line source review + 6 mocked unit tests | ✅ Validated |
+| Lock Guard's behavior against real MariaDB (3 e2e scenarios) | `test/integration.test.js`, logic reviewed | ⚠️ Not actually run yet (no Docker/MariaDB in this environment) |
+| Validation rule tiering/annotation mechanism | Line-by-line source review + actual CLI execution screenshots | ✅ Validated |
+| The two FK / orphan-drop logic bugs | Manual step-through + concrete SQL counterexamples | ✅ Confirmed real bugs, not yet fixed |
+| Runtime Gate R0-R4 | Design document only | ❌ Not implemented at all, cannot be validated |
+| `reset` command | 13 mocked unit tests | ✅ Logic validated; not tested against a real DB |
 
-完整的測試缺口清單見 [TESTING-GUIDE.md](./TESTING-GUIDE.md#known-test-gaps-audited-2026-09-10) 的「Known test gaps」章節。
+For the full list of test gaps, see the "Known test gaps" section in [TESTING-GUIDE.md](./TESTING-GUIDE.md#known-test-gaps-audited-2026-09-10).
 
 ---
 
-## 相關文件索引
+## Related document index
 
-- [鎖衝突防禦地圖](https://claude.ai/code/artifact/58c23985-91d9-45dd-a137-93819f6f940f)（Artifact）— 四種鎖衝突情境的時間軸圖解
-- [LOCK-GUARD.md](./LOCK-GUARD.md) — Lock Guard 的完整規格
-- [RUNTIME-GATE-PLAN.md](./RUNTIME-GATE-PLAN.md) — Gate R0-R6 完整設計
-- [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md) / [VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) — 驗證規則詳細表
-- [TESTING-GUIDE.md](./TESTING-GUIDE.md) — 測試涵蓋範圍與已知缺口
-- [CLI-USAGE-GUIDE.md](./CLI-USAGE-GUIDE.md) — `reset`、`baseline` 等指令的操作細節
+- [Lock Conflict Defense Map](https://claude.ai/code/artifact/58c23985-91d9-45dd-a137-93819f6f940f) (Artifact) — timeline diagrams of the four lock conflict scenarios
+- [LOCK-GUARD.md](./LOCK-GUARD.md) — full Lock Guard spec
+- [RUNTIME-GATE-PLAN.md](./RUNTIME-GATE-PLAN.md) — full design of Gates R0-R6
+- [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md) / [VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) — detailed validation rule tables
+- [TESTING-GUIDE.md](./TESTING-GUIDE.md) — test coverage and known gaps
+- [CLI-USAGE-GUIDE.md](./CLI-USAGE-GUIDE.md) — operational details for `reset`, `baseline`, and other commands

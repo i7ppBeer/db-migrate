@@ -1,44 +1,44 @@
-# 既有資料庫導入 SOP (Existing Database Onboarding)
+# Existing Database Onboarding SOP
 
-本文檔說明如何將**既有的資料庫**（已有 Schema 和資料）導入 ddl-migrate 工具進行管理。
-
----
-
-## 目錄
-
-1. [導入流程總覽](#1-導入流程總覽)
-2. [Step 1: 環境準備](#2-step-1-環境準備)
-3. [Step 2: 匯出現有 Schema](#3-step-2-匯出現有-schema)
-4. [Step 3: 建立 Baseline Migration](#4-step-3-建立-baseline-migration)
-5. [Step 4: 建立 DCL (使用者/權限)](#5-step-4-建立-dcl-使用者權限)
-6. [Step 5: 執行 Baseline](#6-step-5-執行-baseline)
-7. [Step 6: 驗證導入結果](#7-step-6-驗證導入結果)
-8. [後續開發流程](#8-後續開發流程)
-9. [常見問題](#9-常見問題)
+This document explains how to onboard an **existing database** (one that already has a schema and data) into the ddl-migrate tool for management.
 
 ---
 
-## 1. 導入流程總覽
+## Table of Contents
 
-![導入流程總覽](images/onboarding-flow.drawio.svg)
-
-> 💡 **提示**：此圖表可使用 VS Code 的 [Draw.io Integration](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio) 擴充套件直接編輯。
+1. [Onboarding Flow Overview](#1-onboarding-flow-overview)
+2. [Step 1: Environment Setup](#2-step-1-environment-setup)
+3. [Step 2: Export Existing Schema](#3-step-2-export-existing-schema)
+4. [Step 3: Create Baseline Migration](#4-step-3-create-baseline-migration)
+5. [Step 4: Create DCL (Users/Permissions)](#5-step-4-create-dcl-userspermissions)
+6. [Step 5: Run Baseline](#6-step-5-run-baseline)
+7. [Step 6: Validate Onboarding Results](#7-step-6-validate-onboarding-results)
+8. [Subsequent Development Workflow](#8-subsequent-development-workflow)
+9. [FAQ](#9-faq)
 
 ---
 
-## 2. Step 1: 環境準備
+## 1. Onboarding Flow Overview
 
-### 2.1 建立專案目錄結構
+![Onboarding Flow Overview](images/onboarding-flow.drawio.svg)
+
+> 💡 **Tip**: This diagram can be edited directly using VS Code's [Draw.io Integration](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio) extension.
+
+---
+
+## 2. Step 1: Environment Setup
+
+### 2.1 Create Project Directory Structure
 
 ```bash
-# MariaDB 專案結構
+# MariaDB project structure
 mkdir -p test-fixtures/mariadb/my-project/{ddl,dcl}/migrations
 
-# 或 MongoDB 專案結構
+# Or MongoDB project structure
 mkdir -p test-fixtures/mongodb/my-project/{ddl,dcl}/migrations
 ```
 
-### 2.2 建立 DDL config.js
+### 2.2 Create DDL config.js
 
 **MariaDB (`test-fixtures/mariadb/my-project/ddl/config.js`):**
 
@@ -73,7 +73,7 @@ export default {
 };
 ```
 
-### 2.3 建立 DCL config.js
+### 2.3 Create DCL config.js
 
 **MariaDB (`test-fixtures/mariadb/my-project/dcl/config.js`):**
 
@@ -97,12 +97,12 @@ export default {
 
 ---
 
-## 3. Step 2: 匯出現有 Schema
+## 3. Step 2: Export Existing Schema
 
-### 3.1 MariaDB Schema 匯出
+### 3.1 MariaDB Schema Export
 
 ```bash
-# 匯出 Schema (不含資料)
+# Export schema (no data)
 mysqldump -h localhost -u root -p \
   --no-data \
   --routines \
@@ -110,12 +110,12 @@ mysqldump -h localhost -u root -p \
   --skip-comments \
   my_database > schema-export.sql
 
-# 只匯出特定表
+# Export only specific tables
 mysqldump -h localhost -u root -p \
   --no-data \
   my_database users products orders > schema-export.sql
 
-# 匯出使用者和權限
+# Export users and permissions
 mysql -h localhost -u root -p -N -e "
   SELECT CONCAT('-- User: ', user, '@', host) AS comment,
          CONCAT('CREATE USER IF NOT EXISTS ''', user, '''@''', host, ''' IDENTIFIED BY ''password'';') AS create_stmt
@@ -128,10 +128,10 @@ mysql -h localhost -u root -p -N -e "
 " >> users-export.sql
 ```
 
-### 3.2 MongoDB Schema 匯出
+### 3.2 MongoDB Schema Export
 
 ```bash
-# 匯出所有 Collection 的 indexes 和 validators
+# Export indexes and validators for all collections
 mongosh my_database --eval '
   db.getCollectionNames().forEach(function(coll) {
     print("// Collection: " + coll);
@@ -155,7 +155,7 @@ mongosh my_database --eval '
 ' > schema-export.js
 ```
 
-### 3.3 使用 Docker 匯出
+### 3.3 Export Using Docker
 
 ```bash
 # MariaDB (Docker Compose)
@@ -171,19 +171,19 @@ docker compose exec mongodb mongosh my_database --eval '...' > schema-export.js
 
 ---
 
-## 4. Step 3: 建立 Baseline Migration
+## 4. Step 3: Create Baseline Migration
 
 ### 4.1 MariaDB Baseline
 
-**檔案：`test-fixtures/mariadb/my-project/ddl/migrations/20250101000000-baseline.sql`**
+**File: `test-fixtures/mariadb/my-project/ddl/migrations/20250101000000-baseline.sql`**
 
 ```sql
 -- +migrate Up
 -- ═══════════════════════════════════════════════════════════════
--- Baseline Migration - 既有 Schema 初始化
--- 建立時間: 2025-01-26
--- 說明: 此檔案包含資料庫導入時的既有 Schema
---       不會實際執行，僅用於記錄基準狀態
+-- Baseline Migration - Initialize existing schema
+-- Created: 2025-01-26
+-- Description: This file captures the existing schema at onboarding time.
+--       It is not actually executed; it only records the baseline state.
 -- ═══════════════════════════════════════════════════════════════
 
 -- ─────────────────────────────────────────────────────────────────
@@ -237,7 +237,7 @@ CREATE TABLE IF NOT EXISTS orders (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ─────────────────────────────────────────────────────────────────
--- Stored Procedures (如果有)
+-- Stored Procedures (if any)
 -- ─────────────────────────────────────────────────────────────────
 DELIMITER //
 
@@ -253,8 +253,8 @@ END //
 DELIMITER ;
 
 -- +migrate Down
--- ⚠️ Baseline 不支援 Down (會刪除所有資料)
--- 如需還原，請使用資料庫備份
+-- ⚠️ Baseline does not support Down (this would delete all data)
+-- To restore, use a database backup
 
 DROP PROCEDURE IF EXISTS sp_get_user_orders;
 DROP TABLE IF EXISTS orders;
@@ -264,14 +264,14 @@ DROP TABLE IF EXISTS users;
 
 ### 4.2 MongoDB Baseline
 
-**檔案：`test-fixtures/mongodb/my-project/ddl/migrations/20250101000000-baseline.js`**
+**File: `test-fixtures/mongodb/my-project/ddl/migrations/20250101000000-baseline.js`**
 
 ```javascript
 /**
- * Baseline Migration - 既有 Schema 初始化
- * 建立時間: 2025-01-26
- * 說明: 此檔案包含資料庫導入時的既有 Schema
- *       不會實際執行，僅用於記錄基準狀態
+ * Baseline Migration - Initialize existing schema
+ * Created: 2025-01-26
+ * Description: This file captures the existing schema at onboarding time.
+ *       It is not actually executed; it only records the baseline state.
  */
 
 export async function up(db, client) {
@@ -326,8 +326,8 @@ export async function up(db, client) {
 }
 
 export async function down(db, client) {
-  // ⚠️ Baseline 不建議執行 Down (會刪除所有資料)
-  // 如需還原，請使用資料庫備份
+  // ⚠️ Running Down on a baseline is not recommended (this would delete all data)
+  // To restore, use a database backup
   
   await db.collection('orders').drop().catch(() => {});
   await db.collection('products').drop().catch(() => {});
@@ -337,46 +337,46 @@ export async function down(db, client) {
 
 ---
 
-## 5. Step 4: 建立 DCL (使用者/權限)
+## 5. Step 4: Create DCL (Users/Permissions)
 
 ### 5.1 MariaDB DCL
 
-**檔案：`test-fixtures/mariadb/my-project/dcl/migrations/R__001_app_users.sql`**
+**File: `test-fixtures/mariadb/my-project/dcl/migrations/R__001_app_users.sql`**
 
 ```sql
 -- ═══════════════════════════════════════════════════════════════
 -- DCL: Application Users
--- 說明: 應用程式使用的資料庫帳號
+-- Description: Database account used by the application
 -- ═══════════════════════════════════════════════════════════════
 -- @allow-dangerous: true
--- @description: 建立應用程式帳號
+-- @description: Create application account
 
--- 應用程式帳號 (讀寫)
+-- Application account (read/write)
 CREATE USER IF NOT EXISTS 'app_user'@'%' IDENTIFIED BY 'app_password_here';
 
--- 授予權限
+-- Grant permissions
 GRANT SELECT, INSERT, UPDATE, DELETE ON my_database.* TO 'app_user'@'%';
 
--- 儲存程序執行權限 (如果有)
+-- Stored procedure execution permission (if any)
 GRANT EXECUTE ON my_database.* TO 'app_user'@'%';
 
 FLUSH PRIVILEGES;
 ```
 
-**檔案：`test-fixtures/mariadb/my-project/dcl/migrations/R__002_readonly_users.sql`**
+**File: `test-fixtures/mariadb/my-project/dcl/migrations/R__002_readonly_users.sql`**
 
 ```sql
 -- ═══════════════════════════════════════════════════════════════
 -- DCL: Read-only Users
--- 說明: 報表或分析用的唯讀帳號
+-- Description: Read-only account for reporting or analytics
 -- ═══════════════════════════════════════════════════════════════
 -- @allow-dangerous: true
--- @description: 建立唯讀帳號
+-- @description: Create read-only account
 
--- 唯讀帳號
+-- Read-only account
 CREATE USER IF NOT EXISTS 'readonly_user'@'%' IDENTIFIED BY 'readonly_password_here';
 
--- 只授予 SELECT 權限
+-- Grant SELECT only
 GRANT SELECT ON my_database.* TO 'readonly_user'@'%';
 
 FLUSH PRIVILEGES;
@@ -384,19 +384,19 @@ FLUSH PRIVILEGES;
 
 ### 5.2 MongoDB DCL
 
-**檔案：`test-fixtures/mongodb/my-project/dcl/migrations/R__001_app_users.js`**
+**File: `test-fixtures/mongodb/my-project/dcl/migrations/R__001_app_users.js`**
 
 ```javascript
 /**
  * DCL: Application Users
- * 說明: 應用程式使用的資料庫帳號
+ * Description: Database account used by the application
  * @allow-dangerous: true
  */
 
 export async function up(db, client) {
   const adminDb = client.db('admin');
   
-  // 建立應用程式帳號 (讀寫)
+  // Create application account (read/write)
   try {
     await adminDb.command({
       createUser: 'app_user',
@@ -432,37 +432,37 @@ export async function down(db, client) {
 
 ---
 
-## 6. Step 5: 執行 Baseline
+## 6. Step 5: Run Baseline
 
-### 6.1 使用 baseline 命令 (推薦)
+### 6.1 Use the baseline Command (Recommended)
 
 ```bash
-# 查看有哪些 migration 檔案
+# View which migration files exist
 docker compose run --rm migrate baseline -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 標記所有 DDL 為已執行 (不實際執行 SQL)
+# Mark all DDL as applied (without actually executing the SQL)
 docker compose run --rm migrate baseline --all -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 只標記到某個版本
+# Mark only up to a specific version
 docker compose run --rm migrate baseline --up-to 20250101000000-baseline -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 預覽 (不實際標記)
+# Preview (without actually marking)
 docker compose run --rm migrate baseline --all --dry-run -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
-### 6.2 DCL 首次執行
+### 6.2 First-time DCL Execution
 
 ```bash
-# DCL 需要實際執行 (建立使用者/權限)
+# DCL must actually be executed (to create users/permissions)
 docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
-### 6.3 完整導入腳本
+### 6.3 Full Onboarding Script
 
 ```bash
 #!/bin/bash
 # onboard-existing-db.sh
-# 既有資料庫導入腳本
+# Existing database onboarding script
 
 set -e
 
@@ -477,55 +477,55 @@ echo "════════════════════════�
 DDL_CONFIG="/app/test-fixtures/${DB_TYPE}/${PROJECT}/ddl/config.js"
 DCL_CONFIG="/app/test-fixtures/${DB_TYPE}/${PROJECT}/dcl/config.js"
 
-# Step 1: 確認資料庫連線
+# Step 1: Confirm database connection
 echo ""
-echo "Step 1: 確認資料庫連線..."
+echo "Step 1: Confirm database connection..."
 docker compose run --rm migrate status -c $DDL_CONFIG
 
-# Step 2: 標記 DDL Baseline
+# Step 2: Mark DDL baseline
 echo ""
-echo "Step 2: 標記 DDL Baseline..."
+echo "Step 2: Mark DDL baseline..."
 docker compose run --rm migrate baseline --all -c $DDL_CONFIG
 
-# Step 3: 驗證 DDL 狀態
+# Step 3: Validate DDL status
 echo ""
-echo "Step 3: 驗證 DDL 狀態..."
+echo "Step 3: Validate DDL status..."
 docker compose run --rm migrate status -c $DDL_CONFIG
 
-# Step 4: 執行 DCL (建立帳號)
+# Step 4: Run DCL (create accounts)
 echo ""
-echo "Step 4: 執行 DCL..."
+echo "Step 4: Run DCL..."
 docker compose run --rm migrate dcl --validate --allow-dangerous -c $DCL_CONFIG
 
-# Step 5: 驗證 DCL 狀態
+# Step 5: Validate DCL status
 echo ""
-echo "Step 5: 驗證 DCL 狀態..."
+echo "Step 5: Validate DCL status..."
 docker compose run --rm migrate dcl:status -c $DCL_CONFIG
 
 echo ""
 echo "═══════════════════════════════════════════════════════════"
-echo "  ✅ 導入完成！"
+echo "  ✅ Onboarding complete!"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
-echo "後續開發請使用:"
-echo "  # 建立新的 DDL migration"
+echo "For subsequent development, use:"
+echo "  # Create a new DDL migration"
 echo "  docker compose run --rm migrate create 'add-xxx-table' -c $DDL_CONFIG"
 echo ""
-echo "  # 執行 migration"
+echo "  # Run migration"
 echo "  docker compose run --rm migrate up -c $DDL_CONFIG"
 ```
 
 ---
 
-## 7. Step 6: 驗證導入結果
+## 7. Step 6: Validate Onboarding Results
 
-### 7.1 檢查 DDL 狀態
+### 7.1 Check DDL Status
 
 ```bash
 docker compose run --rm migrate status -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
-**預期輸出：**
+**Expected output:**
 ```
 [STATUS] Database: mariadb
 ──────────────────────────────────────────────────
@@ -537,86 +537,86 @@ docker compose run --rm migrate status -c /app/test-fixtures/mariadb/my-project/
    (none)
 ```
 
-### 7.2 檢查 DCL 狀態
+### 7.2 Check DCL Status
 
 ```bash
 docker compose run --rm migrate dcl:status -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
-### 7.3 驗證資料庫帳號
+### 7.3 Validate Database Accounts
 
 ```bash
-# MariaDB - 檢查使用者
+# MariaDB - check users
 docker compose exec mariadb mariadb -u root -prootpass -e "SELECT user, host FROM mysql.user WHERE user LIKE 'app%' OR user LIKE 'readonly%';"
 
-# MongoDB - 檢查使用者
+# MongoDB - check users
 docker compose exec mongodb mongosh admin --eval "db.getUsers()"
 ```
 
 ---
 
-## 8. 後續開發流程
+## 8. Subsequent Development Workflow
 
-導入完成後，後續的開發流程如下：
+After onboarding is complete, the subsequent development workflow is as follows:
 
-### 8.1 建立新的 DDL Migration
+### 8.1 Create a New DDL Migration
 
 ```bash
-# 建立新的 migration 檔案
+# Create a new migration file
 docker compose run --rm migrate create 'add-user-profile-table' -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 編輯檔案: 20250126100000-add-user-profile-table.sql
+# Edit file: 20250126100000-add-user-profile-table.sql
 ```
 
-### 8.2 執行 Migration
+### 8.2 Run Migration
 
 ```bash
-# 預覽
+# Preview
 docker compose run --rm migrate up --dry-run -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 執行
+# Run
 docker compose run --rm migrate up -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
-### 8.3 新增 DCL
+### 8.3 Add DCL
 
 ```bash
-# 建立新的 DCL 檔案
+# Create a new DCL file
 docker compose run --rm migrate create-dcl 'new-service-account' -n 003 -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 
-# 執行
+# Run
 docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
 ---
 
-## 9. 常見問題
+## 9. FAQ
 
-### Q1: Baseline 會執行 SQL 嗎？
+### Q1: Does Baseline Execute SQL?
 
-**A:** 不會。`baseline` 命令只會在 changelog 表中記錄該 migration 已執行，不會實際執行 SQL 內容。這是因為既有資料庫已經有這些 Schema 了。
+**A:** No. The `baseline` command only records in the changelog table that the migration has been applied; it does not actually execute the SQL content. This is because the existing database already has this schema.
 
-### Q2: 如果 Baseline 檔案的 Schema 與實際不符怎麼辦？
+### Q2: What If the Baseline File's Schema Doesn't Match Reality?
 
-**A:** Baseline 檔案主要用於記錄「這是起始狀態」，即使與實際 Schema 有些許差異，也不影響後續的增量 migration。但建議盡量保持一致，方便未來參考。
+**A:** The baseline file is mainly used to record "this is the starting state." Even if it differs slightly from the actual schema, it does not affect subsequent incremental migrations. However, it is recommended to keep it as consistent as possible for future reference.
 
-### Q3: 可以有多個 Baseline 檔案嗎？
+### Q3: Can There Be Multiple Baseline Files?
 
-**A:** 可以，但不建議。通常一個 baseline 檔案就夠了。如果 Schema 太大，可以拆成多個檔案：
+**A:** Yes, but it's not recommended. Usually one baseline file is enough. If the schema is too large, you can split it into multiple files:
 - `20250101000001-baseline-users.sql`
 - `20250101000002-baseline-products.sql`
 - `20250101000003-baseline-orders.sql`
 
-### Q4: DCL 需要 Baseline 嗎？
+### Q4: Does DCL Need a Baseline?
 
-**A:** DCL 使用 Repeatable (R__) 格式，不需要 baseline。每次執行都會重新套用（冪等性），所以只要建立正確的 DCL 檔案並執行即可。
+**A:** DCL uses the Repeatable (R__) format and doesn't need a baseline. It is reapplied every time it runs (idempotent), so you just need to create the correct DCL file and run it.
 
-### Q5: 如何處理多環境（DEV/STG/PROD）？
+### Q5: How to Handle Multiple Environments (DEV/STG/PROD)?
 
 **A:** 
-1. 每個環境使用相同的 migration 檔案
-2. 透過環境變數切換資料庫連線
-3. 先在 DEV 測試，再推到 STG/PROD
+1. Use the same migration files across every environment
+2. Switch the database connection via environment variables
+3. Test in DEV first, then promote to STG/PROD
 
 ```bash
 # DEV
@@ -626,55 +626,56 @@ MARIADB_HOST=dev-db.example.com ./scripts/onboard-existing-db.sh
 MARIADB_HOST=prod-db.example.com ./scripts/onboard-existing-db.sh
 ```
 
-### Q6: 導入後發現漏掉了某個 Table 怎麼辦？
+### Q6: What If a Table Was Missed During Onboarding?
 
-**A:** 建立新的 migration 來補上：
+**A:** Create a new migration to add it:
 
 ```bash
-# 建立補充 migration
+# Create a supplementary migration
 docker compose run --rm migrate create 'add-missing-audit-table' -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
-### Q7: 如何回滾到 Baseline 之前？
+### Q7: How to Roll Back to Before the Baseline?
 
-**A:** 不建議這樣做。如果真的需要，請：
-1. 使用資料庫備份還原
-2. 清空 changelog 表
-3. 重新執行 baseline
+**A:** This is not recommended. If truly necessary:
+1. Restore from a database backup
+2. Clear the changelog table
+3. Re-run baseline
 
 ---
 
-## 快速參考卡
+## Quick Reference Card
 
 ```bash
 # ═══════════════════════════════════════════════════════════════
-# 既有資料庫導入 - 快速指令
+# Existing Database Onboarding - Quick Commands
 # ═══════════════════════════════════════════════════════════════
 
-# 1. 建立目錄
+# 1. Create directories
 mkdir -p test-fixtures/mariadb/my-project/{ddl,dcl}/migrations
 
-# 2. 建立 config.js（沒有現成的 _templates 目錄，直接複製一個真實範例來改，
-#    DCL 記得補上 mode: 'repeatable'，見上方 2.3 節）
+# 2. Create config.js (there is no ready-made _templates directory —
+#    just copy a real example and edit it; remember to add
+#    mode: 'repeatable' for DCL, see section 2.3 above)
 cp test-fixtures/mariadb/test-success/ddl/config.js test-fixtures/mariadb/my-project/ddl/
 cp test-fixtures/mariadb/test-success/dcl/config.js test-fixtures/mariadb/my-project/dcl/
 
-# 3. 匯出現有 Schema 並建立 baseline 檔案
-# ... (手動編輯)
+# 3. Export the existing schema and create a baseline file
+# ... (manual editing)
 
-# 4. 標記 Baseline
+# 4. Mark baseline
 docker compose run --rm migrate baseline --all \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 5. 執行 DCL
+# 5. Run DCL
 docker compose run --rm migrate dcl --validate --allow-dangerous \
   -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 
-# 6. 驗證
+# 6. Validate
 docker compose run --rm migrate status \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 後續: 建立新 migration
+# Next: create a new migration
 docker compose run --rm migrate create 'add-xxx' \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```

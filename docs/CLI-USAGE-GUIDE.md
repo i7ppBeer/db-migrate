@@ -1,15 +1,15 @@
-# 資料庫遷移操作指南
+# Database Migration Operations Guide
 
-## 目錄結構
+## Directory Structure
 
 ```
 test-fixtures/
 ├── mariadb/
 │   ├── production-server/
-│   │   ├── ddl/                 # DDL (版本化遷移)
+│   │   ├── ddl/                 # DDL (versioned migrations)
 │   │   │   ├── config.js
 │   │   │   └── migrations/
-│   │   └── dcl/                 # DCL (可重複遷移)
+│   │   └── dcl/                 # DCL (repeatable migrations)
 │   │       ├── config.js
 │   │       └── migrations/
 │   ├── test-success/
@@ -18,84 +18,84 @@ test-fixtures/
 │   ├── test-failure/
 │   │   ├── ddl/
 │   │   └── dcl/
-│   └── multi-instance/          # 多資料庫實例
+│   └── multi-instance/          # multiple database instances
 │       ├── config.js
 │       └── migrations/
 └── mongodb/
-    └── (同上結構)
+    └── (same structure as above)
 ```
 
-## 基本指令
+## Basic Commands
 
-### 1. 查看遷移狀態
+### 1. Check Migration Status
 
 ```bash
-# 查看 MariaDB DDL 遷移狀態
+# Check MariaDB DDL migration status
 node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js status
 
-# 查看 MongoDB DDL 遷移狀態
+# Check MongoDB DDL migration status
 node src/cli.js -c test-fixtures/mongodb/test-success/ddl/config.js status
 ```
 
-### 2. 執行遷移 (UP)
+### 2. Run Migrations (UP)
 
 ```bash
-# 執行所有待定遷移
+# Run all pending migrations
 node src/cli.js -c <config-path> up
 
-# 模擬執行（不真正執行）
+# Simulate execution (does not actually run anything)
 node src/cli.js -c <config-path> up --dry-run
 
-# 啟用 Sanity Check（自動回滾失敗的遷移）
+# Enable sanity check (automatically rolls back failed migrations)
 node src/cli.js -c <config-path> up --sanity-check
 
-# 禁用自動回滾
+# Disable auto-rollback
 node src/cli.js -c <config-path> up --sanity-check --no-auto-rollback
 ```
 
-### 3. 回滾遷移 (DOWN)
+### 3. Roll Back Migrations (DOWN)
 
 ```bash
-# 回滾最後一個遷移
+# Roll back the last migration
 node src/cli.js -c <config-path> down
 
-# 回滾最後 N 個遷移
+# Roll back the last N migrations
 node src/cli.js -c <config-path> down -n 3
 ```
 
-### 4. 重置遷移紀錄 (RESET)
+### 4. Reset Migration Records (RESET)
 
-刪除 changelog（DDL）或 checksum（DCL）table/collection 裡**所有**紀錄，讓下一次 `status`/`up`/`dcl` 把所有遷移都當成 pending。**不會**執行 `down()`，也**不會**動到實際的表格/collection 或資料 —— 只清工具自己的追蹤紀錄。
+Deletes **all** records from the changelog (DDL) or checksum (DCL) table/collection, so the next `status`/`up`/`dcl` treats every migration as pending. It does **not** run `down()`, and it does **not** touch the actual tables/collections or data — it only clears the tool's own tracking records.
 
 ```bash
-# 預設是 dry-run：只印出會刪幾筆，不會真的刪
+# Default is dry-run: only prints how many records would be deleted, without actually deleting anything
 node src/cli.js -c <config-path> reset
 
-# 加 --yes 才會真的執行刪除
+# Add --yes to actually perform the deletion
 node src/cli.js -c <config-path> reset --yes
 ```
 
-⚠️ 只清紀錄、不清實際資料，代表重置後再跑 `up` 極可能因為表格/collection 已存在而失敗（除非migration 本身有用 `IF NOT EXISTS`）。**通常只在會被整個重置的開發/測試用資料庫上使用**，正式環境幾乎不會需要。
+⚠️ Since only the records are cleared and the actual data isn't, running `up` again after a reset will very likely fail because the tables/collections already exist (unless the migration itself uses `IF NOT EXISTS`). **This is generally only meant for development/test databases that get reset entirely** — production environments will almost never need it.
 
-### 5. 一次到位：檢查、套用、看結果 (SYNC)
+### 5. One Step: Check, Apply, and See the Result (SYNC)
 
-把 `status` → `up` → 印出實際套用了什麼 → 顯示資料庫真正的目前 schema 串成一步。**如果沒有任何 pending migration，會直接視為錯誤中止**（非 0 exit code），不會靜默通過——部署情境下「預期要更新卻沒東西可更新」通常代表哪裡出錯了。
+Chains `status` → `up` → prints what was actually applied → shows the database's actual current schema, all in one step. **If there are no pending migrations, this is treated as an error and aborts** (non-zero exit code) rather than passing silently — in a deployment context, "expected something to update but there was nothing to update" usually means something went wrong.
 
 ```bash
 node src/cli.js -c <config-path> sync
 
-# 帶 sanity check
+# With sanity check
 node src/cli.js -c <config-path> sync --sanity-check
 
-# 順便存一份 JSON + HTML 報告到指定目錄
+# Also save a JSON + HTML report to the given directory
 node src/cli.js -c <config-path> sync -o ./reports
 ```
 
-`-o <dir>` 會產生 `sync-report-<timestamp>.json` 跟 `.html` 兩份檔案，內容包含：這次套用了哪些 migration、有沒有錯誤、以及套用後資料庫的真實 schema（MariaDB 是逐表列欄位，MongoDB 是逐 collection 列索引 + 從一筆文件推斷出的欄位形狀）。失敗時只存下錯誤資訊，不會附上不確定狀態下的 schema 快照。
+`-o <dir>` produces two files, `sync-report-<timestamp>.json` and `.html`, containing: which migrations were applied this run, whether there were any errors, and the database's actual post-apply schema (for MariaDB, columns listed per table; for MongoDB, indexes per collection plus a field shape inferred from a sample document). On failure, only the error information is saved — no schema snapshot is attached for an uncertain state.
 
-### 6. DCL 帳號/權限變更對比
+### 6. DCL Account/Permission Change Diff
 
-`dcl` 指令執行前後會各拍一次帳號/權限快照（重用 `dcl:verify` 冪等性檢查本來就有的狀態擷取邏輯），有套用任何 migration 就自動顯示差異：
+The `dcl` command takes an account/permission snapshot both before and after it runs (reusing the state-capture logic that `dcl:verify`'s idempotency check already has), and automatically shows a diff if any migration was applied:
 
 ```bash
 node src/cli.js -c <config-path> dcl
@@ -104,58 +104,58 @@ node src/cli.js -c <config-path> dcl
 ```
 [DCL] Account/permission changes (mariadb):
 ────────────────────────────────────────────────────────
-+ 👤 app_writer@%（新帳號）
++ 👤 app_writer@%(new account)
    + GRANT INSERT, UPDATE ON mydb.* TO ... (app_writer@%)
-- 👤 old_service@%（帳號已刪除）
-~ 👤 app@%（權限變更）
+- 👤 old_service@%(account dropped)
+~ 👤 app@%(permission changed)
    + GRANT INSERT ON mydb.* TO ...
    - GRANT DELETE ON mydb.* TO ...
 ────────────────────────────────────────────────────────
 ```
 
-MongoDB 顯示帳號 + roles 變更（`+`/`-`/`~` 同一套風格）；MariaDB 顯示帳號 + GRANT 變更。**Rename 不會被特別標出來**——`RENAME USER`（或 Mongo 的先刪後建）在這套快照對比下，看起來就是「一個帳號被刪、一個新帳號出現」，因為單純比對前後狀態沒辦法判斷這是真的改名還是巧合的一刪一建。
+MongoDB shows account + role changes (using the same `+`/`-`/`~` style); MariaDB shows account + GRANT changes. **A rename is not called out specially** — `RENAME USER` (or Mongo's drop-then-create) looks, under this before/after snapshot comparison, like "one account was dropped and a new one appeared," because comparing state alone can't tell whether it's a genuine rename or a coincidental drop-and-create.
 
 ---
 
-## 🎯 指定特定遷移
+## 🎯 Targeting Specific Migrations
 
-### --target：執行到指定遷移（包含）
+### --target: Run Up To a Specific Migration (Inclusive)
 
-執行從第一個待定遷移到指定遷移的所有遷移。
+Runs every migration from the first pending one up to and including the specified migration.
 
 ```bash
-# 執行到 create-orders（包含 create-users, seed-users, create-products, create-orders）
+# Run up to create-orders (includes create-users, seed-users, create-products, create-orders)
 node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js up --target 20250101000004-create-orders.sql
 
-# 支援部分匹配（只要名稱包含即可）
+# Supports partial matching (matches as long as the name contains the string)
 node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js up --target create-orders
 
-# MongoDB 範例
+# MongoDB example
 node src/cli.js -c test-fixtures/mongodb/test-success/ddl/config.js up --target seed-users
 ```
 
-### --only：只執行指定的單一遷移
+### --only: Run Only a Single Specified Migration
 
-只執行特定的一個遷移（必須在待定列表中）。
+Runs only one specific migration (it must be in the pending list).
 
 ```bash
-# 只執行 add-user-profile
+# Run only add-user-profile
 node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js up --only 20250101000005-add-user-profile.sql
 
-# 支援部分匹配
+# Supports partial matching
 node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js up --only add-user-profile
 
-# MongoDB 範例
+# MongoDB example
 node src/cli.js -c test-fixtures/mongodb/test-success/ddl/config.js up --only create-products
 ```
 
-### 組合使用範例
+### Combined Usage Example
 
 ```bash
-# 先檢查狀態
+# First check the status
 node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js status
 
-# 結果：
+# Result:
 # ✅ Applied (2):
 #    20250101000001-create-users.sql
 #    20250101000002-seed-users.sql
@@ -165,18 +165,18 @@ node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js status
 #    20250101000005-add-user-profile.sql
 #    20250101000006-add-phone-with-sanity.sql
 
-# 只執行到 create-orders（執行 products 和 orders）
+# Run only up to create-orders (runs products and orders)
 node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js up --target create-orders
 
-# 跳過 add-user-profile，只執行 add-phone-with-sanity
+# Skip add-user-profile, run only add-phone-with-sanity
 node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js up --only add-phone-with-sanity
 ```
 
 ---
 
-## 🔄 多資料庫實例
+## 🔄 Multiple Database Instances
 
-### 設定檔範例 (multi-instance/config.js)
+### Config File Example (multi-instance/config.js)
 
 ```javascript
 export default {
@@ -209,130 +209,130 @@ export default {
 };
 ```
 
-### 多實例指令
+### Multi-Instance Commands
 
 ```bash
-# 測試所有實例（驗證 + Up-Down-Up 測試）
+# Test all instances (validate + Up-Down-Up test)
 node src/cli.js -c test-fixtures/mariadb/multi-instance/config.js test-instances
 
-# 只驗證，不執行遷移測試
+# Validate only, without running migration tests
 node src/cli.js -c test-fixtures/mariadb/multi-instance/config.js test-instances --validate-only
 
-# 平行執行（更快但更耗資源）
+# Run in parallel (faster, but uses more resources)
 node src/cli.js -c test-fixtures/mariadb/multi-instance/config.js test-instances --parallel
 ```
 
 ---
 
-## 🔍 驗證遷移
+## 🔍 Validating Migrations
 
-### 驗證遷移檔案的安全性
+### Validating Migration File Safety
 
 ```bash
-# 驗證 DDL 遷移（檢查危險操作、DCL 混用等）
+# Validate DDL migrations (checks for dangerous operations, DCL mixed in, etc.)
 node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js validate
 
-# 驗證失敗案例（應該報錯）
+# Validate the failure case (should report an error)
 node src/cli.js -c test-fixtures/mariadb/test-failure/ddl/config.js validate
 ```
 
-驗證會檢查：
-- 🔴 **禁止操作**：DROP DATABASE、使用者管理（應在 DCL）
-- 🟠 **危險操作**：TRUNCATE、DROP TABLE（無對應 CREATE）
-- 🟡 **警告提示**：可能影響效能的操作
+Validation checks for:
+- 🔴 **Forbidden operations**: DROP DATABASE, user management (should be in DCL)
+- 🟠 **Dangerous operations**: TRUNCATE, DROP TABLE (with no matching CREATE)
+- 🟡 **Warnings**: operations that may affect performance
 
 ---
 
-## 📊 CI/CD 測試流程
+## 📊 CI/CD Test Flow
 
-### 完整 CI 測試（Up → Down → Up）
+### Full CI Test (Up → Down → Up)
 
 ```bash
-# 1. 重置資料庫
+# 1. Reset the database
 docker exec test-mariadb mariadb -uroot -prootpass -e "DROP DATABASE IF EXISTS test_db; CREATE DATABASE test_db;"
 
-# 2. 檢查初始狀態
+# 2. Check the initial status
 node src/cli.js -c <config> status
 
-# 3. 執行 UP
+# 3. Run UP
 node src/cli.js -c <config> up
 
-# 4. 執行 DOWN
+# 4. Run DOWN
 node src/cli.js -c <config> down
 
-# 5. 再次執行 UP
+# 5. Run UP again
 node src/cli.js -c <config> up
 
-# 6. 檢查最終狀態
+# 6. Check the final status
 node src/cli.js -c <config> status
 ```
 
-### 使用測試指令
+### Using the Test Command
 
 ```bash
-# 自動執行完整測試流程（單一資料庫）
+# Automatically run the full test flow (single database)
 node src/cli.js -c <config> test
 
-# 多實例測試
+# Multi-instance test
 node src/cli.js -c <config> test-instances
 ```
 
 ---
 
-## 📁 常用配置路徑
+## 📁 Common Config Paths
 
-| 類型 | 路徑 |
+| Type | Path |
 |------|------|
-| MariaDB DDL 成功案例 | `test-fixtures/mariadb/test-success/ddl/config.js` |
-| MariaDB DCL 成功案例 | `test-fixtures/mariadb/test-success/dcl/config.js` |
-| MariaDB DDL 失敗案例 | `test-fixtures/mariadb/test-failure/ddl/config.js` |
-| MariaDB 多實例 | `test-fixtures/mariadb/multi-instance/config.js` |
-| MongoDB DDL 成功案例 | `test-fixtures/mongodb/test-success/ddl/config.js` |
-| MongoDB DCL 成功案例 | `test-fixtures/mongodb/test-success/dcl/config.js` |
-| MongoDB 多實例 | `test-fixtures/mongodb/multi-instance/config.js` |
+| MariaDB DDL success case | `test-fixtures/mariadb/test-success/ddl/config.js` |
+| MariaDB DCL success case | `test-fixtures/mariadb/test-success/dcl/config.js` |
+| MariaDB DDL failure case | `test-fixtures/mariadb/test-failure/ddl/config.js` |
+| MariaDB multi-instance | `test-fixtures/mariadb/multi-instance/config.js` |
+| MongoDB DDL success case | `test-fixtures/mongodb/test-success/ddl/config.js` |
+| MongoDB DCL success case | `test-fixtures/mongodb/test-success/dcl/config.js` |
+| MongoDB multi-instance | `test-fixtures/mongodb/multi-instance/config.js` |
 
 ---
 
-## 🐳 Docker 測試環境
+## 🐳 Docker Test Environment
 
-### 啟動測試資料庫
+### Starting the Test Databases
 
 ```bash
-# 啟動 MongoDB 和 MariaDB
+# Start MongoDB and MariaDB
 docker compose -f docker-compose.local-test.yml up -d mongodb mariadb
 
-# 檢查狀態
+# Check status
 docker compose -f docker-compose.local-test.yml ps
 
-# 查看日誌
+# View logs
 docker compose -f docker-compose.local-test.yml logs -f
 ```
 
-### 資料庫連線資訊
+### Database Connection Info
 
-| 資料庫 | Host | Port | User | Password | Database |
+| Database | Host | Port | User | Password | Database |
 |--------|------|------|------|----------|----------|
 | MariaDB | localhost | 3306 | root | rootpass | test_* |
 | MongoDB | localhost | 27017 | - | - | test_* |
 
 ---
 
-## ⚠️ 注意事項
+## ⚠️ Notes
 
-1. **DDL vs DCL 分離**：
-   - DDL（Data Definition Language）：CREATE TABLE, ALTER TABLE 等結構變更
-   - DCL（Data Control Language）：CREATE USER, GRANT 等權限管理
-   - DCL 應使用 Repeatable 模式，檔案命名為 `R__xxx.sql`
+1. **DDL vs DCL separation**:
+   - DDL (Data Definition Language): structural changes such as CREATE TABLE, ALTER TABLE
+   - DCL (Data Control Language): permission management such as CREATE USER, GRANT
+   - DCL should use Repeatable mode, with files named `R__xxx.sql`
 
-2. **--only 限制**：
-   - 只能執行**待定列表**中的遷移
-   - 如果遷移已執行過，需要先 down 再 up
+2. **--only limitation**:
+   - Can only run migrations that are in the **pending list**
+   - If a migration has already run, you need to `down` before `up`
 
-3. **多實例注意**：
-   - 所有實例共用相同的遷移檔案
-   - 每個實例有獨立的 changelog 表
+3. **Multi-instance notes**:
+   - All instances share the same migration files
+   - Each instance has its own changelog table
 
-4. **`reset` 只清紀錄、不清資料**：
-   - 只刪 changelog/checksum 裡的追蹤紀錄，不執行 `down()`、不動實際表格/collection
-   - 重置後跑 `up` 若表格/collection 已存在（沒有 `IF NOT EXISTS`）會直接失敗
-   - 預設 dry-run，需要 `--yes` 才會真的刪除
+4. **`reset` only clears records, not data**:
+   - Only deletes tracking records in changelog/checksum; does not run `down()` and does not touch the actual tables/collections
+   - After a reset, running `up` will fail outright if the tables/collections already exist (without `IF NOT EXISTS`)
+   - Defaults to dry-run; requires `--yes` to actually delete

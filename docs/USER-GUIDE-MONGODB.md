@@ -1,56 +1,56 @@
-# MongoDB DDL/DCL 編寫指南
+# MongoDB DDL/DCL Migration Guide
 
-> ⚠️ **未完整核實（2026-09-11 稽核）**：本文件跟已確認過期的 `MIGRATION-MANAGEMENT-GUIDE.md` 同批次撰寫，關鍵字抽查沒發現壞的 flag/code，但沒有逐行對照原始碼——不算「已驗證正確」，只是「沒抽到明顯的錯」。規則細節請以 [VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) 為準。
+> ⚠️ **Not fully verified (2026-09-11 audit)**: This document was written in the same batch as `MIGRATION-MANAGEMENT-GUIDE.md`, which has already been confirmed outdated. A keyword spot-check found no broken flags/code, but there was no line-by-line comparison against the source code — this is not "verified correct," only "no obvious errors found in the sample." For rule details, treat [VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) as authoritative.
 
-> 本指南說明如何為 MongoDB 編寫 DDL (資料定義語言) 和 DCL (資料控制語言) Migration 檔案。
-
----
-
-## 📋 目錄
-
-1. [檔案類型說明](#1-檔案類型說明)
-2. [Versioned vs Repeatable 語法對照](#2-versioned-vs-repeatable-語法對照)
-3. [Migration 檔案結構詳解](#3-migration-檔案結構詳解)
-4. [危險指令列表](#4-危險指令列表)
-5. [如何允許危險指令](#5-如何允許危險指令)
-6. [Sanity Check 機制](#6-sanity-check-機制)
-7. [Docker 環境設定與 CLI 使用](#7-docker-環境設定與-cli-使用)
-8. [情境範例教學](#8-情境範例教學)
+> This guide explains how to write DDL (Data Definition Language) and DCL (Data Control Language) migration files for MongoDB.
 
 ---
 
-## 1. 檔案類型說明
+## 📋 Table of Contents
+
+1. [File Types](#1-file-types)
+2. [Versioned vs Repeatable Syntax Comparison](#2-versioned-vs-repeatable-syntax-comparison)
+3. [Migration File Structure](#3-migration-file-structure)
+4. [Dangerous Command List](#4-dangerous-command-list)
+5. [How to Allow Dangerous Commands](#5-how-to-allow-dangerous-commands)
+6. [Sanity Check Mechanism](#6-sanity-check-mechanism)
+7. [Docker Environment Setup and CLI Usage](#7-docker-environment-setup-and-cli-usage)
+8. [Scenario Examples](#8-scenario-examples)
+
+---
+
+## 1. File Types
 
 ### DDL (Versioned Migration)
-- **用途**：Schema 變更（建立 Collection、Index、Validation）
-- **檔名格式**：`YYYYMMDDHHMMSS-description.js`
-- **特性**：每個檔案只執行一次，有版本順序
-- **範例**：`20250101000001-create-users.js`
+- **Purpose**: Schema changes (creating collections, indexes, validation)
+- **File name format**: `YYYYMMDDHHMMSS-description.js`
+- **Characteristics**: Each file runs exactly once, in version order
+- **Example**: `20250101000001-create-users.js`
 
 ### DCL (Repeatable Migration)
-- **用途**：權限管理（使用者、角色、授權）
-- **檔名格式**：`R__NNN_description.js`
-- **特性**：checksum 變更時重新執行，必須是冪等操作
-- **範例**：`R__001_create_app_user.js`
+- **Purpose**: Permission management (users, roles, grants)
+- **File name format**: `R__NNN_description.js`
+- **Characteristics**: Re-run whenever the checksum changes; must be idempotent
+- **Example**: `R__001_create_app_user.js`
 
 ---
 
-## 2. Versioned vs Repeatable 語法對照
+## 2. Versioned vs Repeatable Syntax Comparison
 
-### 📁 Versioned (DDL) - 一次性執行
+### 📁 Versioned (DDL) - One-time Execution
 
-| 操作類型 | 語法範例 | 說明 |
+| Operation Type | Syntax Example | Notes |
 |---------|---------|------|
-| 建立 Collection | `db.createCollection('users')` | ✅ 標準用法 |
-| 建立索引 | `db.collection('users').createIndex({email: 1})` | ✅ 標準用法 |
-| 建立唯一索引 | `createIndex({email: 1}, {unique: true})` | ✅ 標準用法 |
-| 建立複合索引 | `createIndex({status: 1, createdAt: -1})` | ✅ 標準用法 |
-| 設定 Schema Validation | `db.command({collMod: ...})` | ✅ 標準用法 |
-| 刪除 Collection | `db.collection('xxx').drop()` | ⚠️ 需在 down() |
-| 刪除索引 | `db.collection('xxx').dropIndex()` | ⚠️ 危險操作 |
-| 插入初始資料 | `db.collection('xxx').insertMany()` | ✅ 標準用法 |
+| Create collection | `db.createCollection('users')` | ✅ Standard usage |
+| Create index | `db.collection('users').createIndex({email: 1})` | ✅ Standard usage |
+| Create unique index | `createIndex({email: 1}, {unique: true})` | ✅ Standard usage |
+| Create compound index | `createIndex({status: 1, createdAt: -1})` | ✅ Standard usage |
+| Set schema validation | `db.command({collMod: ...})` | ✅ Standard usage |
+| Drop collection | `db.collection('xxx').drop()` | ⚠️ Needs a matching down() |
+| Drop index | `db.collection('xxx').dropIndex()` | ⚠️ Dangerous operation |
+| Insert seed data | `db.collection('xxx').insertMany()` | ✅ Standard usage |
 
-**檔案結構：**
+**File structure:**
 ```javascript
 export async function up(db, client) {
   await db.createCollection('users');
@@ -65,19 +65,19 @@ export async function down(db, client) {
 }
 ```
 
-### 📁 Repeatable (DCL) - 可重複執行
+### 📁 Repeatable (DCL) - Repeatable Execution
 
-| 操作類型 | 語法範例 | 說明 |
+| Operation Type | Syntax Example | Notes |
 |---------|---------|------|
-| 建立使用者 | `db.command({createUser: ...})` | ✅ 需先檢查存在 |
-| 更新使用者 | `db.command({updateUser: ...})` | ✅ 天生冪等 |
-| 刪除使用者 | `db.command({dropUser: ...})` | ✅ 需先檢查存在 |
-| 建立角色 | `db.command({createRole: ...})` | ✅ 需先檢查存在 |
-| 更新角色 | `db.command({updateRole: ...})` | ✅ 天生冪等 |
-| 授予角色 | `db.command({grantRolesToUser: ...})` | ✅ 天生冪等 |
-| 撤銷角色 | `db.command({revokeRolesFromUser: ...})` | ✅ 天生冪等 |
+| Create user | `db.command({createUser: ...})` | ✅ Must check existence first |
+| Update user | `db.command({updateUser: ...})` | ✅ Naturally idempotent |
+| Drop user | `db.command({dropUser: ...})` | ✅ Must check existence first |
+| Create role | `db.command({createRole: ...})` | ✅ Must check existence first |
+| Update role | `db.command({updateRole: ...})` | ✅ Naturally idempotent |
+| Grant role | `db.command({grantRolesToUser: ...})` | ✅ Naturally idempotent |
+| Revoke role | `db.command({revokeRolesFromUser: ...})` | ✅ Naturally idempotent |
 
-**檔案結構：**
+**File structure:**
 ```javascript
 // @description: Application users management
 // @type: dcl
@@ -110,48 +110,48 @@ export async function down(db, client) {
 
 ---
 
-## 3. Migration 檔案結構詳解
+## 3. Migration File Structure
 
-### 3.1 完整檔案結構圖
+### 3.1 Full File Structure Diagram
 
-#### MongoDB Migration 檔案結構 (.js)
+#### MongoDB Migration File Structure (.js)
 
-**📄 ANNOTATION 區塊** *(可選)*
-> 使用 `//` 註解的 metadata 設定
+**📄 ANNOTATION block** *(optional)*
+> Metadata configured via `//` comments
 
 ```javascript
-// @description: 說明這個 migration 的用途
+// @description: Describes the purpose of this migration
 // @allow-dangerous: true
 ```
 
 ---
 
-**🔵 UP 函數** *(必要)*
+**🔵 UP function** *(required)*
 > `export async function up(db, client) { ... }`
 
-包含以下子區塊：
+Contains the following sub-blocks:
 
-| 區塊 | 寫法 | 必要性 | 說明 |
+| Block | Syntax | Required | Description |
 |------|------|--------|------|
-| 🟡 **PreCheck** | `// ══ PreCheck ══` + throw Error | 可選 | 執行前的狀態檢查 |
-| 🟢 **主要邏輯** | `// ══ Main Migration ══` | 必要 | 實際要執行的 DDL 操作 |
-| 🟡 **PostCheck** | `// ══ PostCheck ══` + throw Error | 可選 | 執行後的結果驗證 |
+| 🟡 **PreCheck** | `// ══ PreCheck ══` + throw Error | Optional | State check before execution |
+| 🟢 **Main logic** | `// ══ Main Migration ══` | Required | The actual DDL operations to run |
+| 🟡 **PostCheck** | `// ══ PostCheck ══` + throw Error | Optional | Result validation after execution |
 
-**PreCheck 範例：**
+**PreCheck example:**
 ```javascript
 // ══ PreCheck ══
 const exists = await db.listCollections({name: 'users'}).toArray();
 if (exists.length === 0) throw new Error('PreCheck failed: users collection not found');
 ```
 
-**主要邏輯範例：**
+**Main logic example:**
 ```javascript
 // ══ Main Migration ══
 await db.collection('users').createIndex({email: 1});
 await db.collection('users').updateMany(...);
 ```
 
-**PostCheck 範例：**
+**PostCheck example:**
 ```javascript
 // ══ PostCheck ══
 const indexes = await db.collection('users').indexes();
@@ -162,7 +162,7 @@ if (!indexes.find(i => i.name === 'idx_email')) {
 
 ---
 
-**🔴 DOWN 函數** *(建議有)*
+**🔴 DOWN function** *(recommended)*
 > `export async function down(db, client) { ... }`
 
 ```javascript
@@ -172,57 +172,57 @@ await db.collection('users').drop();
 
 ---
 
-#### 完整範例結構
+#### Full Example Structure
 
 ```javascript
-// @description: ...              // ANNOTATION 區塊
+// @description: ...              // ANNOTATION block
 // @allow-dangerous: true
 
-export async function up(db, client) {   // UP 函數開始
+export async function up(db, client) {   // UP function starts
   
-  // ══ PreCheck ══               // PreCheck 開始
+  // ══ PreCheck ══               // PreCheck starts
   const exists = await db.listCollections({name: 'users'}).toArray();
   if (exists.length === 0) throw new Error('PreCheck failed');
   
-  // ══ Main Migration ══         // 主要邏輯
+  // ══ Main Migration ══         // Main logic
   await db.createCollection('orders');
   await db.collection('orders').createIndex({userId: 1});
   
-  // ══ PostCheck ══              // PostCheck 開始
+  // ══ PostCheck ══              // PostCheck starts
   const indexes = await db.collection('orders').indexes();
   if (!indexes.find(i => i.name === 'userId_1')) {
     throw new Error('PostCheck failed');
   }
 }
 
-export async function down(db, client) { // DOWN 函數開始
+export async function down(db, client) { // DOWN function starts
   await db.collection('orders').drop();
 }
 ```
 
-### 3.2 各區塊說明
+### 3.2 Section Descriptions
 
-| 區塊 | 寫法 | 必要性 | 用途 |
+| Block | Syntax | Required | Purpose |
 |------|------|--------|------|
-| **up()** | `export async function up(db, client)` | ✅ 必要 | 定義「正向遷移」邏輯 |
-| **down()** | `export async function down(db, client)` | ⚠️ 建議 | 定義「回滾」邏輯 |
-| **PreCheck** | 在 up() 開頭的檢查程式碼 | ❌ 可選 | 執行前的狀態檢查 |
-| **PostCheck** | 在 up() 結尾的驗證程式碼 | ❌ 可選 | 執行後的結果驗證 |
+| **up()** | `export async function up(db, client)` | ✅ Required | Defines the "forward migration" logic |
+| **down()** | `export async function down(db, client)` | ⚠️ Recommended | Defines the "rollback" logic |
+| **PreCheck** | Check code at the start of up() | ❌ Optional | State check before execution |
+| **PostCheck** | Validation code at the end of up() | ❌ Optional | Result validation after execution |
 
-### 3.3 執行流程
+### 3.3 Execution Flow
 
-![MongoDB 執行流程](images/mongodb-execution-flow.drawio.svg)
+![MongoDB Execution Flow](images/mongodb-execution-flow.drawio.svg)
 
-> 💡 **提示**：此圖表可使用 VS Code 的 [Draw.io Integration](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio) 擴充套件直接編輯。
+> 💡 **Tip**: This diagram can be edited directly using the [Draw.io Integration](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio) extension for VS Code.
 
-### 3.4 基本範例 (只有 up/down)
+### 3.4 Basic Example (up/down only)
 
 ```javascript
 export async function up(db, client) {
-  // 建立 Collection
+  // Create the collection
   await db.createCollection('users');
   
-  // 建立索引
+  // Create indexes
   await db.collection('users').createIndex(
     { email: 1 },
     { unique: true, name: 'uk_users_email' }
@@ -239,11 +239,11 @@ export async function down(db, client) {
 }
 ```
 
-### 3.5 完整範例 (含 PreCheck/PostCheck)
+### 3.5 Full Example (with PreCheck/PostCheck)
 
 ```javascript
 /**
- * 新增 phone 欄位到所有 users
+ * Add a phone field to all users
  * @description: Add phone field to users collection
  * @allow-dangerous: true
  */
@@ -252,50 +252,50 @@ export async function up(db, client) {
   const collection = db.collection('users');
   
   // ═══════════════════════════════════════════════════════════════
-  // PreCheck: 前置檢查
+  // PreCheck: preliminary checks
   // ═══════════════════════════════════════════════════════════════
   
-  // 確認 users collection 存在
+  // Confirm the users collection exists
   const collections = await db.listCollections({ name: 'users' }).toArray();
   if (collections.length === 0) {
     throw new Error('PreCheck failed: users collection does not exist');
   }
   
-  // 確認尚未有 phone 欄位（避免重複執行）
+  // Confirm the phone field doesn't already exist (avoid re-running)
   const existingDoc = await collection.findOne({ phone: { $exists: true } });
   if (existingDoc) {
     console.log('phone field already exists, skipping migration');
-    return; // 冪等性：已存在則跳過
+    return; // Idempotency: skip if already applied
   }
   
   // ═══════════════════════════════════════════════════════════════
-  // Main Migration: 主要邏輯
+  // Main Migration: main logic
   // ═══════════════════════════════════════════════════════════════
   
-  // 為所有文件新增 phone 欄位
+  // Add the phone field to all documents
   const result = await collection.updateMany(
     { phone: { $exists: false } },
     { $set: { phone: null, updatedAt: new Date() } }
   );
   console.log(`Updated ${result.modifiedCount} documents`);
   
-  // 建立索引
+  // Create index
   await collection.createIndex(
     { phone: 1 },
     { name: 'idx_users_phone', sparse: true }
   );
   
   // ═══════════════════════════════════════════════════════════════
-  // PostCheck: 後置驗證
+  // PostCheck: post-execution validation
   // ═══════════════════════════════════════════════════════════════
   
-  // 確認所有文件都有 phone 欄位
+  // Confirm all documents have the phone field
   const missingPhone = await collection.countDocuments({ phone: { $exists: false } });
   if (missingPhone > 0) {
     throw new Error(`PostCheck failed: ${missingPhone} documents still missing phone field`);
   }
   
-  // 確認索引已建立
+  // Confirm the index was created
   const indexes = await collection.indexes();
   const phoneIndex = indexes.find(idx => idx.name === 'idx_users_phone');
   if (!phoneIndex) {
@@ -308,10 +308,10 @@ export async function up(db, client) {
 export async function down(db, client) {
   const collection = db.collection('users');
   
-  // 刪除索引
+  // Drop the index
   await collection.dropIndex('idx_users_phone').catch(() => {});
   
-  // 移除 phone 欄位
+  // Remove the phone field
   await collection.updateMany(
     {},
     { $unset: { phone: '' } }
@@ -319,11 +319,11 @@ export async function down(db, client) {
 }
 ```
 
-### 3.6 Schema Validation 範例
+### 3.6 Schema Validation Example
 
 ```javascript
 /**
- * 設定 products collection 的 Schema Validation
+ * Configure schema validation for the products collection
  */
 
 export async function up(db, client) {
@@ -331,15 +331,15 @@ export async function up(db, client) {
   // PreCheck
   // ═══════════════════════════════════════════════════════════════
   
-  // 確認 collection 存在
+  // Confirm the collection exists
   const collections = await db.listCollections({ name: 'products' }).toArray();
   if (collections.length === 0) {
-    // 不存在則建立
+    // Create it if it doesn't exist
     await db.createCollection('products');
   }
   
   // ═══════════════════════════════════════════════════════════════
-  // Main Migration: 套用 Schema Validation
+  // Main Migration: apply schema validation
   // ═══════════════════════════════════════════════════════════════
   
   await db.command({
@@ -384,7 +384,7 @@ export async function up(db, client) {
 }
 
 export async function down(db, client) {
-  // 移除 Schema Validation
+  // Remove schema validation
   await db.command({
     collMod: 'products',
     validator: {},
@@ -393,28 +393,28 @@ export async function down(db, client) {
 }
 ```
 
-### 3.7 DCL (Repeatable) 範例
+### 3.7 DCL (Repeatable) Example
 
 ```javascript
 /**
- * 建立應用程式使用者
+ * Create application users
  * @description: Create application database users
  * @type: dcl
  * @allow-dangerous: true
  */
 
-// 注意：DCL 檔案也需要 up() 和 down() 函數
-// 但 down() 通常只記錄日誌，不實際回滾
+// Note: DCL files also need up() and down() functions,
+// but down() usually just logs and does not actually roll back
 
 export async function up(db, client) {
   const adminDb = client.db('admin');
   
   // ═══════════════════════════════════════════════════════════════
-  // 建立 app_user (讀寫權限)
+  // Create app_user (read/write permission)
   // ═══════════════════════════════════════════════════════════════
   
   try {
-    // 嘗試建立使用者
+    // Try to create the user
     await adminDb.command({
       createUser: 'app_user',
       pwd: 'secure_password_here',
@@ -425,7 +425,7 @@ export async function up(db, client) {
     console.log('Created user: app_user');
   } catch (error) {
     if (error.code === 51003) {
-      // 使用者已存在，更新角色
+      // User already exists, update its roles
       await adminDb.command({
         updateUser: 'app_user',
         roles: [
@@ -439,7 +439,7 @@ export async function up(db, client) {
   }
   
   // ═══════════════════════════════════════════════════════════════
-  // 建立 readonly_user (唯讀權限)
+  // Create readonly_user (read-only permission)
   // ═══════════════════════════════════════════════════════════════
   
   try {
@@ -467,99 +467,99 @@ export async function up(db, client) {
 }
 
 export async function down(db, client) {
-  // DCL 通常不回滾
+  // DCL typically does not support rollback
   console.log('DCL migrations typically do not support rollback');
   console.log('To remove users, create a new migration');
 }
 ```
 
-### 3.8 關鍵規則總結
+### 3.8 Key Rules Summary
 
-| 規則 | 說明 |
+| Rule | Description |
 |------|------|
-| `export async function up(db, client)` | **必須**有，定義正向遷移邏輯 |
-| `export async function down(db, client)` | **建議**有，定義回滾邏輯 |
-| PreCheck | 在 up() **開頭**寫檢查，失敗時 `throw new Error()` |
-| PostCheck | 在 up() **結尾**寫驗證，失敗時 `throw new Error()` |
-| 冪等性 | 檢查是否已執行過，若是則 `return` 跳過 |
-| 參數 `db` | 當前資料庫實例 |
-| 參數 `client` | MongoDB Client，可用於存取其他資料庫如 `client.db('admin')` |
-| DCL 檔案 | 也需要 up/down 函數，但 down 通常只是記錄日誌 |
+| `export async function up(db, client)` | **Required**, defines the forward migration logic |
+| `export async function down(db, client)` | **Recommended**, defines the rollback logic |
+| PreCheck | Write checks at the **start** of up(); `throw new Error()` on failure |
+| PostCheck | Write validation at the **end** of up(); `throw new Error()` on failure |
+| Idempotency | Check whether it has already run, and `return` early if so |
+| Parameter `db` | The current database instance |
+| Parameter `client` | The MongoDB client, usable to access other databases, e.g. `client.db('admin')` |
+| DCL files | Also need up/down functions, but down usually just logs |
 
 ---
 
-## 4. 危險指令列表
+## 4. Dangerous Command List
 
-### 🔴 絕對禁止 (Forbidden) - 需 `--allow-forbidden`
+### 🔴 Absolutely Forbidden - Requires `--allow-forbidden`
 
-| 代碼 | 語法 | 風險說明 |
+| Code | Syntax | Risk |
 |-----|------|---------|
-| `DROP_DATABASE` | `db.dropDatabase()` | 刪除整個資料庫 |
-| `DROP_DATABASE_CMD` | `{ dropDatabase: 1 }` | 刪除整個資料庫 |
-| `CREATE_USER` | `db.createUser()` | 應在 DCL 專案管理 |
-| `CREATE_USER_CMD` | `{ createUser: ... }` | 應在 DCL 專案管理 |
-| `DROP_USER` | `db.dropUser()` | 應在 DCL 專案管理 |
-| `DROP_USER_CMD` | `{ dropUser: ... }` | 應在 DCL 專案管理 |
-| `UPDATE_USER` | `db.updateUser()` | 應在 DCL 專案管理 |
-| `UPDATE_USER_CMD` | `{ updateUser: ... }` | 應在 DCL 專案管理 |
-| `GRANT_ROLES` | `db.grantRolesToUser()` | 應在 DCL 專案管理 |
-| `REVOKE_ROLES` | `db.revokeRolesFromUser()` | 應在 DCL 專案管理 |
-| `CREATE_ROLE` | `db.createRole()` | 應在 DCL 專案管理 |
-| `DROP_ROLE` | `db.dropRole()` | 應在 DCL 專案管理 |
-| `SHUTDOWN` | `{ shutdown: 1 }` | 關閉資料庫 |
-| `REPL_RECONFIG` | `{ replSetReconfig: ... }` | 變更 Replica Set |
-| `SET_PARAMETER` | `{ setParameter: ... }` | 變更系統參數 |
+| `DROP_DATABASE` | `db.dropDatabase()` | Deletes the entire database |
+| `DROP_DATABASE_CMD` | `{ dropDatabase: 1 }` | Deletes the entire database |
+| `CREATE_USER` | `db.createUser()` | Should be managed in a DCL project |
+| `CREATE_USER_CMD` | `{ createUser: ... }` | Should be managed in a DCL project |
+| `DROP_USER` | `db.dropUser()` | Should be managed in a DCL project |
+| `DROP_USER_CMD` | `{ dropUser: ... }` | Should be managed in a DCL project |
+| `UPDATE_USER` | `db.updateUser()` | Should be managed in a DCL project |
+| `UPDATE_USER_CMD` | `{ updateUser: ... }` | Should be managed in a DCL project |
+| `GRANT_ROLES` | `db.grantRolesToUser()` | Should be managed in a DCL project |
+| `REVOKE_ROLES` | `db.revokeRolesFromUser()` | Should be managed in a DCL project |
+| `CREATE_ROLE` | `db.createRole()` | Should be managed in a DCL project |
+| `DROP_ROLE` | `db.dropRole()` | Should be managed in a DCL project |
+| `SHUTDOWN` | `{ shutdown: 1 }` | Shuts down the database |
+| `REPL_RECONFIG` | `{ replSetReconfig: ... }` | Changes the replica set configuration |
+| `SET_PARAMETER` | `{ setParameter: ... }` | Changes system parameters |
 
-### 🟠 危險操作 (Dangerous) - 需 `--allow-dangerous` 或 `@allow-dangerous`
+### 🟠 Dangerous Operations - Requires `--allow-dangerous` or `@allow-dangerous`
 
-| 代碼 | 語法 | 風險說明 | 建議 |
+| Code | Syntax | Risk | Recommendation |
 |-----|------|---------|------|
-| `DROP_COLLECTION` | `.drop()` | 刪除整個 Collection | 確認有備份 |
-| `DELETE_ALL` | `.deleteMany({})` | 刪除所有文件 | 加上查詢條件 |
-| `REMOVE_ALL` | `.remove({})` | 刪除所有文件 | 用 deleteMany + 條件 |
-| `UPDATE_ALL` | `.updateMany({}, ...)` | 更新所有文件 | 加上查詢條件 |
-| `REPLACE_ONE` | `.replaceOne()` | 完全取代文件 | 用 updateOne + $set |
-| `DROP_INDEX` | `.dropIndex()` | 影響查詢效能 | 確認無查詢使用 |
-| `DROP_INDEXES` | `.dropIndexes()` | 刪除所有索引 | 非常危險 |
-| `RENAME_FIELD` | `{ $rename: ... }` | 破壞應用程式 | 確認引用已更新 |
-| `UNSET_FIELD` | `{ $unset: ... }` | 永久刪除欄位 | 確認欄位無使用 |
-| `RENAME_COLLECTION` | `.renameCollection()` | 破壞應用程式 | 確認引用已更新 |
-| `VALIDATION_ERROR` | `validationAction: "error"` | 寫入失敗 | 先用 "warn" 測試 |
-| `VALIDATION_STRICT` | `validationLevel: "strict"` | 驗證所有文件 | 確認資料符合 |
+| `DROP_COLLECTION` | `.drop()` | Deletes the entire collection | Confirm a backup exists |
+| `DELETE_ALL` | `.deleteMany({})` | Deletes all documents | Add a query filter |
+| `REMOVE_ALL` | `.remove({})` | Deletes all documents | Use deleteMany with a filter |
+| `UPDATE_ALL` | `.updateMany({}, ...)` | Updates all documents | Add a query filter |
+| `REPLACE_ONE` | `.replaceOne()` | Fully replaces a document | Use updateOne + $set |
+| `DROP_INDEX` | `.dropIndex()` | Affects query performance | Confirm no query relies on it |
+| `DROP_INDEXES` | `.dropIndexes()` | Drops all indexes | Very dangerous |
+| `RENAME_FIELD` | `{ $rename: ... }` | Breaks the application | Confirm references were updated |
+| `UNSET_FIELD` | `{ $unset: ... }` | Permanently removes a field | Confirm the field is unused |
+| `RENAME_COLLECTION` | `.renameCollection()` | Breaks the application | Confirm references were updated |
+| `VALIDATION_ERROR` | `validationAction: "error"` | Writes will fail | Test with "warn" first |
+| `VALIDATION_STRICT` | `validationLevel: "strict"` | Validates all documents | Confirm data conforms |
 
-### 🟡 警告提示 (Warnings) - 不阻擋但提醒
+### 🟡 Warnings - Does not block, but flags for attention
 
-| 語法 | 警告說明 |
+| Syntax | Warning |
 |------|---------|
-| `.createIndex()` | 大 Collection 上可能需要較長時間 |
-| `background: false` | 會阻塞操作 |
-| `.aggregate()` | 大數據集上可能耗費大量資源 |
-| `$lookup` | 可能造成效能問題，確認有適當索引 |
-| `sparse: true` | 不會包含 null 值的文件 |
-| `expireAfterSeconds` | TTL 索引會自動刪除過期文件 |
-| `.deleteMany()` | 可能影響大量資料 |
-| `.updateMany()` | 可能影響大量資料 |
+| `.createIndex()` | May take a long time on a large collection |
+| `background: false` | Blocks operations |
+| `.aggregate()` | May consume significant resources on large datasets |
+| `$lookup` | May cause performance issues; confirm proper indexes exist |
+| `sparse: true` | Excludes documents with null values |
+| `expireAfterSeconds` | A TTL index automatically deletes expired documents |
+| `.deleteMany()` | May affect a large amount of data |
+| `.updateMany()` | May affect a large amount of data |
 
 ---
 
-## 5. 如何允許危險指令
+## 5. How to Allow Dangerous Commands
 
-### 方法一：在檔案中加入 Annotation（推薦）
+### Method 1: Add an Annotation in the File (Recommended)
 
 ```javascript
-// @description: 資料清理腳本
+// @description: Data cleanup script
 // @type: maintenance
 // @allow-dangerous: true
 // @allow: DROP_COLLECTION,DELETE_ALL
 
 export async function up(db, client) {
-  // 建立 temp collection 以便後續刪除不是 orphan drop
+  // Create the temp collection first so this isn't an orphan drop
   await db.createCollection('temp_data').catch(() => {});
   
-  // 現在可以安全刪除
+  // Now safe to drop
   await db.collection('temp_data').drop();
   
-  // 刪除舊的 audit logs
+  // Delete old audit logs
   await db.collection('audit_logs').deleteMany({
     createdAt: { $lt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) }
   });
@@ -570,50 +570,50 @@ export async function down(db, client) {
 }
 ```
 
-### 方法二：CLI 參數
+### Method 2: CLI Arguments
 
 ```bash
-# 允許所有危險操作
+# Allow all dangerous operations
 docker compose run --rm migrate dcl --validate --allow-dangerous -c <config>
 
-# 允許所有禁止操作（需團隊審批）
+# Allow all forbidden operations (requires team approval)
 docker compose run --rm migrate dcl --validate --allow-forbidden -c <config>
 
-# 允許特定操作代碼
+# Allow specific operation codes
 docker compose run --rm migrate validate --allow DROP_COLLECTION,DELETE_ALL -c <config>
 ```
 
-### Annotation 完整說明
+### Full Annotation Reference
 
-| Annotation | 值 | 說明 |
+| Annotation | Value | Description |
 |------------|---|------|
-| `@allow-dangerous` | `true` / `false` | 允許所有危險操作 |
-| `@allow-forbidden` | `true` / `false` | 允許所有禁止操作 |
-| `@allow` | `CODE1,CODE2,...` | 允許特定操作代碼 |
-| `@description` | 文字 | 描述此 migration |
-| `@type` | `maintenance` / `dcl` | 類型標記 |
+| `@allow-dangerous` | `true` / `false` | Allow all dangerous operations |
+| `@allow-forbidden` | `true` / `false` | Allow all forbidden operations |
+| `@allow` | `CODE1,CODE2,...` | Allow specific operation codes |
+| `@description` | Text | Describes this migration |
+| `@type` | `maintenance` / `dcl` | Type marker |
 
 ---
 
-## 6. Sanity Check 機制
+## 6. Sanity Check Mechanism
 
-Sanity Check 提供 **Pre-Check（前置檢查）** 和 **Post-Check（後置檢查）** 機制，確保 migration 執行前後的狀態正確，並支援**自動回滾**。
+Sanity Check provides **Pre-Check** and **Post-Check** mechanisms to ensure the state before and after a migration is correct, and supports **automatic rollback**.
 
-### 6.1 Sanity Check 程式碼結構
+### 6.1 Sanity Check Code Structure
 
 ```javascript
 export async function up(db, client) {
   // ═══════════════════════════════════════════════════════
-  // Pre-Check: 前置檢查
+  // Pre-Check: preliminary checks
   // ═══════════════════════════════════════════════════════
   
-  // 檢查 Collection 是否存在
+  // Check whether the collection exists
   const collections = await db.listCollections({ name: 'users' }).toArray();
   if (collections.length === 0) {
     throw new Error('PreCheck failed: users collection does not exist');
   }
   
-  // 檢查欄位是否已存在（避免重複執行）
+  // Check whether the field already exists (avoid re-running)
   const existingDoc = await db.collection('users').findOne({ newField: { $exists: true } });
   if (existingDoc) {
     console.log('Field already exists, skipping migration');
@@ -621,7 +621,7 @@ export async function up(db, client) {
   }
   
   // ═══════════════════════════════════════════════════════
-  // Execute Migration: 執行主要遷移
+  // Execute Migration: run the main migration
   // ═══════════════════════════════════════════════════════
   
   await db.collection('users').updateMany(
@@ -630,10 +630,10 @@ export async function up(db, client) {
   );
   
   // ═══════════════════════════════════════════════════════
-  // Post-Check: 後置檢查
+  // Post-Check: post-execution check
   // ═══════════════════════════════════════════════════════
   
-  // 確認所有文件都有新欄位
+  // Confirm all documents have the new field
   const missingCount = await db.collection('users').countDocuments({ 
     newField: { $exists: false } 
   });
@@ -651,13 +651,13 @@ export async function down(db, client) {
 }
 ```
 
-### 6.2 執行流程
+### 6.2 Execution Flow
 
 ```
 ┌─────────────────┐
-│   Pre-Check     │ ── 失敗 ──→ 拋出 Error，停止執行
+│   Pre-Check     │ ── Fail ──→ Throw Error, stop execution
 └────────┬────────┘
-         │ 成功
+         │ Success
          ▼
 ┌─────────────────┐
 │ Execute Migration│
@@ -665,16 +665,16 @@ export async function down(db, client) {
          │
          ▼
 ┌─────────────────┐
-│   Post-Check    │ ── 失敗 ──→ 拋出 Error（可在外層捕獲並回滾）
+│   Post-Check    │ ── Fail ──→ Throw Error (can be caught and rolled back by the caller)
 └────────┬────────┘
-         │ 成功
+         │ Success
          ▼
-      完成 ✅
+    Complete ✅
 ```
 
-### 6.3 Sanity Check 情境範例
+### 6.3 Sanity Check Scenario Examples
 
-#### 範例 1：新增欄位前確認 Collection 存在
+#### Example 1: Confirm Collection Exists Before Adding a Field
 
 ```javascript
 export async function up(db, client) {
@@ -686,7 +686,7 @@ export async function up(db, client) {
     throw new Error('PreCheck failed: products collection does not exist');
   }
   
-  // 確認 tags 欄位不存在
+  // Confirm the tags field doesn't already exist
   const existingWithTags = await db.collection('products').findOne({ 
     tags: { $exists: true } 
   });
@@ -704,7 +704,7 @@ export async function up(db, client) {
   );
   console.log(`Updated ${result.modifiedCount} products`);
   
-  // 建立索引
+  // Create index
   await db.collection('products').createIndex(
     { tags: 1 },
     { name: 'idx_products_tags' }
@@ -720,7 +720,7 @@ export async function up(db, client) {
     throw new Error(`PostCheck failed: ${missingTags} products still missing tags`);
   }
   
-  // 確認索引存在
+  // Confirm the index exists
   const indexes = await db.collection('products').indexes();
   const hasIndex = indexes.some(idx => idx.name === 'idx_products_tags');
   if (!hasIndex) {
@@ -734,14 +734,14 @@ export async function down(db, client) {
 }
 ```
 
-#### 範例 2：建立索引前確認無重複值
+#### Example 2: Confirm No Duplicate Values Before Creating an Index
 
 ```javascript
 export async function up(db, client) {
   const collection = db.collection('users');
   
   // ═══════════════════════════════════════════════════════
-  // Pre-Check: 確認沒有重複的 email
+  // Pre-Check: confirm there are no duplicate emails
   // ═══════════════════════════════════════════════════════
   const duplicates = await collection.aggregate([
     { $group: { _id: '$email', count: { $sum: 1 } } },
@@ -754,7 +754,7 @@ export async function up(db, client) {
     throw new Error(`PreCheck failed: Duplicate emails found: ${dupEmails}`);
   }
   
-  // 確認沒有 null email
+  // Confirm there are no null emails
   const nullEmails = await collection.countDocuments({ 
     $or: [{ email: null }, { email: '' }] 
   });
@@ -763,7 +763,7 @@ export async function up(db, client) {
   }
   
   // ═══════════════════════════════════════════════════════
-  // Execute Migration: 建立唯一索引
+  // Execute Migration: create the unique index
   // ═══════════════════════════════════════════════════════
   await collection.createIndex(
     { email: 1 },
@@ -771,7 +771,7 @@ export async function up(db, client) {
   );
   
   // ═══════════════════════════════════════════════════════
-  // Post-Check: 確認索引已建立
+  // Post-Check: confirm the index was created
   // ═══════════════════════════════════════════════════════
   const indexes = await collection.indexes();
   const uniqueIndex = indexes.find(idx => idx.name === 'idx_users_email_unique');
@@ -792,32 +792,32 @@ export async function down(db, client) {
 }
 ```
 
-#### 範例 3：資料遷移確認完整性
+#### Example 3: Verify Data Integrity During Migration
 
 ```javascript
 export async function up(db, client) {
   // ═══════════════════════════════════════════════════════
-  // Pre-Check: 確認來源和目標都準備好
+  // Pre-Check: confirm both source and target are ready
   // ═══════════════════════════════════════════════════════
   
-  // 確認來源 Collection 有資料
+  // Confirm the source collection has data
   const sourceCount = await db.collection('old_orders').countDocuments();
   if (sourceCount === 0) {
     console.log('No data to migrate, skipping');
     return;
   }
   
-  // 確認目標 Collection 存在
+  // Confirm the target collection exists
   const collections = await db.listCollections({ name: 'new_orders' }).toArray();
   if (collections.length === 0) {
     throw new Error('PreCheck failed: new_orders collection does not exist');
   }
   
-  // 記錄遷移前的數量
+  // Record the target count before migration
   const beforeTargetCount = await db.collection('new_orders').countDocuments();
   
   // ═══════════════════════════════════════════════════════
-  // Execute Migration: 使用 aggregation pipeline 遷移資料
+  // Execute Migration: migrate data using an aggregation pipeline
   // ═══════════════════════════════════════════════════════
   const pipeline = [
     { $match: { migrated: { $ne: true } } },
@@ -844,17 +844,17 @@ export async function up(db, client) {
   
   await db.collection('old_orders').aggregate(pipeline).toArray();
   
-  // 標記已遷移
+  // Mark as migrated
   await db.collection('old_orders').updateMany(
     { migrated: { $ne: true } },
     { $set: { migrated: true, migratedAt: new Date() } }
   );
   
   // ═══════════════════════════════════════════════════════
-  // Post-Check: 確認遷移完整性
+  // Post-Check: confirm migration completeness
   // ═══════════════════════════════════════════════════════
   
-  // 確認所有來源資料都已標記遷移
+  // Confirm all source data has been marked as migrated
   const unmigrated = await db.collection('old_orders').countDocuments({ 
     migrated: { $ne: true } 
   });
@@ -862,7 +862,7 @@ export async function up(db, client) {
     throw new Error(`PostCheck failed: ${unmigrated} orders not migrated`);
   }
   
-  // 確認目標資料增加了
+  // Confirm the target count increased
   const afterTargetCount = await db.collection('new_orders').countDocuments();
   console.log(`Migrated ${afterTargetCount - beforeTargetCount} orders`);
   
@@ -872,10 +872,10 @@ export async function up(db, client) {
 }
 
 export async function down(db, client) {
-  // 刪除遷移的資料
+  // Delete the migrated data
   await db.collection('new_orders').deleteMany({ migratedAt: { $exists: true } });
   
-  // 重設遷移標記
+  // Reset the migration markers
   await db.collection('old_orders').updateMany(
     { migrated: true },
     { $unset: { migrated: '', migratedAt: '' } }
@@ -883,7 +883,7 @@ export async function down(db, client) {
 }
 ```
 
-#### 範例 4：Schema Validation 變更前確認資料相容
+#### Example 4: Confirm Data Compatibility Before Changing Schema Validation
 
 ```javascript
 export async function up(db, client) {
@@ -891,10 +891,10 @@ export async function up(db, client) {
   const collection = db.collection(collectionName);
   
   // ═══════════════════════════════════════════════════════
-  // Pre-Check: 確認現有資料符合新的 Schema
+  // Pre-Check: confirm existing data conforms to the new schema
   // ═══════════════════════════════════════════════════════
   
-  // 檢查是否有缺少必填欄位的文件
+  // Check for documents missing required fields
   const missingName = await collection.countDocuments({ 
     $or: [{ name: { $exists: false } }, { name: null }, { name: '' }] 
   });
@@ -902,7 +902,7 @@ export async function up(db, client) {
     throw new Error(`PreCheck failed: ${missingName} products missing required 'name' field`);
   }
   
-  // 檢查價格是否都是正數
+  // Check whether all prices are positive
   const invalidPrice = await collection.countDocuments({ 
     $or: [
       { price: { $exists: false } },
@@ -915,7 +915,7 @@ export async function up(db, client) {
   }
   
   // ═══════════════════════════════════════════════════════
-  // Execute Migration: 套用嚴格的 Schema Validation
+  // Execute Migration: apply strict schema validation
   // ═══════════════════════════════════════════════════════
   await db.command({
     collMod: collectionName,
@@ -946,7 +946,7 @@ export async function up(db, client) {
   });
   
   // ═══════════════════════════════════════════════════════
-  // Post-Check: 確認 Schema Validation 已套用
+  // Post-Check: confirm schema validation was applied
   // ═══════════════════════════════════════════════════════
   const collectionInfo = await db.listCollections({ name: collectionName }).toArray();
   const options = collectionInfo[0]?.options;
@@ -963,7 +963,7 @@ export async function up(db, client) {
 }
 
 export async function down(db, client) {
-  // 移除 Schema Validation
+  // Remove schema validation
   await db.command({
     collMod: 'products',
     validator: {},
@@ -972,7 +972,7 @@ export async function down(db, client) {
 }
 ```
 
-#### 範例 5：建立 TTL 索引前確認欄位存在
+#### Example 5: Confirm Field Exists Before Creating a TTL Index
 
 ```javascript
 export async function up(db, client) {
@@ -982,13 +982,13 @@ export async function up(db, client) {
   // Pre-Check
   // ═══════════════════════════════════════════════════════
   
-  // 確認 Collection 存在
+  // Confirm the collection exists
   const collections = await db.listCollections({ name: 'sessions' }).toArray();
   if (collections.length === 0) {
     throw new Error('PreCheck failed: sessions collection does not exist');
   }
   
-  // 確認 expiresAt 欄位存在且是日期類型
+  // Confirm the expiresAt field exists and is a Date type
   const sampleDoc = await collection.findOne({ expiresAt: { $exists: true } });
   if (!sampleDoc) {
     throw new Error('PreCheck failed: No documents with expiresAt field found');
@@ -998,7 +998,7 @@ export async function up(db, client) {
     throw new Error('PreCheck failed: expiresAt is not a Date type');
   }
   
-  // 確認沒有已存在的 TTL 索引
+  // Confirm no TTL index already exists
   const indexes = await collection.indexes();
   const existingTTL = indexes.find(idx => idx.expireAfterSeconds !== undefined);
   if (existingTTL) {
@@ -1013,7 +1013,7 @@ export async function up(db, client) {
     { expiresAt: 1 },
     { 
       name: 'idx_sessions_ttl',
-      expireAfterSeconds: 0  // 在 expiresAt 指定的時間過期
+      expireAfterSeconds: 0  // Expires at the time specified by expiresAt
     }
   );
   
@@ -1041,23 +1041,23 @@ export async function down(db, client) {
 
 ---
 
-## 7. Docker 環境設定與 CLI 使用
+## 7. Docker Environment Setup and CLI Usage
 
-### 7.1 取得 Docker Image
+### 7.1 Getting the Docker Image
 
 ```bash
-# 方法一：從 Registry 拉取（如果已發布）
+# Option 1: Pull from a registry (if published)
 docker pull your-registry/ddl-migrate:latest
 
-# 方法二：本地建置
+# Option 2: Build locally
 git clone https://github.com/your-org/ddl-migrate.git
 cd ddl-migrate
 docker compose build migrate
 ```
 
-### 7.2 本地環境準備
+### 7.2 Local Environment Setup
 
-**目錄結構：**
+**Directory structure:**
 ```
 your-project/
 ├── docker-compose.yml
@@ -1076,7 +1076,7 @@ your-project/
                     └── R__002_readonly_users.js
 ```
 
-**config.js 範例：**
+**config.js example:**
 ```javascript
 export default {
   type: 'mongodb',
@@ -1086,70 +1086,70 @@ export default {
     options: {}
   },
   migrationsDir: './migrations',
-  changelogCollection: 'changelog'  // DDL 用
-  // checksumTable: '_dcl_migrations'    // DCL 用
+  changelogCollection: 'changelog'  // Used for DDL
+  // checksumTable: '_dcl_migrations'    // Used for DCL
 };
 ```
 
-### 7.3 CLI 命令大全
+### 7.3 Full CLI Command Reference
 
 ```bash
 # ═══════════════════════════════════════════════════════════
-# DDL (Versioned) 操作
+# DDL (Versioned) operations
 # ═══════════════════════════════════════════════════════════
 
-# 查看狀態
+# Check status
 docker compose run --rm migrate status -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
-# 執行遷移
+# Run migrations
 docker compose run --rm migrate up -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
-# Dry Run（預覽）
+# Dry run (preview)
 docker compose run --rm migrate up --dry-run -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
-# 回滾 1 個遷移
+# Roll back 1 migration
 docker compose run --rm migrate down -n 1 -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
-# 驗證遷移檔案
+# Validate migration files
 docker compose run --rm migrate validate -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
-# 建立新的 DDL 遷移檔案
+# Create a new DDL migration file
 docker compose run --rm migrate create "add-user-profile" -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
 # ═══════════════════════════════════════════════════════════
-# DCL (Repeatable) 操作
+# DCL (Repeatable) operations
 # ═══════════════════════════════════════════════════════════
 
-# 查看 DCL 狀態
+# Check DCL status
 docker compose run --rm migrate dcl:status -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 
-# 執行 DCL（無驗證）
+# Run DCL (no validation)
 docker compose run --rm migrate dcl -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 
-# 執行 DCL（啟用驗證）
+# Run DCL (with validation enabled)
 docker compose run --rm migrate dcl --validate -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 
-# 執行 DCL（允許危險操作）
+# Run DCL (allow dangerous operations)
 docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 
-# Dry Run（預覽）
+# Dry run (preview)
 docker compose run --rm migrate dcl --dry-run -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 
-# 建立新的 DCL 遷移檔案
+# Create a new DCL migration file
 docker compose run --rm migrate create-dcl "create-app-user" -n 001 -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 ```
 
 ---
 
-## 8. 情境範例教學
+## 8. Scenario Examples
 
-### 情境 1：建立新 Collection 並設定索引 (DDL)
+### Scenario 1: Create a New Collection and Set Up Indexes (DDL)
 
-**檔案**：`20250126000001-create-products.js`
+**File**: `20250126000001-create-products.js`
 
 ```javascript
 export async function up(db, client) {
-  // 建立 Collection 並設定 Schema Validation
+  // Create the collection with schema validation
   await db.createCollection('products', {
     validator: {
       $jsonSchema: {
@@ -1185,7 +1185,7 @@ export async function up(db, client) {
     validationAction: 'warn'
   });
 
-  // 建立索引
+  // Create indexes
   const collection = db.collection('products');
   
   await collection.createIndex(
@@ -1212,27 +1212,27 @@ export async function down(db, client) {
 }
 ```
 
-### 情境 2：修改現有 Collection - 新增欄位和索引 (DDL)
+### Scenario 2: Modify an Existing Collection - Add a Field and Index (DDL)
 
-**檔案**：`20250126000002-add-product-tags.js`
+**File**: `20250126000002-add-product-tags.js`
 
 ```javascript
 export async function up(db, client) {
   const collection = db.collection('products');
   
-  // 新增 tags 欄位到所有現有文件
+  // Add the tags field to all existing documents
   await collection.updateMany(
     { tags: { $exists: false } },
     { $set: { tags: [], updatedAt: new Date() } }
   );
   
-  // 建立 tags 的多鍵索引
+  // Create a multikey index on tags
   await collection.createIndex(
     { tags: 1 },
     { name: 'idx_products_tags' }
   );
   
-  // 更新 Schema Validation（可選）
+  // Update schema validation (optional)
   await db.command({
     collMod: 'products',
     validator: {
@@ -1257,10 +1257,10 @@ export async function up(db, client) {
 export async function down(db, client) {
   const collection = db.collection('products');
   
-  // 移除索引
+  // Drop the index
   await collection.dropIndex('idx_products_tags');
   
-  // 移除欄位
+  // Remove the field
   await collection.updateMany(
     {},
     { $unset: { tags: '' } }
@@ -1270,9 +1270,9 @@ export async function down(db, client) {
 }
 ```
 
-### 情境 3：建立應用程式使用者 (DCL)
+### Scenario 3: Create Application Users (DCL)
 
-**檔案**：`R__001_app_users.js`
+**File**: `R__001_app_users.js`
 
 ```javascript
 // @description: Application database users
@@ -1349,9 +1349,9 @@ export async function down(db, client) {
 }
 ```
 
-### 情境 4：建立自定義角色 (DCL)
+### Scenario 4: Create Custom Roles (DCL)
 
-**檔案**：`R__002_custom_roles.js`
+**File**: `R__002_custom_roles.js`
 
 ```javascript
 // @description: Custom application roles
@@ -1456,9 +1456,9 @@ export async function down(db, client) {
 }
 ```
 
-### 情境 5：危險操作 - 資料清理 (DCL)
+### Scenario 5: Dangerous Operation - Data Cleanup (DCL)
 
-**檔案**：`R__010_data_cleanup.js`
+**File**: `R__010_data_cleanup.js`
 
 ```javascript
 // @description: Periodic data cleanup job
@@ -1536,9 +1536,9 @@ export async function down(db, client) {
 }
 ```
 
-### 情境 6：帶有 Sanity Check 的 Migration (DDL)
+### Scenario 6: Migration with Sanity Check (DDL)
 
-**檔案**：`20250126000003-add-user-preferences.js`
+**File**: `20250126000003-add-user-preferences.js`
 
 ```javascript
 export async function up(db, client) {
@@ -1606,9 +1606,9 @@ export async function down(db, client) {
 }
 ```
 
-### 情境 7：複雜的 Aggregation Pipeline 操作 (DDL)
+### Scenario 7: Complex Aggregation Pipeline Operation (DDL)
 
-**檔案**：`20250126000004-create-materialized-view.js`
+**File**: `20250126000004-create-materialized-view.js`
 
 ```javascript
 export async function up(db, client) {
@@ -1682,20 +1682,20 @@ export async function down(db, client) {
 
 ---
 
-## 📝 最佳實踐
+## 📝 Best Practices
 
-1. **DDL 檔案一定要有 down() 函數**，確保可以回滾
-2. **DCL 檔案必須是冪等的**，先檢查存在再建立/更新
-3. **大 Collection 的索引建立**考慮使用 `{ background: true }` (MongoDB 4.2 之前)
-4. **密碼不要硬編碼**，使用環境變數
-5. **危險操作要有明確的 Annotation**，說明為什麼需要
-6. **使用 try-catch** 處理可能的錯誤
-7. **加上 console.log** 記錄執行過程
+1. **DDL files must always have a down() function** to ensure rollback is possible
+2. **DCL files must be idempotent** — check for existence before creating/updating
+3. **When creating indexes on large collections**, consider using `{ background: true }` (prior to MongoDB 4.2)
+4. **Never hardcode passwords** — use environment variables
+5. **Dangerous operations need an explicit annotation** explaining why they're necessary
+6. **Use try-catch** to handle possible errors
+7. **Add console.log** to record the execution process
 
 ---
 
-## 🔗 相關文件
+## 🔗 Related Documents
 
-- [CLI 使用指南](CLI-USAGE-GUIDE.md)
-- [Docker Compose 使用指南](DOCKER-COMPOSE-USER-GUIDE.md)
-- [Migration 管理指南](MIGRATION-MANAGEMENT-GUIDE.md)
+- [CLI Usage Guide](CLI-USAGE-GUIDE.md)
+- [Docker Compose User Guide](DOCKER-COMPOSE-USER-GUIDE.md)
+- [Migration Management Guide](MIGRATION-MANAGEMENT-GUIDE.md)
