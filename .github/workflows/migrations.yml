@@ -111,11 +111,41 @@ jobs:
           node src/cli.js validate-all test-fixtures/mariadb/test-success
 
   # ============================================================
-  # Job 2: Build Image
+  # Job 2: E2E Test Suite
+  # ============================================================
+  # Full `test-all` run: builds the real image, brings up MariaDB + MongoDB
+  # via docker-compose.yml, and validate+Up-Down-Up/idempotency-tests every
+  # config under test-fixtures/**/config.js against them — the same command
+  # `npm run docker:test` runs locally. This is the one check that actually
+  # exercises migration SQL/JS against real databases end to end; the `test`
+  # job above only lints, runs the mocked unit suite, and DCL-verifies two
+  # fixtures.
+  e2e:
+    name: E2E Test Suite
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run full e2e test suite (test-all)
+        run: docker compose run --build --rm test-all
+
+      - name: Upload test-all reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-all-reports
+          path: reports/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ============================================================
+  # Job 3: Build Image
   # ============================================================
   build:
     name: Build Image
-    needs: test
+    needs: [test, e2e]
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
     permissions:
@@ -171,7 +201,7 @@ jobs:
           echo "Digest: ${{ steps.build.outputs.digest }}"
 
   # ============================================================
-  # Job 3: Deploy to Staging
+  # Job 4: Deploy to Staging
   # ============================================================
   deploy-staging:
     name: Deploy to Staging
@@ -240,7 +270,7 @@ jobs:
           kubectl logs "job/db-migrate-${PROJECT}-sync-${CONTENT_HASH:0:7}" -n "$NAMESPACE" --tail=100
 
   # ============================================================
-  # Job 4: Deploy to Production (Manual Approval)
+  # Job 5: Deploy to Production (Manual Approval)
   # ============================================================
   deploy-production:
     name: Deploy to Production
