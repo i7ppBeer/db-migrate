@@ -139,10 +139,8 @@ docker compose run --rm migrate up-all -c /app/test-fixtures/mariadb/multi-insta
 
 # Dry Run
 docker compose run --rm migrate up-all --dry-run -c /app/test-fixtures/mariadb/multi-instance/ddl/config.js
-
-# Parallel execution
-docker compose run --rm migrate up-all --parallel -c /app/test-fixtures/mariadb/multi-instance/ddl/config.js
 ```
+`up-all` only supports `--dry-run` — there is no `--parallel` flag on it (that flag exists on `test-instances`, below).
 
 ### Test All Instances (`test-instances`)
 ```bash

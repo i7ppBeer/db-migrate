@@ -1,3 +1,4 @@
+// @expect-fail: true
 /**
  * Repeatable Migration: INVALID - Not idempotent
  * This should FAIL because createUser will error on second run

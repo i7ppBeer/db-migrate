@@ -4,6 +4,7 @@
  * Supports multiple database instances in a single config
  */
 
+import { isAbsolute } from 'path';
 import { MongoDBAdapter } from './mongodb-adapter.js';
 import { MariaDBAdapter } from './mariadb-adapter.js';
 
@@ -114,7 +115,9 @@ function detectDatabaseType(config) {
  */
 export async function loadConfig(configPath) {
   try {
-    const absolutePath = configPath.startsWith('/')
+    // isAbsolute() (not a leading-'/' check) so an already-absolute Windows
+    // path (e.g. C:\...) isn't re-prefixed with cwd into a broken double path.
+    const absolutePath = isAbsolute(configPath)
       ? configPath
       : `${process.cwd()}/${configPath}`;
 

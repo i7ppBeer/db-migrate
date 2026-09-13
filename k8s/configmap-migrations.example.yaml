@@ -1,0 +1,65 @@
+# EXAMPLE ONLY — shows the shape a generated ConfigMap has, with two
+# illustrative migration files. Don't hand-maintain this in real use;
+# generate it in CI right before creating the Job, e.g.:
+#
+#   kubectl create configmap db-migrate-shop-ddl-migrations \
+#     --from-file=./projects/shop/ddl/migrations \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+# Or with Kustomize's configMapGenerator (preferred — auto content-hashes
+# the name so every deploy references an exact, immutable, traceable
+# migration set instead of overwriting one mutable ConfigMap in place):
+#
+#   configMapGenerator:
+#     - name: db-migrate-shop-ddl-migrations
+#       files:
+#         - projects/shop/ddl/migrations/20260101000001-create-users.sql
+#         - projects/shop/ddl/migrations/20260102000001-add-email-index.sql
+#
+# Remember the 1MiB total-size limit is per ConfigMap object (all keys
+# combined), not per file — fine for small migration sets, worth checking
+# again if a project's migration history grows large.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-migrate-{{ project }}-{{ mode }}-migrations-{{ contentHash }}
+  namespace: "{{ namespace }}"
+immutable: true
+data:
+  20260101000001-create-users.sql: |
+    -- +migrate Up
+    CREATE TABLE users (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      email VARCHAR(255) NOT NULL UNIQUE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- +migrate Down
+    DROP TABLE users;
+
+  20260102000001-add-last-login.sql: |
+    -- +migrate Up
+    ALTER TABLE users ADD COLUMN last_login_at TIMESTAMP NULL;
+
+    -- +migrate Down
+    ALTER TABLE users DROP COLUMN last_login_at;
+
+---
+# The tool's own config.js is non-secret (it reads credentials from env
+# vars, never hardcodes them) — safe to ship the same way, in its own
+# ConfigMap, mounted separately from the credentials Secret above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-migrate-{{ project }}-config
+  namespace: "{{ namespace }}"
+immutable: true
+data:
+  config.js: |
+    export default {
+      type: 'mariadb',
+      database: process.env.MARIADB_DATABASE || '{{ project }}',
+      migrationsDir: '/app/migrations',
+      changelogTable: '_migrations'
+    };

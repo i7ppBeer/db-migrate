@@ -787,4 +787,112 @@ export const down = async (db) => {};
       await fs.rm(tmpDir, { recursive: true, force: true });
     });
   });
+
+  describe('resetChangelog', () => {
+    function mockDb(count) {
+      const deleteMany = vi.fn().mockResolvedValue({ deletedCount: count });
+      const countDocuments = vi.fn().mockResolvedValue(count);
+      return {
+        db: { collection: vi.fn().mockReturnValue({ countDocuments, deleteMany }) },
+        countDocuments,
+        deleteMany
+      };
+    }
+
+    it('dry run counts documents but issues no deleteMany', async () => {
+      const m = mockDb(4);
+      adapter.db = m.db;
+      const count = await adapter.resetChangelog({ dryRun: true });
+      expect(count).toBe(4);
+      expect(m.countDocuments).toHaveBeenCalledTimes(1);
+      expect(m.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('actual run deletes and returns the pre-deletion count', async () => {
+      const m = mockDb(6);
+      adapter.db = m.db;
+      const count = await adapter.resetChangelog({ dryRun: false });
+      expect(count).toBe(6);
+      expect(m.deleteMany).toHaveBeenCalledTimes(1);
+      expect(m.deleteMany).toHaveBeenCalledWith({});
+    });
+
+    it('skips deleteMany entirely when there is nothing to delete', async () => {
+      const m = mockDb(0);
+      adapter.db = m.db;
+      const count = await adapter.resetChangelog({ dryRun: false });
+      expect(count).toBe(0);
+      expect(m.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('defaults to this.changelogCollection when no collectionName is given', async () => {
+      const m = mockDb(1);
+      adapter.db = m.db;
+      adapter.changelogCollection = 'custom_changelog';
+      await adapter.resetChangelog({ dryRun: true });
+      expect(m.db.collection).toHaveBeenCalledWith('custom_changelog');
+    });
+
+    it('uses the passed collectionName for DCL checksum collections instead of the changelog collection', async () => {
+      const m = mockDb(2);
+      adapter.db = m.db;
+      await adapter.resetChangelog({ dryRun: true, collectionName: 'repeatable_migrations' });
+      expect(m.db.collection).toHaveBeenCalledWith('repeatable_migrations');
+    });
+  });
+
+  describe('getSchemaSnapshot', () => {
+    function mockCollection({ count, indexes, sample }) {
+      return {
+        estimatedDocumentCount: vi.fn().mockResolvedValue(count),
+        indexes: vi.fn().mockResolvedValue(indexes.map(name => ({ name }))),
+        findOne: vi.fn().mockResolvedValue(sample)
+      };
+    }
+
+    it('returns one entry per collection with indexes and inferred field types', async () => {
+      const usersColl = mockCollection({
+        count: 10,
+        indexes: ['_id_', 'email_1'],
+        sample: { _id: 'abc', email: 'a@b.com', age: 30, createdAt: new Date('2026-01-01'), tags: ['x'], profile: { bio: 'hi' } }
+      });
+      const ordersColl = mockCollection({ count: 0, indexes: ['_id_'], sample: null });
+
+      adapter.db = {
+        listCollections: vi.fn().mockReturnValue({ toArray: vi.fn().mockResolvedValue([{ name: 'users' }, { name: 'orders' }]) }),
+        collection: vi.fn().mockImplementation((name) => (name === 'users' ? usersColl : ordersColl))
+      };
+
+      const snapshot = await adapter.getSchemaSnapshot();
+
+      expect(snapshot).toHaveLength(2);
+      expect(snapshot[0]).toMatchObject({ collection: 'users', count: 10, indexes: ['_id_', 'email_1'] });
+      const fieldTypes = Object.fromEntries(snapshot[0].fields.map(f => [f.name, f.type]));
+      expect(fieldTypes.email).toBe('string');
+      expect(fieldTypes.age).toBe('number');
+      expect(fieldTypes.createdAt).toBe('date');
+      expect(fieldTypes.tags).toBe('array');
+      expect(fieldTypes.profile).toBe('object');
+    });
+
+    it('returns an empty fields array for an empty collection instead of throwing', async () => {
+      const emptyColl = mockCollection({ count: 0, indexes: ['_id_'], sample: null });
+      adapter.db = {
+        listCollections: vi.fn().mockReturnValue({ toArray: vi.fn().mockResolvedValue([{ name: 'empty' }]) }),
+        collection: vi.fn().mockReturnValue(emptyColl)
+      };
+      const snapshot = await adapter.getSchemaSnapshot();
+      expect(snapshot[0].fields).toEqual([]);
+    });
+
+    it('returns an empty array when there are no collections', async () => {
+      adapter.db = {
+        listCollections: vi.fn().mockReturnValue({ toArray: vi.fn().mockResolvedValue([]) }),
+        collection: vi.fn()
+      };
+      const snapshot = await adapter.getSchemaSnapshot();
+      expect(snapshot).toEqual([]);
+      expect(adapter.db.collection).not.toHaveBeenCalled();
+    });
+  });
 });

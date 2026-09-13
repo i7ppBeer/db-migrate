@@ -212,6 +212,69 @@ export class MariaDBAdapter extends BaseAdapter {
     };
   }
 
+  /**
+   * Execute migration-authored SQL with a bounded lock-wait guard.
+   *
+   * Root cause this guards against: MariaDB's metadata lock (MDL) queue is FIFO.
+   * If a long-running transaction (e.g. a large batch DELETE) already holds a
+   * shared MDL on the target table, an ALTER TABLE requesting an exclusive MDL
+   * queues behind it — and because the queue is FIFO, any *new* query on that
+   * table (including a plain SELECT) that arrives after the ALTER is already
+   * queued gets stuck behind the ALTER too, even though a SELECT would
+   * otherwise be lock-compatible. Without a bound, that queue can jam
+   * indefinitely.
+   *
+   * This sets a short `lock_wait_timeout` / `innodb_lock_wait_timeout` on the
+   * session before executing, and retries a bounded number of times on
+   * MariaDB's lock-wait-timeout error before failing loudly — so a stuck ALTER
+   * fails fast instead of parking in the queue and dragging everything else
+   * down with it.
+   *
+   * @param {string} sql - SQL to execute via this.connection.query()
+   * @returns {Promise<*>} - Same return shape as this.connection.query()
+   */
+  async executeWithLockGuard(sql) {
+    const cfg = this.config.ddlSafety?.lockGuard ?? {};
+    const enabled = cfg.enabled ?? true;
+
+    if (!enabled) {
+      return this.connection.query(sql);
+    }
+
+    const requirePositiveInt = (value, name) => {
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new Error(`ddlSafety.lockGuard.${name} must be a positive integer, got: ${value}`);
+      }
+      return value;
+    };
+    const lockWaitTimeoutSec = requirePositiveInt(cfg.lockWaitTimeoutSec ?? 5, 'lockWaitTimeoutSec');
+    const innodbLockWaitTimeoutSec = requirePositiveInt(cfg.innodbLockWaitTimeoutSec ?? 5, 'innodbLockWaitTimeoutSec');
+    const maxRetries = cfg.maxRetries ?? 3;
+    const retryDelayMs = cfg.retryDelayMs ?? 2000;
+
+    // MariaDB's SET statement doesn't support bound parameters over the
+    // prepared-statement (binary) protocol — connection.execute() fails with
+    // "Incorrect argument type to variable". Use query() (text protocol) with
+    // a value we've already validated as a positive integer.
+    await this.connection.query(`SET SESSION lock_wait_timeout = ${lockWaitTimeoutSec}`);
+    await this.connection.query(`SET SESSION innodb_lock_wait_timeout = ${innodbLockWaitTimeoutSec}`);
+
+    let attempt = 0;
+    for (;;) {
+      attempt++;
+      try {
+        return await this.connection.query(sql);
+      } catch (error) {
+        const isLockWaitTimeout = error && (error.errno === 1205 || error.code === 'ER_LOCK_WAIT_TIMEOUT');
+        if (!isLockWaitTimeout || attempt >= maxRetries) {
+          throw error;
+        }
+        console.warn(`⚠️  Lock wait timeout (attempt ${attempt}/${maxRetries}), retrying in ${retryDelayMs}ms...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+      }
+    }
+  }
+
   async connect() {
     try {
       // Support both flat config and nested config.mariadb
@@ -387,6 +450,89 @@ export class MariaDBAdapter extends BaseAdapter {
     return result;
   }
 
+  /**
+   * Delete all rows from a changelog/checksum table. Does NOT run down() and does
+   * NOT touch any actual schema or data — this only clears the tool's own tracking
+   * records, so the next `status`/`up`/`dcl` treats every migration as pending again.
+   *
+   * Used for both DDL (changelog table, `tableName` omitted → uses `this.changelogTable`)
+   * and DCL (checksum table, caller passes the already-validated `tableName`).
+   *
+   * @param {Object} [options]
+   * @param {boolean} [options.dryRun=false] - Count only, don't delete
+   * @param {string}  [options.tableName] - Override table (used for DCL checksum tables)
+   * @returns {Promise<number>} Number of rows that existed before deletion
+   */
+  async resetChangelog({ dryRun = false, tableName } = {}) {
+    const table = tableName || this.changelogTable;
+    // Same identifier rule as RepeatableRunner's checksumTable validation — this is
+    // interpolated directly into SQL below, so it must be a safe bare identifier.
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/.test(table)) {
+      throw new Error(`Invalid table name: ${table}. Must be a valid identifier (letters, digits, underscores).`);
+    }
+
+    const dbConfig = this.config.mariadb || this.config;
+    const dbName = dbConfig.database;
+    const qualifiedTable = dbName ? `\`${dbName}\`.${table}` : table;
+
+    try {
+      const [[{ cnt }]] = await this.connection.query(`SELECT COUNT(*) AS cnt FROM ${qualifiedTable}`);
+      const count = Number(cnt);
+      if (!dryRun && count > 0) {
+        await this.connection.query(`DELETE FROM ${qualifiedTable}`);
+      }
+      return count;
+    } catch (error) {
+      // Table doesn't exist yet — nothing to reset
+      if (error.code === 'ER_NO_SUCH_TABLE') return 0;
+      throw error;
+    }
+  }
+
+  /**
+   * Snapshot the real, current schema — one entry per table with its columns.
+   * Used by the `sync` CLI command to show what the database actually looks like
+   * after applying migrations, rather than trusting the migration files alone.
+   *
+   * @returns {Promise<{table: string, engine: string, rows: number, columns: {name: string, type: string, nullable: boolean, key: string, default: string|null}[]}[]>}
+   */
+  async getSchemaSnapshot() {
+    const dbConfig = this.config.mariadb || this.config;
+    const dbName = dbConfig.database;
+
+    const [tables] = await this.connection.query(
+      `SELECT TABLE_NAME, ENGINE, TABLE_ROWS
+       FROM information_schema.TABLES
+       WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
+       ORDER BY TABLE_NAME`,
+      [dbName]
+    );
+
+    const snapshot = [];
+    for (const t of tables) {
+      const [columns] = await this.connection.query(
+        `SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT
+         FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+         ORDER BY ORDINAL_POSITION`,
+        [dbName, t.TABLE_NAME]
+      );
+      snapshot.push({
+        table: t.TABLE_NAME,
+        engine: t.ENGINE,
+        rows: t.TABLE_ROWS === null ? null : Number(t.TABLE_ROWS),
+        columns: columns.map(c => ({
+          name: c.COLUMN_NAME,
+          type: c.COLUMN_TYPE,
+          nullable: c.IS_NULLABLE === 'YES',
+          key: c.COLUMN_KEY || '',
+          default: c.COLUMN_DEFAULT
+        }))
+      });
+    }
+    return snapshot;
+  }
+
   async up(options = {}) {
     const result = {
       applied: [],
@@ -438,9 +584,9 @@ export class MariaDBAdapter extends BaseAdapter {
             // This means migration files don't need to include "USE <db>" themselves.
             const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
 
-            // Use query() for multi-statement support
-            await this.connection.query(wrappedUpSQL);
-            
+            // Use query() for multi-statement support, guarded against MDL queue jams
+            await this.executeWithLockGuard(wrappedUpSQL);
+
             // Record in changelog
             const id = file.replace('.sql', '');
             await this.connection.execute(
@@ -526,7 +672,7 @@ export class MariaDBAdapter extends BaseAdapter {
                 if (upSQL) {
                   const dbName = (this.config.mariadb || this.config).database;
                   const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
-                  await this.connection.query(wrappedUpSQL);
+                  await this.executeWithLockGuard(wrappedUpSQL);
                   const id = file.replace('.sql', '');
                   await this.connection.execute(
                     `INSERT INTO ${this.changelogTable} (id) VALUES (?)`,
@@ -538,7 +684,7 @@ export class MariaDBAdapter extends BaseAdapter {
                 if (downSQL) {
                   const dbName = (this.config.mariadb || this.config).database;
                   const wrappedDownSQL = dbName ? `USE \`${dbName}\`;\n${downSQL}` : downSQL;
-                  await this.connection.query(wrappedDownSQL);
+                  await this.executeWithLockGuard(wrappedDownSQL);
                   const id = file.replace('.sql', '');
                   await this.connection.execute(
                     `DELETE FROM ${this.changelogTable} WHERE id = ?`,
@@ -575,7 +721,7 @@ export class MariaDBAdapter extends BaseAdapter {
               const startTime = Date.now();
               const dbName = (this.config.mariadb || this.config).database;
               const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
-              await this.connection.query(wrappedUpSQL);
+              await this.executeWithLockGuard(wrappedUpSQL);
               const id = file.replace('.sql', '');
               await this.connection.execute(
                 `INSERT INTO ${this.changelogTable} (id) VALUES (?)`,
@@ -890,8 +1036,8 @@ export class MariaDBAdapter extends BaseAdapter {
                 ? `USE \`${dbConfigDown.database}\`;\n${downSQL}`
                 : downSQL;
 
-              // Use query() for multi-statement support
-              await this.connection.query(wrappedDownSQL);
+              // Use query() for multi-statement support, guarded against MDL queue jams
+              await this.executeWithLockGuard(wrappedDownSQL);
             } catch (downError) {
               // DOWN SQL failed — restore the changelog entry so state stays consistent
               try {
@@ -1122,6 +1268,7 @@ export class MariaDBAdapter extends BaseAdapter {
 
     // Helper: clean unicode noise from SQL before parsing
     const cleanUnicode = (sql) => sql
+      // eslint-disable-next-line no-misleading-character-class -- distinct zero-width codepoints to strip, not a joined sequence
       .replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '')
       .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
       .trim();
@@ -1139,6 +1286,28 @@ export class MariaDBAdapter extends BaseAdapter {
         (match, ident) => `\`${ident}\``
       );
 
+    // ALTER TABLE ... ADD [CONSTRAINT name] FOREIGN KEY — node-sql-parser only
+    // supports foreign keys declared inline inside CREATE TABLE; the ALTER-TABLE
+    // form (used to add/re-add a constraint after the table already exists) hits
+    // its ALTER grammar and fails to parse even though it's valid MariaDB SQL.
+    const hasAlterAddForeignKey = (sql) =>
+      /\bALTER\s+TABLE\b[\s\S]*?\bADD\b(?:\s+CONSTRAINT\s+[`\w]+)?\s+FOREIGN\s+KEY\b/i.test(sql);
+
+    // Known column names node-sql-parser's MariaDB grammar misparses as reserved
+    // words outside of a CREATE TABLE column-type context — e.g. in an INSERT
+    // column list. Backtick-quote them there too so the parser treats them as
+    // plain identifiers.
+    const INSERT_COLUMN_RESERVED_WORDS = ['status', 'type', 'end', 'session', 'global'];
+    const quoteReservedInInsertColumnList = (sql) =>
+      sql.replace(/(\bINSERT\s+INTO\s+[`\w.]+\s*)\(([^)]*)\)/gi, (match, prefix, cols) => {
+        const quotedCols = cols.split(',').map(col => {
+          const trimmed = col.trim();
+          const bare = trimmed.replace(/^`|`$/g, '');
+          return INSERT_COLUMN_RESERVED_WORDS.includes(bare.toLowerCase()) ? `\`${bare}\`` : trimmed;
+        }).join(', ');
+        return `${prefix}(${quotedCols})`;
+      });
+
     const checkSQL = (sql, label, code) => {
       const clean = cleanUnicode(sql);
       if (!clean) return;
@@ -1150,7 +1319,14 @@ export class MariaDBAdapter extends BaseAdapter {
         });
         return;
       }
-      const normalized = quoteReservedIdentifiers(clean);
+      if (hasAlterAddForeignKey(clean)) {
+        warnings.push({
+          type: 'syntax-check-skipped',
+          message: `⚠️ SQL syntax check skipped (${label}): ALTER TABLE ADD FOREIGN KEY detected (not supported by parser)`
+        });
+        return;
+      }
+      const normalized = quoteReservedInInsertColumnList(quoteReservedIdentifiers(clean));
       try {
         const parser = new SQLParser();
         parser.astify(normalized, { database: 'MariaDB' });
@@ -1597,6 +1773,7 @@ export class MariaDBAdapter extends BaseAdapter {
     if (!sql) return [];
 
     // Fix B: Strip zero-width characters (Unicode confusion bypass prevention)
+    // eslint-disable-next-line no-misleading-character-class -- distinct zero-width codepoints to strip, not a joined sequence
     sql = sql.replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '');
     // Fix C: Convert fullwidth characters to halfwidth (align with normalizeSQL)
     sql = sql.replace(/[\uFF01-\uFF5E]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
@@ -1668,7 +1845,7 @@ export class MariaDBAdapter extends BaseAdapter {
       const upSQL = this.extractSection(content, 'Up') || content;
 
       const createdNow = this.extractCreatedTables(upSQL).map(t => t.toLowerCase());
-      let droppedNow = this.extractDroppedTables(upSQL).map(t => t.toLowerCase());
+      const droppedNow = this.extractDroppedTables(upSQL).map(t => t.toLowerCase());
       const fkRefs = this.extractFKReferences(upSQL);
 
       // RENAME TABLE old TO new — treat old name as dropped for cross-file tracking  (Bug 3)
@@ -1747,6 +1924,7 @@ export class MariaDBAdapter extends BaseAdapter {
     return sql
       // Remove zero-width characters (Unicode confusion attack prevention)
       // Step 1: Remove zero-width characters (Unicode confusion attack prevention)
+      // eslint-disable-next-line no-misleading-character-class -- distinct zero-width codepoints to strip, not a joined sequence
       .replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '')
       // Step 2: Convert fullwidth characters to halfwidth (Unicode normalization)
       .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))

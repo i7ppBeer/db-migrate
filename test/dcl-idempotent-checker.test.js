@@ -341,8 +341,131 @@ describe('DCLIdempotentChecker', () => {
       silentChecker.log('Test message');
       
       expect(consoleSpy).not.toHaveBeenCalled();
-      
+
       consoleSpy.mockRestore();
+    });
+  });
+
+  describe('diffStates', () => {
+    describe('MariaDB shape', () => {
+      it('detects a newly created account', () => {
+        const before = { users: ['app_readonly@%'], grants: [{ user: 'app_readonly@%', grant: 'GRANT SELECT ON mydb.* TO ...' }] };
+        const after = {
+          users: ['app_readonly@%', 'app_writer@%'],
+          grants: [
+            { user: 'app_readonly@%', grant: 'GRANT SELECT ON mydb.* TO ...' },
+            { user: 'app_writer@%', grant: 'GRANT INSERT, UPDATE ON mydb.* TO ...' }
+          ]
+        };
+        const diff = checker.diffStates(before, after, 'mariadb');
+        expect(diff.addedUsers).toEqual(['app_writer@%']);
+        expect(diff.removedUsers).toEqual([]);
+        expect(diff.addedGrants).toHaveLength(1);
+        expect(diff.addedGrants[0].user).toBe('app_writer@%');
+      });
+
+      it('detects a dropped account', () => {
+        const before = { users: ['old_user@%'], grants: [{ user: 'old_user@%', grant: 'GRANT SELECT ON mydb.* TO ...' }] };
+        const after = { users: [], grants: [] };
+        const diff = checker.diffStates(before, after, 'mariadb');
+        expect(diff.removedUsers).toEqual(['old_user@%']);
+        expect(diff.removedGrants).toHaveLength(1);
+      });
+
+      it('detects a permission added to an existing account without treating it as a new user', () => {
+        const before = { users: ['app@%'], grants: [{ user: 'app@%', grant: 'GRANT SELECT ON mydb.* TO ...' }] };
+        const after = {
+          users: ['app@%'],
+          grants: [
+            { user: 'app@%', grant: 'GRANT SELECT ON mydb.* TO ...' },
+            { user: 'app@%', grant: 'GRANT INSERT ON mydb.* TO ...' }
+          ]
+        };
+        const diff = checker.diffStates(before, after, 'mariadb');
+        expect(diff.addedUsers).toEqual([]);
+        expect(diff.addedGrants).toHaveLength(1);
+        expect(diff.addedGrants[0].grant).toContain('INSERT');
+      });
+
+      it('detects a permission revoked from an existing account (user not dropped)', () => {
+        const before = {
+          users: ['app@%'],
+          grants: [
+            { user: 'app@%', grant: 'GRANT SELECT ON mydb.* TO ...' },
+            { user: 'app@%', grant: 'GRANT INSERT ON mydb.* TO ...' }
+          ]
+        };
+        const after = { users: ['app@%'], grants: [{ user: 'app@%', grant: 'GRANT SELECT ON mydb.* TO ...' }] };
+        const diff = checker.diffStates(before, after, 'mariadb');
+        expect(diff.removedUsers).toEqual([]); // user still exists
+        expect(diff.removedGrants).toHaveLength(1);
+        expect(diff.removedGrants[0].grant).toContain('INSERT');
+      });
+
+      it('reports nothing when state is unchanged', () => {
+        const state = { users: ['app@%'], grants: [{ user: 'app@%', grant: 'GRANT SELECT ON mydb.* TO ...' }] };
+        const diff = checker.diffStates(state, structuredClone(state), 'mariadb');
+        expect(diff).toEqual({ addedUsers: [], removedUsers: [], addedGrants: [], removedGrants: [] });
+      });
+    });
+
+    describe('MongoDB shape', () => {
+      it('detects a newly created user with its roles', () => {
+        const before = { users: [], roles: [] };
+        const after = { users: [{ user: 'app_readonly', db: 'admin', roles: ['read@mydb'] }], roles: [] };
+        const diff = checker.diffStates(before, after, 'mongodb');
+        expect(diff.addedUsers).toHaveLength(1);
+        expect(diff.addedUsers[0].user).toBe('app_readonly');
+        expect(diff.removedUsers).toEqual([]);
+        expect(diff.changedUsers).toEqual([]);
+      });
+
+      it('detects a role added to an existing user without treating it as a new user', () => {
+        const before = { users: [{ user: 'app', db: 'admin', roles: ['read@mydb'] }], roles: [] };
+        const after = { users: [{ user: 'app', db: 'admin', roles: ['read@mydb', 'readWrite@mydb'] }], roles: [] };
+        const diff = checker.diffStates(before, after, 'mongodb');
+        expect(diff.addedUsers).toEqual([]);
+        expect(diff.changedUsers).toHaveLength(1);
+        expect(diff.changedUsers[0]).toMatchObject({ user: 'app', addedRoles: ['readWrite@mydb'], removedRoles: [] });
+      });
+
+      it('detects a removed user', () => {
+        const before = { users: [{ user: 'gone', db: 'admin', roles: ['read@mydb'] }], roles: [] };
+        const after = { users: [], roles: [] };
+        const diff = checker.diffStates(before, after, 'mongodb');
+        expect(diff.removedUsers).toHaveLength(1);
+        expect(diff.removedUsers[0].user).toBe('gone');
+      });
+
+      it('detects a role revoked from an existing user (user not dropped)', () => {
+        const before = { users: [{ user: 'app', db: 'admin', roles: ['read@mydb', 'readWrite@mydb'] }], roles: [] };
+        const after = { users: [{ user: 'app', db: 'admin', roles: ['read@mydb'] }], roles: [] };
+        const diff = checker.diffStates(before, after, 'mongodb');
+        expect(diff.removedUsers).toEqual([]); // user still exists
+        expect(diff.changedUsers).toHaveLength(1);
+        expect(diff.changedUsers[0]).toMatchObject({ user: 'app', addedRoles: [], removedRoles: ['readWrite@mydb'] });
+      });
+
+      it('detects a dropped custom role', () => {
+        const before = { users: [], roles: [{ role: 'oldRole', db: 'admin', privileges: [], inheritedRoles: [] }] };
+        const after = { users: [], roles: [] };
+        const diff = checker.diffStates(before, after, 'mongodb');
+        expect(diff.removedRoles).toHaveLength(1);
+        expect(diff.removedRoles[0].role).toBe('oldRole');
+      });
+
+      it('detects a new custom role', () => {
+        const before = { users: [], roles: [] };
+        const after = { users: [], roles: [{ role: 'customRole', db: 'admin', privileges: [], inheritedRoles: [] }] };
+        const diff = checker.diffStates(before, after, 'mongodb');
+        expect(diff.addedRoles).toHaveLength(1);
+        expect(diff.addedRoles[0].role).toBe('customRole');
+      });
+    });
+
+    it('throws on an unsupported dbType', () => {
+      expect(() => checker.diffStates({ users: [], grants: [] }, { users: [], grants: [] }, 'postgres'))
+        .toThrow(/Unsupported database type/);
     });
   });
 });

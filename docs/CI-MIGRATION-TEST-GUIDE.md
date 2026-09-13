@@ -1,22 +1,22 @@
-# CI Migration Test 使用指南
+# CI Migration Test Usage Guide
 
-本文檔說明 `ci-migration-test.sh` 腳本的使用方式、流程圖及 CI 整合方式。
-
----
-
-## 目錄
-
-1. [流程圖](#1-流程圖)
-2. [快速開始](#2-快速開始)
-3. [詳細說明](#3-詳細說明)
-4. [CI 整合](#4-ci-整合)
-5. [故障排除](#5-故障排除)
+This document explains how to use the `ci-migration-test.sh` script, its flow diagrams, and how to integrate it into CI.
 
 ---
 
-## 1. 流程圖
+## Table of Contents
 
-### 1.1 完整執行流程
+1. [Flowcharts](#1-flowcharts)
+2. [Quick Start](#2-quick-start)
+3. [Detailed Description](#3-detailed-description)
+4. [CI Integration](#4-ci-integration)
+5. [Troubleshooting](#5-troubleshooting)
+
+---
+
+## 1. Flowcharts
+
+### 1.1 Full Execution Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -29,13 +29,13 @@
                                      │
                                      ▼
                     ┌─────────────────────────────────┐
-                    │     Step 1: 啟動資料庫服務       │
+                    │     Step 1: Start database services  │
                     │  (MariaDB / MongoDB / Both)     │
                     └────────────────┬────────────────┘
                                      │
                                      ▼
                     ┌─────────────────────────────────┐
-                    │     Step 2: 等待資料庫就緒       │
+                    │     Step 2: Wait for databases to be ready │
                     │    (Health Check, max 30s)      │
                     └────────────────┬────────────────┘
                                      │
@@ -74,7 +74,7 @@
                                      │
                                      ▼
                     ┌─────────────────────────────────┐
-                    │     Step 4: 測試結果報告         │
+                    │     Step 4: Test result report   │
                     │  ┌─────────────────────────┐    │
                     │  │ Total:  X tests         │    │
                     │  │ Passed: Y               │    │
@@ -93,7 +93,7 @@
                    └───────────┘          └───────────┘
 ```
 
-### 1.2 Phase 詳細說明
+### 1.2 Phase Details
 
 ```
 ═══════════════════════════════════════════════════════════════════════════════
@@ -102,42 +102,42 @@
 
 Phase 1: DDL Validate          Phase 2: DCL Validate
 ┌─────────────────────┐        ┌─────────────────────┐
-│ • 檢查 SQL/JS 語法   │        │ • 驗證冪等性         │
-│ • 驗證檔名格式       │        │ • 檢查 Annotation    │
-│ • 檢查 checksum     │        │ • 確認可重複執行     │
-│ • 驗證無孤兒 DROP    │        └─────────────────────┘
+│ • Check SQL/JS syntax │        │ • Validate idempotency │
+│ • Validate filename format │        │ • Check annotations    │
+│ • Check checksum     │        │ • Confirm repeatable execution │
+│ • Verify no orphaned DROP │        └─────────────────────┘
 └─────────────────────┘                   │
-         │                                │ (可選)
-         │ 必須成功                        ▼
+         │                                │ (optional)
+         │ must succeed                        ▼
          ▼
 Phase 3: Migration UP (1st)    Phase 4: Migration DOWN
 ┌─────────────────────┐        ┌─────────────────────┐
-│ • 依序執行所有 DDL   │        │ • 反向執行 down()   │
-│ • 建立 Tables       │───────▶│ • 刪除所有變更       │
-│ • 記錄到 changelog  │        │ • 清除 changelog    │
+│ • Run all DDL in order │        │ • Run down() in reverse │
+│ • Create tables       │───────▶│ • Remove all changes │
+│ • Record to changelog │        │ • Clear changelog    │
 └─────────────────────┘        └─────────────────────┘
                                           │
                                           ▼
 Phase 5: Migration UP (2nd)    Phase 6: DCL Apply
 ┌─────────────────────┐        ┌─────────────────────┐
-│ • 重新執行所有 DDL   │        │ • 執行使用者/權限管理│
-│ • 確認可重複部署     │───────▶│ • 啟用 --validate   │
-│ • 驗證 idempotent   │        │ • 確認帳號建立成功   │
+│ • Re-run all DDL      │        │ • Run user/permission management │
+│ • Confirm repeatable deployment │───────▶│ • Enable --validate   │
+│ • Verify idempotency   │        │ • Confirm accounts created successfully │
 └─────────────────────┘        └─────────────────────┘
                                           │
                                           ▼
                                Phase 7: Status Check
                                ┌─────────────────────┐
-                               │ • 顯示最終狀態       │
-                               │ • 確認所有 migration │
-                               │   都已成功執行      │
+                               │ • Show final status       │
+                               │ • Confirm all migrations │
+                               │   ran successfully      │
                                └─────────────────────┘
 ```
 
-### 1.3 測試決策樹
+### 1.3 Test Decision Tree
 
 ```
-                                    開始測試
+                                    Start test
                                        │
                     ┌──────────────────┴──────────────────┐
                     ▼                                      ▼
@@ -166,7 +166,7 @@ Phase 5: Migration UP (2nd)    Phase 6: DCL Apply
            │                                      │
            └──────────────┬───────────────────────┘
                           ▼
-                    產生報告
+                    Generate report
                           │
                           ▼
               ┌───────────────────────┐
@@ -177,74 +177,74 @@ Phase 5: Migration UP (2nd)    Phase 6: DCL Apply
 
 ---
 
-## 2. 快速開始
+## 2. Quick Start
 
-### 2.1 基本用法
+### 2.1 Basic Usage
 
 ```bash
-# 賦予執行權限
+# Grant execute permission
 chmod +x scripts/ci-migration-test.sh
 
-# 測試全部資料庫 (嚴格模式)
+# Test all databases (strict mode)
 ./scripts/ci-migration-test.sh
 
-# 只測試 MariaDB
+# Test only MariaDB
 ./scripts/ci-migration-test.sh mariadb
 
-# 只測試 MongoDB
+# Test only MongoDB
 ./scripts/ci-migration-test.sh mongodb
 
-# 測試指定專案
+# Test a specific project
 ./scripts/ci-migration-test.sh mariadb my-project
 ./scripts/ci-migration-test.sh mongodb my-project
 
-# 允許危險操作 (ALTER TABLE, DROP 等)
+# Allow dangerous operations (ALTER TABLE, DROP, etc.)
 ./scripts/ci-migration-test.sh all test-success --allow-dangerous
 ./scripts/ci-migration-test.sh mariadb test-success --allow-dangerous
 ```
 
-### 2.2 使用 Docker Compose 執行
+### 2.2 Running via Docker Compose
 
 ```bash
-# 進入專案目錄
+# Go to the project directory
 cd /path/to/ddl-migrate
 
-# 執行完整測試
+# Run the full test
 docker compose run --rm migrate sh -c "cd /app && ./scripts/ci-migration-test.sh"
 ```
 
 ---
 
-## 3. 詳細說明
+## 3. Detailed Description
 
-### 3.1 腳本參數
+### 3.1 Script Parameters
 
-| 參數 | 位置 | 預設值 | 說明 |
+| Parameter | Position | Default | Description |
 |------|------|--------|------|
-| `db-type` | $1 | `all` | 資料庫類型：`mariadb`、`mongodb`、`all` |
-| `project-name` | $2 | `test-success` | 測試專案名稱 |
-| `--allow-dangerous` | flag | `false` | 允許危險操作通過驗證 |
+| `db-type` | $1 | `all` | Database type: `mariadb`, `mongodb`, `all` |
+| `project-name` | $2 | `test-success` | Test project name |
+| `--allow-dangerous` | flag | `false` | Allow dangerous operations to pass validation |
 
 ### 3.2 Exit Code
 
-| Exit Code | 意義 | CI 狀態 |
+| Exit Code | Meaning | CI Status |
 |-----------|------|---------|
-| `0` | 所有測試通過 | ✅ PASSED |
-| `1` | 有測試失敗 | ❌ FAILED |
+| `0` | All tests passed | ✅ PASSED |
+| `1` | Some tests failed | ❌ FAILED |
 
-### 3.3 測試階段說明
+### 3.3 Test Phase Description
 
-| Phase | 名稱 | 描述 | 失敗處理 |
+| Phase | Name | Description | Failure Handling |
 |-------|------|------|----------|
-| 1 | DDL Validate | 驗證 DDL 腳本語法與格式 | 停止測試 |
-| 2 | DCL Validate | 驗證 DCL 腳本冪等性 | 警告並繼續 |
-| 3 | UP (1st) | 首次執行遷移 | 停止測試 |
-| 4 | DOWN | 回滾所有遷移 | 停止測試 |
-| 5 | UP (2nd) | 再次執行遷移 | 記錄失敗 |
-| 6 | DCL Apply | 執行 DCL 建立帳號 | 警告並繼續 |
-| 7 | Status | 檢查最終狀態 | 記錄結果 |
+| 1 | DDL Validate | Validate DDL script syntax and format | Stop testing |
+| 2 | DCL Validate | Validate DCL script idempotency | Warn and continue |
+| 3 | UP (1st) | Run migrations for the first time | Stop testing |
+| 4 | DOWN | Roll back all migrations | Stop testing |
+| 5 | UP (2nd) | Run migrations again | Record failure |
+| 6 | DCL Apply | Run DCL to create accounts | Warn and continue |
+| 7 | Status | Check final status | Record result |
 
-### 3.4 輸出範例
+### 3.4 Sample Output
 
 ```
 ╔═══════════════════════════════════════════════════════════════╗
@@ -254,22 +254,22 @@ docker compose run --rm migrate sh -c "cd /app && ./scripts/ci-migration-test.sh
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝
 
-配置資訊:
-  • 資料庫類型: all
-  • 測試專案:   test-success
-  • 執行時間:   2025-01-26 14:30:00
+Configuration:
+  • Database type: all
+  • Test project:   test-success
+  • Run time:   2025-01-26 14:30:00
 
 ┌─────────────────────────────────────────────────────────────────┐
-│ Step 1: 啟動資料庫服務
+│ Step 1: Start database services
 └─────────────────────────────────────────────────────────────────┘
-   ▸ 啟動 MariaDB...
-   ▸ 啟動 MongoDB...
+   ▸ Starting MariaDB...
+   ▸ Starting MongoDB...
 
 ┌─────────────────────────────────────────────────────────────────┐
-│ Step 2: 等待資料庫就緒
+│ Step 2: Wait for databases to be ready
 └─────────────────────────────────────────────────────────────────┘
-   ✅ MariaDB 已就緒 (3s)
-   ✅ MongoDB 已就緒 (2s)
+   ✅ MariaDB ready (3s)
+   ✅ MongoDB ready (2s)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Testing: mariadb / test-success
@@ -305,7 +305,7 @@ CI PASSED
 
 ---
 
-## 4. CI 整合
+## 4. CI Integration
 
 ### 4.1 Azure DevOps Pipeline
 
@@ -448,111 +448,111 @@ pipeline {
 
 ---
 
-## 5. 故障排除
+## 5. Troubleshooting
 
-### 5.1 常見問題
+### 5.1 Common Issues
 
-#### 資料庫啟動逾時
+#### Database startup timeout
 
 ```
-❌ MariaDB 啟動逾時
+❌ MariaDB startup timed out
 ```
 
-**解決方案：**
+**Solution:**
 ```bash
-# 手動檢查容器狀態
+# Manually check container status
 docker compose ps
 docker compose logs mariadb
 
-# 清除舊資料重新啟動
+# Clear old data and restart
 docker compose down -v
 docker compose up -d mariadb
 ```
 
-#### Validate 失敗
+#### Validate failure
 
 ```
 ❌ [mariadb] DDL Validate
 ```
 
-**解決方案：**
+**Solution:**
 ```bash
-# 單獨執行 validate 查看詳細錯誤
+# Run validate on its own to see the detailed error
 docker compose run --rm migrate validate -c /app/test-fixtures/mariadb/test-success/ddl/config.js
 
-# 常見原因：
-# 1. 檔名格式錯誤 (應為 YYYYMMDDHHMMSS-xxx.sql)
-# 2. SQL 語法錯誤
-# 3. 存在孤兒 DROP 語句
+# Common causes:
+# 1. Incorrect filename format (should be YYYYMMDDHHMMSS-xxx.sql)
+# 2. SQL syntax error
+# 3. An orphaned DROP statement exists
 ```
 
-#### DOWN 失敗
+#### DOWN failure
 
 ```
 ❌ [mariadb] Migration DOWN
 ```
 
-**解決方案：**
+**Solution:**
 ```bash
-# 檢查 down() 函數是否正確
+# Check whether the down() function is correct
 docker compose run --rm migrate status -c /app/test-fixtures/mariadb/test-success/ddl/config.js
 
-# 可能原因：
-# 1. down() 函數缺失或不完整
-# 2. 外鍵約束導致無法刪除
-# 3. 資料依賴導致回滾失敗
+# Possible causes:
+# 1. down() function is missing or incomplete
+# 2. Foreign key constraints prevent deletion
+# 3. Data dependencies cause the rollback to fail
 ```
 
-### 5.2 除錯技巧
+### 5.2 Debugging Tips
 
 ```bash
-# 查看詳細日誌
+# View detailed logs
 docker compose run --rm migrate up -c /app/test-fixtures/mariadb/test-success/ddl/config.js 2>&1 | tee migration.log
 
-# 進入容器除錯
+# Enter the container for debugging
 docker compose run --rm --entrypoint sh migrate
 
-# 連接資料庫檢查
+# Connect to the database to inspect it
 docker compose exec mariadb mariadb -u root -prootpass -e "SHOW TABLES;"
 docker compose exec mongodb mongosh --eval "db.getCollectionNames()"
 
-# 清除所有狀態重新測試
+# Clear all state and test again
 docker compose down -v
 ./scripts/ci-migration-test.sh
 ```
 
-### 5.3 效能優化
+### 5.3 Performance Optimization
 
 ```bash
-# 平行測試（如果 MariaDB 和 MongoDB 獨立）
+# Parallel testing (if MariaDB and MongoDB are independent)
 ./scripts/ci-migration-test.sh mariadb test-success &
 ./scripts/ci-migration-test.sh mongodb test-success &
 wait
 
-# 使用本地快取
+# Use local cache
 docker compose build --build-arg BUILDKIT_INLINE_CACHE=1 migrate
 ```
 
 ---
 
-## 附錄：完整參數列表
+## Appendix: Full Parameter List
 
 ```bash
 ./scripts/ci-migration-test.sh [db-type] [project-name] [--allow-dangerous]
 
-# db-type 選項:
-#   all      - 測試 MariaDB 和 MongoDB (預設)
-#   mariadb  - 只測試 MariaDB
-#   mongodb  - 只測試 MongoDB
+# db-type options:
+#   all      - Test both MariaDB and MongoDB (default)
+#   mariadb  - Test MariaDB only
+#   mongodb  - Test MongoDB only
 
-# project-name 選項:
-#   test-success  - 預設測試專案
-#   test-failure  - 預期失敗的測試專案
-#   my-project    - 自訂專案名稱
+# project-name options:
+#   test-success  - Default test project
+#   test-failure  - Test project expected to fail
+#   my-project    - Custom project name
 
 # --allow-dangerous:
-#   允許 ALTER TABLE, DROP, TRUNCATE 等危險操作通過驗證
+#   Allow dangerous operations such as ALTER TABLE, DROP, TRUNCATE to pass validation
 
-# 環境變數:
-#   無額外環境變數需要設定，使用 docker-compose.yml 中的預設值
+# Environment variables:
+#   No additional environment variables needed; uses the defaults in docker-compose.yml
 ```

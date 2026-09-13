@@ -284,6 +284,79 @@ export class MongoDBAdapter extends BaseAdapter {
     return result;
   }
 
+  /**
+   * Delete all documents from a changelog/checksum collection. Does NOT run down()
+   * and does NOT touch any actual collections/documents — this only clears the
+   * tool's own tracking records, so the next `status`/`up`/`dcl` treats every
+   * migration as pending again.
+   *
+   * Used for both DDL (changelog collection, `collectionName` omitted → uses
+   * `this.changelogCollection`) and DCL (checksum collection, caller passes the
+   * already-validated `collectionName`).
+   *
+   * @param {Object} [options]
+   * @param {boolean} [options.dryRun=false] - Count only, don't delete
+   * @param {string}  [options.collectionName] - Override collection (used for DCL checksum collections)
+   * @returns {Promise<number>} Number of documents that existed before deletion
+   */
+  async resetChangelog({ dryRun = false, collectionName } = {}) {
+    const coll = collectionName || this.changelogCollection;
+    const count = await this.db.collection(coll).countDocuments({});
+    if (!dryRun && count > 0) {
+      await this.db.collection(coll).deleteMany({});
+    }
+    return count;
+  }
+
+  /**
+   * Best-effort infer a human-readable type label for one field's sample value.
+   * MongoDB is schemaless, so this is inference from one document, not a guarantee
+   * every document in the collection shares this shape.
+   * @private
+   */
+  _describeFieldType(value) {
+    if (value === null) return 'null';
+    if (Array.isArray(value)) return 'array';
+    if (value instanceof Date) return 'date';
+    if (value && typeof value === 'object' && value._bsontype) return value._bsontype.toLowerCase();
+    if (value && typeof value === 'object') return 'object';
+    return typeof value;
+  }
+
+  /**
+   * Snapshot the real, current schema — one entry per collection with its indexes
+   * and a best-effort field shape inferred from a single sample document.
+   * Used by the `sync` CLI command to show what the database actually looks like
+   * after applying migrations, rather than trusting the migration files alone.
+   *
+   * @returns {Promise<{collection: string, count: number, indexes: string[], fields: {name: string, type: string}[]}[]>}
+   */
+  async getSchemaSnapshot() {
+    const collections = await this.db.listCollections().toArray();
+    const snapshot = [];
+
+    for (const c of collections) {
+      const coll = this.db.collection(c.name);
+      const [count, indexes, sample] = await Promise.all([
+        coll.estimatedDocumentCount(),
+        coll.indexes(),
+        coll.findOne({})
+      ]);
+
+      const fields = sample
+        ? Object.keys(sample).map(name => ({ name, type: this._describeFieldType(sample[name]) }))
+        : [];
+
+      snapshot.push({
+        collection: c.name,
+        count,
+        indexes: indexes.map(i => i.name),
+        fields
+      });
+    }
+    return snapshot;
+  }
+
   async up(options = {}) {
     const result = {
       applied: [],
@@ -1109,6 +1182,7 @@ export async function down(db, client) {
     if (!js) return '';
     return js
       // Remove zero-width characters (Unicode confusion attack prevention)
+      // eslint-disable-next-line no-misleading-character-class -- distinct zero-width codepoints to strip, not a joined sequence
       .replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '')
       // Convert fullwidth characters to halfwidth (Unicode normalization)
       .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))

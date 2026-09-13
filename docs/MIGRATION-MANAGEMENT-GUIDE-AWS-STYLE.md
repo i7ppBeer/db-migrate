@@ -1,169 +1,169 @@
-# 未來新聞稿 (Internal Press Release)
+# Future Press Release (Internal Press Release)
 
-> *這是一份 AWS Working Backwards 風格的內部文件，用於在開發前釐清產品願景與客戶價值。*
-
----
-
-## db-migrate 正式發布：終結「資料庫變更恐懼症」
-
-**開發團隊不再害怕週五部署資料庫變更**
+> *This is an internal document in the AWS Working Backwards style, used to clarify product vision and customer value before development begins.*
 
 ---
 
-**2026 年 Q2** — 今天，我們發布 db-migrate，一套專為解決「資料庫變更恐懼症」而生的遷移管理系統。
+## db-migrate Officially Launches: Ending "Database Change Anxiety"
 
-### 我們要解決的問題
-
-在與超過 50 個開發團隊深度訪談後，我們發現一個驚人的事實：
-
-> **「我們的 down migration 從來沒測過。」**
-
-這不是個案，而是業界常態。以下是我們收集到的真實痛點：
+**Development teams no longer fear deploying database changes on Fridays**
 
 ---
 
-#### 😰 痛點一：回滾腳本永遠沒測過
+**Q2 2026** — Today, we are releasing db-migrate, a migration management system built specifically to solve "database change anxiety."
 
-*「寫 down migration 只是為了通過 Code Review，從來沒人真的跑過。直到出事那天，才發現根本跑不動。」*
+### The Problem We're Solving
 
-**數據**：90% 的團隊從未在部署前測試過回滾腳本。
+After in-depth interviews with more than 50 development teams, we uncovered a startling fact:
 
-**後果**：當生產環境出問題需要回滾時，平均需要 2-4 小時手動修復，而不是預期的 5 分鐘自動回滾。
+> **"Our down migration has never been tested."**
 
----
-
-#### 😱 痛點二：危險操作悄悄混入
-
-*「Junior 工程師不小心在 migration 裡寫了 DROP DATABASE，Code Review 沒注意到就合併了。」*
-
-**數據**：65% 的資料庫相關生產事故，源於未被 Review 發現的危險操作。
-
-**後果**：資料永久丟失、服務長時間中斷、客戶信任受損。
+This isn't an isolated case — it's the industry norm. Here are the real pain points we collected:
 
 ---
 
-#### 😤 痛點三：遷移執行完才知道有問題
+#### 😰 Pain Point 1: Rollback scripts are never tested
 
-*「Migration 跑完說成功，結果業務邏輯全壞了。因為欄位加了，但資料沒填對。」*
+*"We write down migrations just to pass code review — nobody actually runs them. It's only on the day something breaks that we discover they don't even work."*
 
-**數據**：40% 的遷移問題在執行後數小時甚至數天才被發現。
+**Data**: 90% of teams have never tested their rollback scripts before deployment.
 
-**後果**：發現太晚，已經無法簡單回滾，需要寫補償腳本修復資料。
-
----
-
-#### 😵 痛點四：權限管理混亂
-
-*「開發者可以直接改資料庫權限，有人不小心把 root 密碼寫進 migration 裡 commit 上去了。」*
-
-**數據**：25% 的安全事件與資料庫權限變更相關。
-
-**後果**：敏感資訊外洩、權限被濫用、合規審計失敗。
+**Consequence**: When production issues require a rollback, manual fixes take an average of 2-4 hours, instead of the expected 5-minute automated rollback.
 
 ---
 
-### 我們的解決方案
+#### 😱 Pain Point 2: Dangerous operations slip through unnoticed
 
-db-migrate 針對上述每一個痛點，提供對應的解決機制：
+*"A junior engineer accidentally wrote DROP DATABASE in a migration, and code review missed it and merged it anyway."*
 
-| 痛點 | 解決方案 | 效果 |
+**Data**: 65% of database-related production incidents stem from dangerous operations that review failed to catch.
+
+**Consequence**: Permanent data loss, extended service outages, and damaged customer trust.
+
+---
+
+#### 😤 Pain Point 3: Problems are only discovered after the migration runs
+
+*"The migration reported success, but all the business logic broke — the column was added, but the data wasn't populated correctly."*
+
+**Data**: 40% of migration problems aren't discovered until hours or even days after execution.
+
+**Consequence**: By the time it's discovered, a simple rollback is no longer possible, and a compensating script is needed to fix the data.
+
+---
+
+#### 😵 Pain Point 4: Chaotic permission management
+
+*"Developers can change database permissions directly, and someone accidentally committed the root password into a migration."*
+
+**Data**: 25% of security incidents are related to database permission changes.
+
+**Consequence**: Sensitive information leaks, permission abuse, and failed compliance audits.
+
+---
+
+### Our Solution
+
+db-migrate provides a corresponding mechanism for each of the pain points above:
+
+| Pain Point | Solution | Effect |
 |------|----------|------|
-| 回滾腳本沒測過 | **Up-Down-Up 三階段強制測試** | 回滾成功率 30% → 95% |
-| 危險操作混入 | **危險操作自動攔截 + 智慧配對檢測** | 危險操作 100% 攔截或標記 |
-| 執行完才知有問題 | **Sanity Check + 自動回滾** | 問題發現時間：數小時 → 數秒 |
-| 權限管理混亂 | **DDL/DCL 強制分離** | 權限變更必須獨立審核 |
+| Rollback scripts never tested | **Mandatory three-stage Up-Down-Up testing** | Rollback success rate: 30% → 95% |
+| Dangerous operations slip through | **Automatic dangerous-operation blocking + smart pairing detection** | 100% of dangerous operations blocked or flagged |
+| Problems only found after execution | **Sanity check + automatic rollback** | Detection time: hours → seconds |
+| Chaotic permission management | **Mandatory DDL/DCL separation** | Permission changes require independent review |
 
-#### 完整解決方案對照表
+#### Full Solution Comparison Table
 
-| 痛點 | 解決方案 |
+| Pain Point | Solution |
 |------|----------|
-| 鎖表停機 | 危險指令檢測（禁止非 CONCURRENTLY 索引） |
-| 資料遺失 | 禁止 DROP DATABASE / TRUNCATE |
-| 無法回滾 | Up-Down-Up 三階段強制測試 |
-| 環境不一致 | 版本化 + changelog 追蹤 |
-| 遷移衝突 | 時間戳檔名 + CI 自動檢測 |
-| 權責不清 | DDL / DCL 目錄分離 |
-| 無審核流程 | PR Review + --allow-dangerous 旗標 |
-| 手動執行 | K8s Job 自動化部署 |
-| 缺乏 Dry-Run | --dry-run 模式預覽變更 |
+| Table locking / downtime | Dangerous statement detection (forbids non-CONCURRENTLY indexes) |
+| Data loss | Forbids DROP DATABASE / TRUNCATE |
+| No rollback possible | Mandatory three-stage Up-Down-Up testing |
+| Environment inconsistency | Versioning + changelog tracking |
+| Migration conflicts | Timestamped filenames + automatic CI detection |
+| Unclear ownership | DDL / DCL directory separation |
+| No review process | PR review + --allow-dangerous flag |
+| Manual execution | Automated deployment via K8s Job |
+| No dry-run | --dry-run mode to preview changes |
 
 ---
 
-### 可用性
+### Availability
 
-db-migrate 現已開源（MIT 授權），支援 MongoDB 與 MariaDB/MySQL，提供 CLI、Docker Image 與 Kubernetes Helm Chart。
-
----
-
-# 常見問題 (FAQ)
-
-## 客戶常見問題
-
-### Q1: 為什麼現有的遷移工具解決不了這些問題？
-
-**A:** 現有工具（migrate-mongo、Flyway、Liquibase）專注於「版本控制」——記錄哪些遷移已執行。但這不是真正的問題所在。
-
-真正的問題是：
-- **沒有機制強制測試回滾** → 工具不會阻止你部署未測試的回滾腳本
-- **沒有機制攔截危險操作** → DROP DATABASE 可以堂而皇之地通過
-- **沒有機制驗證執行結果** → 執行「成功」不代表結果「正確」
-
-db-migrate 不是要取代版本控制，而是在版本控制之上，加上「安全機制」。
+db-migrate is now open source (MIT license), supports MongoDB and MariaDB/MySQL, and ships a CLI, a Docker image, and a Kubernetes Helm chart.
 
 ---
 
-### Q2: 什麼是「Up-Down-Up 三階段強制測試」？為什麼這很重要？
+# FAQ
 
-**A:** 這是 db-migrate 的核心機制：
+## Customer FAQ
+
+### Q1: Why Can't Existing Migration Tools Solve These Problems?
+
+**A:** Existing tools (migrate-mongo, Flyway, Liquibase) focus on "version control" — recording which migrations have run. But that's not the real problem.
+
+The real problems are:
+- **No mechanism to enforce rollback testing** → the tool won't stop you from deploying an untested rollback script
+- **No mechanism to block dangerous operations** → DROP DATABASE can sail right through
+- **No mechanism to validate the execution result** → "successful" execution doesn't mean the result is "correct"
+
+db-migrate isn't trying to replace version control — it adds a "safety layer" on top of it.
+
+---
+
+### Q2: What Is "Mandatory Three-Stage Up-Down-Up Testing"? Why Does It Matter?
+
+**A:** This is db-migrate's core mechanism:
 
 ```
-UP (升級) → DOWN (回滾) → UP (再次升級)
+UP (upgrade) → DOWN (rollback) → UP (upgrade again)
 ```
 
-**為什麼這很重要？**
+**Why does this matter?**
 
-想像一個場景：你寫了一個 migration 新增欄位，然後寫了 down migration 刪除欄位。看起來很完美，對吧？
+Imagine a scenario: you write a migration that adds a column, then write a down migration that drops it. Looks perfect, right?
 
-但如果：
-- down migration 有語法錯誤？
-- down migration 刪錯欄位？
-- down migration 之後，up migration 跑不動了（因為有殘留資料）？
+But what if:
+- the down migration has a syntax error?
+- the down migration drops the wrong column?
+- after the down migration runs, the up migration no longer works (because of leftover data)?
 
-這些問題，只有**真的跑過一遍**才會發現。Up-Down-Up 確保：
-1. UP 可以執行 ✓
-2. DOWN 可以回滾 ✓
-3. 回滾後再 UP 還是可以執行 ✓（證明回滾是乾淨的）
+You only discover these problems by **actually running it once**. Up-Down-Up ensures:
+1. UP can execute ✓
+2. DOWN can roll back ✓
+3. UP still works after rolling back ✓ (proving the rollback was clean)
 
 ---
 
-### Q3: 什麼是「危險操作自動攔截」？會不會誤判？
+### Q3: What Is "Automatic Dangerous-Operation Blocking"? Can It Misfire?
 
-**A:** 系統會自動偵測以下危險操作：
+**A:** The system automatically detects the following dangerous operations:
 
-| 類型 | 危險操作 |
-|------|----------|
-| 資料刪除 | `DROP TABLE`, `DROP DATABASE`, `TRUNCATE`, `db.collection.drop()` |
-| 權限變更 | `GRANT`, `REVOKE`, `CREATE USER`, `ALTER USER` |
-| 結構變更 | `DROP COLUMN` (可能導致資料丟失) |
+| Type | Dangerous Operation |
+|------|------|
+| Data deletion | `DROP TABLE`, `DROP DATABASE`, `TRUNCATE`, `db.collection.drop()` |
+| Permission changes | `GRANT`, `REVOKE`, `CREATE USER`, `ALTER USER` |
+| Structural changes | `DROP COLUMN` (can cause data loss) |
 
-**會不會誤判？**
+**Can it misfire?**
 
-會，而且這是故意的。我們寧可誤判，也不願漏判。
+Yes, and that's intentional. We'd rather have false positives than miss a real one.
 
-但我們提供了「智慧配對」機制來減少誤判：
+But we provide a "smart pairing" mechanism to reduce false positives:
 
-**MongoDB 範例：**
+**MongoDB example:**
 ```javascript
-// 這種情況會自動放行
+// This case is allowed through automatically
 export const up = async (db) => {
   await db.createCollection('temp_orders'); // CREATE
 };
 export const down = async (db) => {
-  await db.collection('temp_orders').drop(); // DROP ← 自動放行，因為有配對
+  await db.collection('temp_orders').drop(); // DROP ← allowed automatically, since it's paired
 };
 ```
 
-**MariaDB/MySQL 範例：**
+**MariaDB/MySQL example:**
 ```sql
 -- +migrate Up
 CREATE TABLE temp_orders (
@@ -172,20 +172,20 @@ CREATE TABLE temp_orders (
 );
 
 -- +migrate Down
-DROP TABLE temp_orders;  -- ✅ 自動放行，因為有配對的 CREATE
+DROP TABLE temp_orders;  -- ✅ Allowed automatically, since it's paired with a CREATE
 ```
 
-如果確實需要執行危險操作，使用 `-- migrate-ignore: drop` 註解並說明原因。
+If a dangerous operation is genuinely required, use a `-- migrate-ignore: drop` comment and explain the reason.
 
 ---
 
-### Q4: 什麼是「Sanity Check」？和一般的測試有什麼不同？
+### Q4: What Is a "Sanity Check"? How Is It Different From Regular Testing?
 
-**A:** Sanity Check 是**執行後的自動驗證**，確保「執行成功」等於「結果正確」。
+**A:** A sanity check is **automatic post-execution validation** that ensures "executed successfully" actually means "the result is correct."
 
-**舉個例子**：
+**For example**:
 
-你要給所有用戶新增 `phone` 欄位，預設值為空字串：
+You want to add a `phone` column to all users, defaulting to an empty string:
 
 ```javascript
 export const up = async (db) => {
@@ -193,15 +193,15 @@ export const up = async (db) => {
 };
 ```
 
-執行後，MongoDB 回傳 `{ acknowledged: true }`。成功了？
+After running it, MongoDB returns `{ acknowledged: true }`. Success?
 
-不一定。可能：
-- 有些文件因為 filter 條件問題沒被更新
-- 更新過程中有文件被其他程序寫入
+Not necessarily. It's possible that:
+- some documents weren't updated due to a filter condition issue
+- documents were written by another process during the update
 
-**Sanity Check 會驗證結果**：
+**The sanity check validates the result**:
 
-**MongoDB 範例：**
+**MongoDB example:**
 ```javascript
 export const postCheck = async ({ db }) => {
   const missing = await db.collection('users').countDocuments({ 
@@ -211,28 +211,28 @@ export const postCheck = async ({ db }) => {
   if (missing > 0) {
     return { 
       success: false, 
-      error: `還有 ${missing} 筆資料沒有 phone 欄位` 
+      error: `${missing} records are missing the phone field` 
     };
   }
   return { success: true };
 };
 ```
 
-**MariaDB/MySQL 範例：**
+**MariaDB/MySQL example:**
 ```sql
 -- +migrate Up
 ALTER TABLE users ADD COLUMN phone VARCHAR(20) DEFAULT '';
 UPDATE users SET phone = '' WHERE phone IS NULL;
 
 -- +sanity PostCheck
--- 驗證所有用戶都有 phone 欄位且不為 NULL
+-- Validate that every user has a non-NULL phone field
 SELECT 
   CASE 
     WHEN COUNT(*) = 0 THEN 1
     ELSE 0
   END AS success,
   CASE 
-    WHEN COUNT(*) > 0 THEN CONCAT(COUNT(*), ' 筆資料的 phone 欄位為 NULL')
+    WHEN COUNT(*) > 0 THEN CONCAT(COUNT(*), ' records have a NULL phone field')
     ELSE NULL
   END AS error
 FROM users WHERE phone IS NULL;
@@ -242,88 +242,88 @@ FROM users WHERE phone IS NULL;
 ALTER TABLE users DROP COLUMN phone;
 ```
 
-如果 `postCheck` 失敗，系統會**自動執行 down() 回滾**。
+If `postCheck` fails, the system will **automatically run down() to roll back**.
 
 ---
 
-### Q5: 自動回滾不會造成更大的問題嗎？
+### Q5: Won't Automatic Rollback Cause Bigger Problems?
 
-**A:** 這是很多人的擔心，讓我解釋為什麼自動回滾是安全的：
+**A:** This is a common concern. Let me explain why automatic rollback is safe:
 
-**前提條件**：
-- 你的 migration 已經通過 Up-Down-Up 測試
-- 這代表 down migration 是**驗證過可以執行的**
+**Prerequisites**:
+- Your migration has already passed Up-Down-Up testing
+- This means the down migration is **verified to work**
 
-**自動回滾的邏輯**：
-1. `postCheck` 失敗 → 發現問題
-2. 執行 `down()` → 回到執行前狀態
-3. 問題在造成更大影響前被阻止
+**The logic behind automatic rollback**:
+1. `postCheck` fails → the problem is detected
+2. `down()` runs → returns to the pre-execution state
+3. The problem is stopped before it causes greater impact
 
-**如果你還是不放心**：
+**If you're still not comfortable**:
 ```bash
-# 停用自動回滾，只顯示警告
+# Disable automatic rollback and only show a warning
 node src/cli.js up --sanity-check --no-auto-rollback
 ```
 
 ---
 
-### Q6: 我的團隊很忙，沒時間導入新工具。需要多久？
+### Q6: My Team Is Busy and Doesn't Have Time to Adopt a New Tool. How Long Will It Take?
 
-**A:** 我們設計 db-migrate 為**漸進式採用**，從 5 分鐘開始：
+**A:** We designed db-migrate for **incremental adoption**, starting from 5 minutes:
 
-| 階段 | 時間 | 做什麼 | 得到什麼 |
+| Stage | Time | What to Do | What You Get |
 |------|------|--------|----------|
-| 1 | 5 分鐘 | 對現有遷移執行 `validate` | 立即看到潛在風險報告 |
-| 2 | 30 分鐘 | 將 `validate` 加入 CI | 自動攔截危險操作 |
-| 3 | 依節奏 | 啟用 Up-Down-Up 測試 | 確保回滾腳本可用 |
-| 4 | 依需求 | 加入 Sanity Check | 執行後自動驗證 |
+| 1 | 5 minutes | Run `validate` against your existing migrations | An immediate report of potential risks |
+| 2 | 30 minutes | Add `validate` to CI | Automatic blocking of dangerous operations |
+| 3 | At your own pace | Enable Up-Down-Up testing | Confidence that rollback scripts work |
+| 4 | As needed | Add sanity checks | Automatic post-execution validation |
 
-你不需要一次全部導入。先從 `validate` 開始，感受價值後再逐步深入。
+You don't need to adopt everything at once. Start with `validate`, and go deeper once you feel the value.
 
 ---
 
-## 內部常見問題 (Internal FAQ)
+## Internal FAQ
 
-### Q7: 這個專案的核心假設是什麼？如果假設錯了會怎樣？
+### Q7: What Are This Project's Core Assumptions? What Happens If They're Wrong?
 
-**A:** 我們的核心假設：
+**A:** Our core assumptions:
 
-| 假設 | 驗證方式 | 如果錯了 |
+| Assumption | Validation Method | If It's Wrong |
 |------|----------|----------|
-| 90% 團隊沒測過 down migration | 訪談 50+ 團隊確認 | 重新評估產品定位 |
-| 強制測試可以提高回滾成功率 | 內部試用數據 | 調整測試策略 |
-| 開發者願意多花時間寫 Sanity Check | 使用率追蹤 | 簡化 Sanity Check 寫法或提供自動生成 |
-| Kubernetes 是主要部署環境 | 市場調查 | 加強其他部署方式支援 |
+| 90% of teams have never tested a down migration | Confirmed via interviews with 50+ teams | Re-evaluate product positioning |
+| Mandatory testing improves rollback success rate | Internal pilot data | Adjust testing strategy |
+| Developers are willing to spend extra time writing sanity checks | Usage tracking | Simplify sanity check syntax or offer auto-generation |
+| Kubernetes is the primary deployment environment | Market research | Strengthen support for other deployment methods |
 
-**最大風險**：開發者覺得「多此一舉」而不願採用。
+**Biggest risk**: developers see it as unnecessary overhead and refuse to adopt it.
 
-**緩解策略**：漸進式採用 + 先從 validate 開始展示價值。
+**Mitigation strategy**: incremental adoption + demonstrate value starting with validate.
 
 ---
 
-### Q8: 為什麼不用現有的開源方案？
+### Q8: Why Not Use an Existing Open-Source Solution?
 
-**A:** 我們評估過：
+**A:** We evaluated the alternatives:
 
-| 工具 | 為什麼不行 |
+| Tool | Why It Falls Short |
 |------|------------|
-| Flyway | 只有版本控制，沒有安全機制；且以 Java 生態為主 |
-| Liquibase | 同上，且設定複雜 |
-| migrate-mongo | 只支援 MongoDB，沒有危險操作檢測 |
-| sql-migrate | 只支援 SQL，沒有 Up-Down-Up 測試 |
+| Flyway | Only version control, no safety mechanism; primarily targets the Java ecosystem |
+| Liquibase | Same as above, plus complex configuration |
+| migrate-mongo | Only supports MongoDB, no dangerous-operation detection |
+| sql-migrate | Only supports SQL, no Up-Down-Up testing |
 
-**關鍵差異**：這些工具解決「版本控制」，我們解決「安全機制」。這是不同的問題。
+**Key difference**: these tools solve "version control"; we solve "safety." These are different problems.
 
 ---
 
-# 附錄 A：問題場景
+# Appendix A: Problem Scenarios
 
-## 場景一：週五下午的惡夢
+## Scenario 1: Friday Afternoon Nightmare
 
-**時間**：週五下午 4:30
-**情況**：部署新版本，包含一個資料庫 migration
+**Time**: Friday, 4:30 PM
+**Situation**: Deploying a new release that includes a database migration
 
-**MongoDB 版本：**
+**MongoDB version:**
 ```javascript
 // 20250121-add-payment-status.js
 export const up = async (db) => {
@@ -341,7 +341,7 @@ export const down = async (db) => {
 };
 ```
 
-**MariaDB/MySQL 版本：**
+**MariaDB/MySQL version:**
 ```sql
 -- 20250121-add-payment-status.sql
 -- +migrate Up
@@ -352,44 +352,44 @@ UPDATE orders SET payment_status = 'pending' WHERE payment_status IS NULL;
 ALTER TABLE orders DROP COLUMN payment_status;
 ```
 
-**出事了**：部署後發現，舊訂單不應該設為 `pending`，應該保持原狀。需要回滾。
+**Something went wrong**: after deployment, it turned out old orders shouldn't have been set to `pending` — they should have kept their original state. A rollback was needed.
 
-**沒有 db-migrate**：
-1. 嘗試執行 down migration → 失敗（因為從沒測過）
-2. 發現 down migration 有 bug
-3. 修復 bug、重新部署 → 又失敗
-4. 手動寫 SQL 修復 → 花了 3 小時
-5. 週五晚上 8:00 才下班
+**Without db-migrate**:
+1. Attempted to run the down migration → failed (because it had never been tested)
+2. Found a bug in the down migration
+3. Fixed the bug and redeployed → failed again
+4. Manually wrote SQL to fix the data → took 3 hours
+5. Didn't leave the office until 8:00 PM on Friday
 
-**有 db-migrate**：
-1. 這個 migration 在 PR 階段就會被標記為「高風險」
-2. Code Review 時會被要求加上 Sanity Check
-3. 如果真的部署了，postCheck 會發現問題並自動回滾
-4. 5 分鐘內解決，準時下班
+**With db-migrate**:
+1. This migration would be flagged as "high risk" at the PR stage
+2. Code review would require adding a sanity check
+3. If it were deployed anyway, postCheck would catch the problem and roll back automatically
+4. Resolved within 5 minutes — home on time
 
 ---
 
-## 場景二：Junior 工程師的失誤
+## Scenario 2: A Junior Engineer's Mistake
 
-**情況**：Junior 工程師要清理測試資料
+**Situation**: A junior engineer needs to clean up test data
 
 ```sql
 -- 20250121-cleanup-test-data.sql
 -- +migrate Up
 DROP TABLE test_users;
 DROP TABLE test_orders;
-DROP TABLE users;  -- 手誤！應該是 test_users
+DROP TABLE users;  -- Typo! Should be test_users
 
 -- +migrate Down
--- 沒寫，因為「反正只是清理」
+-- Not written, since "it's just cleanup anyway"
 ```
 
-**沒有 db-migrate**：
-- Code Review 沒注意到 `DROP TABLE users`
-- 部署到 Staging... 沒事（因為 Staging 的 users 本來就是測試資料）
-- 部署到 Production... 完蛋了
+**Without db-migrate**:
+- Code review missed `DROP TABLE users`
+- Deployed to staging... no problem (because staging's users table was test data anyway)
+- Deployed to production... disaster
 
-**有 db-migrate**：
+**With db-migrate**:
 ```
 ❌ VALIDATION FAILED
 
@@ -403,18 +403,18 @@ DROP TABLE users;  -- 手誤！應該是 test_users
 Use --allow-dangerous to bypass (requires ADMIN approval)
 ```
 
-部署被阻止，危機解除。
+Deployment blocked, crisis averted.
 
 ---
 
-## 場景三：Sanity Check 救了一命
+## Scenario 3: A Sanity Check Saves the Day
 
-**情況**：要給所有用戶加上 `verified` 欄位
+**Situation**: Adding a `verified` field to all users
 
-**MongoDB 版本：**
+**MongoDB version:**
 ```javascript
 export const up = async (db) => {
-  // 應該用 updateMany，但手誤用了 updateOne
+  // Should use updateMany, but updateOne was used by mistake
   await db.collection('users').updateOne(
     {},
     { $set: { verified: false } }
@@ -430,22 +430,22 @@ export const postCheck = async ({ db }) => {
   if (updated !== total) {
     return { 
       success: false, 
-      error: `只有 ${updated}/${total} 筆資料被更新` 
+      error: `Only ${updated}/${total} records were updated` 
     };
   }
   return { success: true };
 };
 ```
 
-**MariaDB/MySQL 版本：**
+**MariaDB/MySQL version:**
 ```sql
 -- +migrate Up
--- 應該用 ALTER TABLE，但手誤只更新了一筆
+-- Meant to update every row, but a typo left it updating only one
 ALTER TABLE users ADD COLUMN verified BOOLEAN DEFAULT FALSE;
-UPDATE users SET verified = FALSE WHERE id = 1;  -- 手誤！應該是 WHERE verified IS NULL
+UPDATE users SET verified = FALSE WHERE id = 1;  -- Typo! Should be WHERE verified IS NULL
 
 -- +sanity PostCheck
--- 驗證所有用戶都有 verified 值
+-- Validate that every user has a verified value
 SELECT 
   CASE 
     WHEN (SELECT COUNT(*) FROM users WHERE verified IS NULL) = 0 THEN 1
@@ -453,9 +453,9 @@ SELECT
   END AS success,
   CASE 
     WHEN (SELECT COUNT(*) FROM users WHERE verified IS NULL) > 0 
-    THEN CONCAT('只有 ', 
+    THEN CONCAT('Only ', 
       (SELECT COUNT(*) FROM users WHERE verified IS NOT NULL), '/',
-      (SELECT COUNT(*) FROM users), ' 筆資料被更新')
+      (SELECT COUNT(*) FROM users), ' records were updated')
     ELSE NULL
   END AS error;
 -- -sanity PostCheck
@@ -464,46 +464,46 @@ SELECT
 ALTER TABLE users DROP COLUMN verified;
 ```
 
-**執行結果**：
+**Execution result**:
 ```
 ✅ Migration executed
 🔍 Running post-check...
-❌ Post-check failed: 只有 1/10000 筆資料被更新
+❌ Post-check failed: Only 1/10000 records were updated
 🔄 Auto-rollback triggered...
 ✅ Rollback completed
 ```
 
-問題在造成影響前被自動修復。
+The problem was automatically fixed before it could cause impact.
 
 ---
 
-# 附錄 B：快速開始
+# Appendix B: Quick Start
 
 ```bash
-# 1. Clone 專案
+# 1. Clone the project
 git clone https://github.com/i7ppBeer/ddl-migrate.git
 cd ddl-migrate
 
-# 2. 安裝依賴
+# 2. Install dependencies
 npm install
 
-# 3. 對現有遷移執行驗證（5 分鐘體驗價值）
+# 3. Run validation against existing migrations (experience the value in 5 minutes)
 node src/cli.js -c your-project/config.js validate
 
-# 4. 啟動測試環境並執行完整測試
+# 4. Start the test environment and run the full test suite
 docker compose up -d
 npm test
 ```
 
-## 更多資源
+## Additional Resources
 
-- 📖 [完整技術文件](./MIGRATION-MANAGEMENT-GUIDE.md)
-- 🐳 [本地測試指南](./LOCAL-TEST-GUIDE.md)
-- ☸️ [Kubernetes 部署指南](./BUILD-IMAGE-GUIDE.md)
+- 📖 [Full technical documentation](./MIGRATION-MANAGEMENT-GUIDE.md)
+- 🐳 [Local testing guide](./LOCAL-TEST-GUIDE.md)
+- ☸️ [Kubernetes deployment guide](./BUILD-IMAGE-GUIDE.md)
 
 ---
 
-*這是一份 Working Backwards 文件。請確認：*
-1. *痛點描述是否準確？*
-2. *解決方案是否對症？*
-3. *FAQ 是否涵蓋主要疑慮？*
+*This is a Working Backwards document. Please confirm:*
+1. *Is the pain point description accurate?*
+2. *Does the solution address the problem?*
+3. *Does the FAQ cover the main concerns?*

@@ -1,48 +1,48 @@
-# Docker Compose 使用者操作指南
+# Docker Compose User Guide
 
-> 本指南從使用者角度出發，說明如何使用 docker-compose 執行所有 CLI 操作。
-
----
-
-## 目錄
-
-1. [環境準備](#1-環境準備)
-2. [DCL (資料控制語言) - 帳號權限管理](#2-dcl-資料控制語言---帳號權限管理)
-   - [第一次建立帳號](#21-第一次建立帳號)
-   - [修改權限或新增帳號](#22-修改權限或新增帳號)
-   - [驗證 DCL 腳本](#23-驗證-dcl-腳本)
-3. [DDL (資料定義語言) - 結構變更管理](#3-ddl-資料定義語言---結構變更管理)
-   - [第一次建立 DDL Migration](#31-第一次建立-ddl-migration)
-   - [撰寫 Up + PostCheck + Down](#32-撰寫-up--postcheck--down)
-   - [驗證 DDL 腳本](#33-驗證-ddl-腳本)
-4. [實際連線測試 (DCL + DDL Up/Down/Up)](#4-實際連線測試-dcl--ddl-updownup)
-5. [完整範例流程](#5-完整範例流程)
-6. [常用指令速查表](#6-常用指令速查表)
+> This guide walks through using docker-compose to run all CLI operations, from the user's perspective.
 
 ---
 
-## 1. 環境準備
+## Table of Contents
 
-### 啟動資料庫服務
+1. [Environment Setup](#1-environment-setup)
+2. [DCL (Data Control Language) - Account/Permission Management](#2-dcl-data-control-language---accountpermission-management)
+   - [First-Time Account Setup](#21-first-time-account-setup)
+   - [Modify Permissions or Add Accounts](#22-modify-permissions-or-add-accounts)
+   - [Validate DCL Scripts](#23-validate-dcl-scripts)
+3. [DDL (Data Definition Language) - Schema Change Management](#3-ddl-data-definition-language---schema-change-management)
+   - [Create Your First DDL Migration](#31-create-your-first-ddl-migration)
+   - [Writing Up + PostCheck + Down](#32-writing-up--postcheck--down)
+   - [Validate DDL Scripts](#33-validate-ddl-scripts)
+4. [Live Connection Test (DCL + DDL Up/Down/Up)](#4-live-connection-test-dcl--ddl-updownup)
+5. [Complete Example Workflow](#5-complete-example-workflow)
+6. [Command Quick Reference](#6-command-quick-reference)
+
+---
+
+## 1. Environment Setup
+
+### Start Database Services
 
 ```bash
-# 啟動 MariaDB 和 MongoDB 資料庫
+# Start MariaDB and MongoDB databases
 docker compose up -d mariadb mongodb
 
-# 確認服務已啟動且健康
+# Confirm the services are up and healthy
 docker compose ps
 ```
 
-### 建立 Migration Runner 服務 (docker-compose.user.yml)
+### Create a Migration Runner Service (docker-compose.user.yml)
 
-在專案根目錄建立以下檔案，方便後續操作：
+Create the following file in the project root to make later steps easier:
 
 ```yaml
-# docker-compose.user.yml - 使用者操作用
+# docker-compose.user.yml - for user operations
 version: "3.8"
 
 services:
-  # Migration CLI 工具
+  # Migration CLI tool
   migrate:
     build:
       context: .
@@ -50,7 +50,7 @@ services:
       target: runner
     working_dir: /app
     volumes:
-      # 掛載你的 migration 目錄
+      # Mount your migration directory
       - ./databases:/app/databases:ro
       - ./reports:/app/reports
     environment:
@@ -68,33 +68,37 @@ services:
 networks:
   migrate-network:
     external: true
-    name: mongodb-migrate_migrate-network
+    # Compose prefixes the network name with the project name (usually the
+    # directory the main docker-compose.yml lives in, e.g. "db-migrate" here,
+    # not "mongodb-migrate") — confirm the real name with:
+    #   docker network ls | grep migrate-network
+    name: db-migrate_migrate-network
 ```
 
 ---
 
-## 2. DCL (資料控制語言) - 帳號權限管理
+## 2. DCL (Data Control Language) - Account/Permission Management
 
-DCL 使用 **Repeatable** 模式，檔案以 `R__` 開頭，每當內容 (checksum) 改變就會重新執行。
+DCL uses **Repeatable** mode: files start with `R__` and re-run whenever their content (checksum) changes.
 
-### 2.1 第一次建立帳號
+### 2.1 First-Time Account Setup
 
-#### Step 1: 複製範本或建立 DCL 目錄結構
+#### Step 1: Copy a Template or Create the DCL Directory Structure
 
 ```bash
-# 方式一：複製範本 (推薦)
-cp -r test-fixtures/mariadb/_templates/dcl test-fixtures/mariadb/my-project/dcl
+# Option 1: Copy an existing example and modify it (there's no _templates directory, so use a real example as your starting point)
+cp -r test-fixtures/mariadb/test-success/dcl test-fixtures/mariadb/my-project/dcl
 
-# 方式二：手動建立目錄
+# Option 2: Create the directory manually
 mkdir -p test-fixtures/mariadb/my-project/dcl/migrations
 ```
 
-#### Step 2: 建立 Config 檔案 (如使用範本可跳過)
+#### Step 2: Create the Config File (Skip This if You Used a Template)
 
 ```bash
 cat > test-fixtures/mariadb/my-project/dcl/config.js << 'EOF'
 /**
- * DCL Configuration - 帳號權限管理
+ * DCL Configuration - Account/Permission Management
  */
 export default {
   type: 'mariadb',
@@ -102,7 +106,7 @@ export default {
   port: parseInt(process.env.MARIADB_PORT || '3306'),
   user: process.env.MARIADB_USER || 'root',
   password: process.env.MARIADB_PASSWORD || 'rootpass',
-  database: 'mysql',  // DCL 操作在 mysql 系統資料庫
+  database: 'mysql',  // DCL operations run against the mysql system database
   
   migrationsDir: './migrations',
   checksumTable: 'dcl_repeatable_migrations',
@@ -116,112 +120,112 @@ export default {
 EOF
 ```
 
-#### Step 3: 建立公版 Default 帳號腳本
+#### Step 3: Create the Default (Baseline) Account Script
 
 ```bash
 cat > test-fixtures/mariadb/my-project/dcl/migrations/R__00_default_users.sql << 'EOF'
 -- R__00_default_users.sql
--- DCL Repeatable Migration: Default Service Account (公版)
--- ⚠️ 必須是 IDEMPOTENT (可重複執行)
+-- DCL Repeatable Migration: Default Service Account (baseline)
+-- ⚠️ Must be IDEMPOTENT (safe to re-run)
 
 -- ============================================
 -- Default Service Account
--- 用於基本服務連線，第一次登入需自行修改密碼
+-- For basic service connections; the password must be changed on first login
 -- ============================================
 
--- 清除後重建，確保冪等性
+-- Drop and recreate to guarantee idempotency
 DROP USER IF EXISTS 'app_default'@'%';
 CREATE USER 'app_default'@'%' 
   IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'
-  PASSWORD EXPIRE;  -- 第一次登入強制改密碼
+  PASSWORD EXPIRE;  -- Force a password change on first login
 
--- 基本 SELECT 權限 (可依需求調整)
+-- Basic SELECT privilege (adjust as needed)
 GRANT SELECT ON mydb.* TO 'app_default'@'%';
 
 FLUSH PRIVILEGES;
 EOF
 ```
 
-#### Step 4: 建立 Readonly 帳號腳本
+#### Step 4: Create the Read-Only Account Script
 
 ```bash
 cat > test-fixtures/mariadb/my-project/dcl/migrations/R__01_readonly_users.sql << 'EOF'
 -- R__01_readonly_users.sql
 -- DCL Repeatable Migration: Read-Only Users
--- ⚠️ 必須是 IDEMPOTENT (可重複執行)
+-- ⚠️ Must be IDEMPOTENT (safe to re-run)
 
 -- ============================================
--- Read-Only User (報表、查詢用)
+-- Read-Only User (for reporting and queries)
 -- ============================================
 
 DROP USER IF EXISTS 'app_readonly'@'%';
 CREATE USER 'app_readonly'@'%' 
   IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'
-  PASSWORD EXPIRE;  -- 第一次登入強制改密碼
+  PASSWORD EXPIRE;  -- Force a password change on first login
 
--- 只給 SELECT 權限
+-- Grant SELECT only
 GRANT SELECT ON mydb.* TO 'app_readonly'@'%';
 
--- 可視需求給予其他資料庫的唯讀權限
+-- Optionally grant read-only access to other databases
 -- GRANT SELECT ON analytics.* TO 'app_readonly'@'%';
 
 FLUSH PRIVILEGES;
 EOF
 ```
 
-#### Step 5: 建立 Readwrite 帳號腳本
+#### Step 5: Create the Read-Write Account Script
 
 ```bash
 cat > test-fixtures/mariadb/my-project/dcl/migrations/R__02_readwrite_users.sql << 'EOF'
 -- R__02_readwrite_users.sql
 -- DCL Repeatable Migration: Read-Write Users (Application Accounts)
--- ⚠️ 必須是 IDEMPOTENT (可重複執行)
+-- ⚠️ Must be IDEMPOTENT (safe to re-run)
 
 -- ============================================
--- Application User (CRUD 操作)
+-- Application User (CRUD operations)
 -- ============================================
 
 DROP USER IF EXISTS 'app_readwrite'@'%';
 CREATE USER 'app_readwrite'@'%' 
   IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'
-  PASSWORD EXPIRE;  -- 第一次登入強制改密碼
+  PASSWORD EXPIRE;  -- Force a password change on first login
 
--- SELECT, INSERT, UPDATE, DELETE 權限
+-- SELECT, INSERT, UPDATE, DELETE privileges
 GRANT SELECT, INSERT, UPDATE, DELETE ON mydb.* TO 'app_readwrite'@'%';
 
 FLUSH PRIVILEGES;
 EOF
 ```
 
-#### Step 6: 執行 DCL Migration
+#### Step 6: Run the DCL Migration
 
 ```bash
-# 使用 docker-compose 執行 DCL
+# Run DCL with docker-compose
 docker compose run --rm migrate \
   node src/cli.js dcl \
   -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 
-# 或使用簡化別名 (需先設定)
+# Or use a shorthand alias (set up first)
 docker compose run --rm migrate dcl -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
 ---
 
-### 2.2 修改權限或新增帳號
+### 2.2 Modify Permissions or Add Accounts
 
-DCL 是 **Repeatable** 模式，只需要修改對應的 SQL 檔案，然後重新執行即可。
+DCL runs in **Repeatable** mode — just edit the corresponding SQL file and re-run.
 
-#### 新增帳號
+#### Adding an Account
 
 ```bash
-# 新增一個 DDL Admin 帳號
+# Add a DDL admin account
 cat > test-fixtures/mariadb/my-project/dcl/migrations/R__03_ddl_admin.sql << 'EOF'
 -- R__03_ddl_admin.sql
 -- DCL Repeatable Migration: DDL Admin User
--- ⚠️ 必須是 IDEMPOTENT (可重複執行)
+-- ⚠️ Must be IDEMPOTENT (safe to re-run)
 
 -- ============================================
--- DDL Admin (Schema 管理員)
+-- DDL Admin (Schema administrator)
 -- ============================================
 
 DROP USER IF EXISTS 'app_ddl_admin'@'%';
@@ -229,7 +233,7 @@ CREATE USER 'app_ddl_admin'@'%'
   IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'
   PASSWORD EXPIRE;
 
--- DDL 權限: CREATE, ALTER, DROP, INDEX, etc.
+-- DDL privileges: CREATE, ALTER, DROP, INDEX, etc.
 GRANT SELECT, INSERT, UPDATE, DELETE ON mydb.* TO 'app_ddl_admin'@'%';
 GRANT CREATE, ALTER, DROP, INDEX, REFERENCES ON mydb.* TO 'app_ddl_admin'@'%';
 
@@ -237,29 +241,29 @@ FLUSH PRIVILEGES;
 EOF
 ```
 
-#### 修改權限
+#### Modifying Permissions
 
 ```bash
-# 直接編輯對應的 SQL 檔案
-# 例如: 給 readonly 帳號增加 analytics 資料庫的存取權
+# Edit the corresponding SQL file directly
+# Example: grant the readonly account access to the analytics database
 
-# 編輯 R__01_readonly_users.sql，加入:
+# Edit R__01_readonly_users.sql and add:
 # GRANT SELECT ON analytics.* TO 'app_readonly'@'%';
 ```
 
-#### 重新執行 DCL
+#### Re-Running DCL
 
 ```bash
-# DCL 會自動偵測 checksum 變化，只執行有修改的檔案
+# DCL automatically detects checksum changes and only re-runs modified files
 docker compose run --rm migrate \
   node src/cli.js dcl \
   -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
-#### 查看 DCL 狀態
+#### Checking DCL Status
 
 ```bash
-# 查看哪些 DCL 需要更新
+# See which DCL scripts need updating
 docker compose run --rm migrate \
   node src/cli.js dcl:status \
   -c /app/test-fixtures/mariadb/my-project/dcl/config.js
@@ -267,18 +271,18 @@ docker compose run --rm migrate \
 
 ---
 
-### 2.3 驗證 DCL 腳本
+### 2.3 Validate DCL Scripts
 
-#### 驗證冪等性 (Idempotent)
+#### Validate Idempotency
 
 ```bash
-# 驗證所有 DCL 腳本是否為冪等 (可重複執行)
+# Verify that all DCL scripts are idempotent (safe to re-run)
 docker compose run --rm migrate \
   node src/cli.js dcl:verify \
   -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
-**預期輸出:**
+**Expected output:**
 
 ```
 [DCL VERIFY] Testing idempotency (mariadb)...
@@ -298,10 +302,10 @@ docker compose run --rm migrate \
 ✅ All DCL scripts are idempotent!
 ```
 
-#### Dry Run 預覽
+#### Dry Run Preview
 
 ```bash
-# 預覽會執行哪些 DCL
+# Preview which DCL scripts would run
 docker compose run --rm migrate \
   node src/cli.js dcl --dry-run \
   -c /app/test-fixtures/mariadb/my-project/dcl/config.js
@@ -309,28 +313,28 @@ docker compose run --rm migrate \
 
 ---
 
-## 3. DDL (資料定義語言) - 結構變更管理
+## 3. DDL (Data Definition Language) - Schema Change Management
 
-DDL 使用 **Versioned** 模式，檔案以時間戳開頭 (如 `20250101000001-`），依序執行且只執行一次。
+DDL uses **Versioned** mode: files start with a timestamp (e.g. `20250101000001-`), run in order, and only run once.
 
-### 3.1 第一次建立 DDL Migration
+### 3.1 Create Your First DDL Migration
 
-#### Step 1: 複製範本或建立 DDL 目錄結構
+#### Step 1: Copy a Template or Create the DDL Directory Structure
 
 ```bash
-# 方式一：複製範本 (推薦)
-cp -r test-fixtures/mariadb/_templates/ddl test-fixtures/mariadb/my-project/ddl
+# Option 1: Copy an existing example and modify it (there's no _templates directory, so use a real example as your starting point)
+cp -r test-fixtures/mariadb/test-success/ddl test-fixtures/mariadb/my-project/ddl
 
-# 方式二：手動建立目錄
+# Option 2: Create the directory manually
 mkdir -p test-fixtures/mariadb/my-project/ddl/migrations
 ```
 
-#### Step 2: 建立 Config 檔案 (如使用範本可跳過)
+#### Step 2: Create the Config File (Skip This if You Used a Template)
 
 ```bash
 cat > test-fixtures/mariadb/my-project/ddl/config.js << 'EOF'
 /**
- * DDL Configuration - 結構變更管理
+ * DDL Configuration - Schema Change Management
  */
 export default {
   type: 'mariadb',
@@ -344,7 +348,7 @@ export default {
   migrationsDir: './migrations',
   changelogTable: '_migrations',
   
-  // 啟用 Sanity Check
+  // Enable sanity checks
   sanityCheck: {
     enabled: true,
     autoRollback: true,
@@ -354,16 +358,16 @@ export default {
 EOF
 ```
 
-#### Step 3: 使用 CLI 建立 Migration 檔案
+#### Step 3: Create a Migration File With the CLI
 
 ```bash
-# 建立新的 DDL migration
+# Create a new DDL migration
 docker compose run --rm migrate \
   node src/cli.js create create-users \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
-**輸出:**
+**Output:**
 ```
 ✅ Created: 20260121123456-create-users.sql
 
@@ -375,16 +379,16 @@ Remember to:
 
 ---
 
-### 3.2 撰寫 Up + PostCheck + Down
+### 3.2 Writing Up + PostCheck + Down
 
-#### 完整範例: 建立 Users 資料表
+#### Complete Example: Creating a Users Table
 
 ```sql
 -- 20260121123456-create-users.sql
 -- Migration: Create users table
 
 -- +sanity PreCheck
--- 驗證 users 資料表尚未存在
+-- Verify the users table does not already exist
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='users'
 -- END_CHECK
 
@@ -404,7 +408,7 @@ CREATE TABLE IF NOT EXISTS users (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- +sanity PostCheck
--- 驗證 users 資料表已建立
+-- Verify the users table was created
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='users'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='users' AND column_name='email'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='users' AND index_name='idx_users_email'
@@ -414,14 +418,14 @@ CREATE TABLE IF NOT EXISTS users (
 DROP TABLE IF EXISTS users;
 ```
 
-#### 範例: 新增欄位
+#### Example: Adding a Column
 
 ```sql
 -- 20260121130000-add-phone-column.sql
 -- Migration: Add phone column to users table
 
 -- +sanity PreCheck
--- 驗證 users 存在且 phone 欄位尚未存在
+-- Verify users exists and the phone column does not yet exist
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='users'
 -- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='users' AND column_name='phone'
 -- END_CHECK
@@ -432,7 +436,7 @@ ALTER TABLE users ADD COLUMN phone_verified BOOLEAN DEFAULT FALSE;
 CREATE INDEX idx_users_phone ON users(phone);
 
 -- +sanity PostCheck
--- 驗證欄位和索引已建立
+-- Verify the column and index were created
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='users' AND column_name='phone'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='users' AND column_name='phone_verified'
 -- EXPECT_ROWS: SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='users' AND index_name='idx_users_phone'
@@ -444,30 +448,30 @@ ALTER TABLE users DROP COLUMN phone_verified;
 ALTER TABLE users DROP COLUMN phone;
 ```
 
-### Sanity Check 語法說明
+### Sanity Check Syntax Reference
 
-| 語法 | 說明 |
+| Syntax | Description |
 |------|------|
-| `-- +sanity PreCheck` | 開始 PreCheck 區塊 |
-| `-- +sanity PostCheck` | 開始 PostCheck 區塊 |
-| `-- EXPECT_ROWS: <SQL>` | 預期查詢應有結果 (至少 1 row) |
-| `-- EXPECT_NO_ROWS: <SQL>` | 預期查詢應無結果 (0 rows) |
-| `-- END_CHECK` | 結束 Check 區塊 |
+| `-- +sanity PreCheck` | Start of a PreCheck block |
+| `-- +sanity PostCheck` | Start of a PostCheck block |
+| `-- EXPECT_ROWS: <SQL>` | The query is expected to return results (at least 1 row) |
+| `-- EXPECT_NO_ROWS: <SQL>` | The query is expected to return no results (0 rows) |
+| `-- END_CHECK` | End of a check block |
 
 ---
 
-### 3.3 驗證 DDL 腳本
+### 3.3 Validate DDL Scripts
 
-#### 基本驗證
+#### Basic Validation
 
 ```bash
-# 驗證所有 DDL migration 檔案
+# Validate all DDL migration files
 docker compose run --rm migrate \
   node src/cli.js validate \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
-**預期輸出:**
+**Expected output:**
 ```
 [VALIDATE] Checking migrations (mariadb)...
 
@@ -482,24 +486,24 @@ Invalid: 0
 ✅ All migrations are valid!
 ```
 
-#### 允許危險操作 (需要時)
+#### Allowing Dangerous Operations (When Needed)
 
 ```bash
-# 允許危險操作 (如 DROP TABLE)
+# Allow dangerous operations (e.g. DROP TABLE)
 docker compose run --rm migrate \
   node src/cli.js validate --allow-dangerous \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 允許特定操作碼
+# Allow specific operation codes
 docker compose run --rm migrate \
   node src/cli.js validate --allow DROP_TABLE,TRUNCATE \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
-#### 查看 Migration 狀態
+#### Checking Migration Status
 
 ```bash
-# 查看已執行和待執行的 migration
+# See which migrations have run and which are pending
 docker compose run --rm migrate \
   node src/cli.js status \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
@@ -507,79 +511,79 @@ docker compose run --rm migrate \
 
 ---
 
-## 4. 實際連線測試 (DCL + DDL Up/Down/Up)
+## 4. Live Connection Test (DCL + DDL Up/Down/Up)
 
-### 4.1 啟動測試資料庫
+### 4.1 Start the Test Database
 
 ```bash
-# 確保資料庫已啟動
+# Make sure the database is running
 docker compose up -d mariadb
 
-# 等待資料庫就緒
+# Wait for the database to be ready
 docker compose exec mariadb mariadb-admin ping -h localhost -u root -prootpass --wait=30
 ```
 
-### 4.2 建立測試資料庫
+### 4.2 Create the Test Database
 
 ```bash
-# 建立測試用資料庫
+# Create the database used for testing
 docker compose exec mariadb mariadb -u root -prootpass -e "CREATE DATABASE IF NOT EXISTS mydb;"
 ```
 
-### 4.3 執行 DCL (建立帳號)
+### 4.3 Run DCL (Create Accounts)
 
 ```bash
-# 第一步: 執行 DCL 建立所有帳號
+# Step 1: Run DCL to create all accounts
 docker compose run --rm migrate \
   node src/cli.js dcl \
   -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 
-echo "✅ DCL 執行完成"
+echo "✅ DCL completed"
 ```
 
-### 4.4 執行 DDL Up
+### 4.4 Run DDL Up
 
 ```bash
-# 執行所有待執行的 DDL migration
+# Run all pending DDL migrations
 docker compose run --rm migrate \
   node src/cli.js up \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-echo "✅ DDL Up 執行完成"
+echo "✅ DDL Up completed"
 ```
 
-### 4.5 執行 DDL Down
+### 4.5 Run DDL Down
 
 ```bash
-# Rollback 最近 1 個 migration
+# Roll back the last migration
 docker compose run --rm migrate \
   node src/cli.js down -n 1 \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-echo "✅ DDL Down 執行完成"
+echo "✅ DDL Down completed"
 ```
 
-### 4.6 再次執行 DDL Up
+### 4.6 Run DDL Up Again
 
 ```bash
-# 再次執行 Up，驗證可重複執行
+# Run Up again to confirm it's re-runnable
 docker compose run --rm migrate \
   node src/cli.js up \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-echo "✅ DDL Up 再次執行完成"
+echo "✅ DDL Up completed again"
 ```
 
-### 4.7 使用內建 Up-Down-Up 測試
+### 4.7 Use the Built-In Up-Down-Up Test
 
 ```bash
-# 一鍵執行 Up-Down-Up 測試
+# Run the Up-Down-Up test in one command
 docker compose run --rm migrate \
   node src/cli.js test \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
-**預期輸出:**
+**Expected output:**
 ```
 🧪 Running Up-Down-Up Test (mariadb)...
 
@@ -605,68 +609,68 @@ docker compose run --rm migrate \
 
 ---
 
-## 5. 完整範例流程
+## 5. Complete Example Workflow
 
-### 一鍵執行完整流程腳本
+### One-Shot End-to-End Script
 
 ```bash
 #!/bin/bash
 # full-migration-test.sh
 
-set -e  # 遇到錯誤就停止
+set -e  # Stop on first error
 
 PROJECT_PATH="test-fixtures/mariadb/my-project"
 DCL_CONFIG="/app/${PROJECT_PATH}/dcl/config.js"
 DDL_CONFIG="/app/${PROJECT_PATH}/ddl/config.js"
 
 echo "=========================================="
-echo "  Migration 完整測試流程"
+echo "  Full Migration Test Workflow"
 echo "=========================================="
 
-# 1. 啟動資料庫
+# 1. Start the database
 echo ""
-echo "📦 Step 1: 啟動資料庫..."
+echo "📦 Step 1: Starting the database..."
 docker compose up -d mariadb
 sleep 5
 
-# 2. 建立測試資料庫
+# 2. Create the test database
 echo ""
-echo "📦 Step 2: 建立測試資料庫..."
+echo "📦 Step 2: Creating the test database..."
 docker compose exec mariadb mariadb -u root -prootpass -e "CREATE DATABASE IF NOT EXISTS mydb;"
 
-# 3. 驗證 DCL 腳本
+# 3. Validate DCL scripts
 echo ""
-echo "📋 Step 3: 驗證 DCL 腳本..."
+echo "📋 Step 3: Validating DCL scripts..."
 docker compose run --rm migrate node src/cli.js dcl:verify -c $DCL_CONFIG
 
-# 4. 執行 DCL
+# 4. Run DCL
 echo ""
-echo "🔐 Step 4: 執行 DCL (建立帳號)..."
+echo "🔐 Step 4: Running DCL (creating accounts)..."
 docker compose run --rm migrate node src/cli.js dcl -c $DCL_CONFIG
 
-# 5. 驗證 DDL 腳本
+# 5. Validate DDL scripts
 echo ""
-echo "📋 Step 5: 驗證 DDL 腳本..."
+echo "📋 Step 5: Validating DDL scripts..."
 docker compose run --rm migrate node src/cli.js validate -c $DDL_CONFIG
 
-# 6. 執行 DDL Up-Down-Up 測試
+# 6. Run the DDL Up-Down-Up test
 echo ""
-echo "🧪 Step 6: 執行 DDL Up-Down-Up 測試..."
+echo "🧪 Step 6: Running the DDL Up-Down-Up test..."
 docker compose run --rm migrate node src/cli.js test -c $DDL_CONFIG
 
-# 7. 顯示最終狀態
+# 7. Show the final status
 echo ""
-echo "📊 Step 7: 顯示最終狀態..."
+echo "📊 Step 7: Showing the final status..."
 docker compose run --rm migrate node src/cli.js status -c $DDL_CONFIG
 docker compose run --rm migrate node src/cli.js dcl:status -c $DCL_CONFIG
 
 echo ""
 echo "=========================================="
-echo "  ✅ 所有測試通過！"
+echo "  ✅ All tests passed!"
 echo "=========================================="
 ```
 
-### 執行腳本
+### Running the Script
 
 ```bash
 chmod +x full-migration-test.sh
@@ -675,38 +679,40 @@ chmod +x full-migration-test.sh
 
 ---
 
-## 6. 常用指令速查表
+## 6. Command Quick Reference
 
-### DCL (Repeatable) 指令
+### DCL (Repeatable) Commands
 
-| 操作 | 指令 |
+| Operation | Command |
 |------|------|
-| 建立 DCL 檔案 | `node src/cli.js create-dcl <name> -c <config>` |
-| 執行 DCL | `node src/cli.js dcl -c <config>` |
-| 查看 DCL 狀態 | `node src/cli.js dcl:status -c <config>` |
-| 驗證冪等性 | `node src/cli.js dcl:verify -c <config>` |
-| 預覽 (Dry Run) | `node src/cli.js dcl --dry-run -c <config>` |
+| Create a DCL file | `node src/cli.js create-dcl <name> -c <config>` |
+| Run DCL | `node src/cli.js dcl -c <config>` |
+| Check DCL status | `node src/cli.js dcl:status -c <config>` |
+| Validate idempotency | `node src/cli.js dcl:verify -c <config>` |
+| Preview (dry run) | `node src/cli.js dcl --dry-run -c <config>` |
 
-### DDL (Versioned) 指令
+### DDL (Versioned) Commands
 
-| 操作 | 指令 |
+| Operation | Command |
 |------|------|
-| 建立 Migration | `node src/cli.js create <name> -c <config>` |
-| 執行 Up | `node src/cli.js up -c <config>` |
-| 執行 Down | `node src/cli.js down -n <count> -c <config>` |
-| 帶 Sanity Check 的 Up | `node src/cli.js up --sanity-check -c <config>` |
-| 查看狀態 | `node src/cli.js status -c <config>` |
-| 驗證 Migration | `node src/cli.js validate -c <config>` |
-| Up-Down-Up 測試 | `node src/cli.js test -c <config>` |
-| 預覽 (Dry Run) | `node src/cli.js up --dry-run -c <config>` |
+| Create a migration | `node src/cli.js create <name> -c <config>` |
+| Run Up | `node src/cli.js up -c <config>` |
+| Run Down | `node src/cli.js down -n <count> -c <config>` |
+| Up with sanity checks | `node src/cli.js up --sanity-check -c <config>` |
+| Check status | `node src/cli.js status -c <config>` |
+| Validate migrations | `node src/cli.js validate -c <config>` |
+| Reset tracking records (leaves actual data untouched; dry-run by default) | `node src/cli.js reset -c <config>` |
+| Reset tracking records (actually deletes) | `node src/cli.js reset --yes -c <config>` |
+| Up-Down-Up test | `node src/cli.js test -c <config>` |
+| Preview (dry run) | `node src/cli.js up --dry-run -c <config>` |
 
-### Docker Compose 快捷指令
+### Docker Compose Shortcuts
 
 ```bash
-# 定義 alias 方便使用
+# Define an alias for convenience
 alias migrate='docker compose run --rm migrate node src/cli.js'
 
-# 然後就可以這樣用:
+# Then use it like this:
 migrate dcl -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 migrate up -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 migrate validate -c /app/test-fixtures/mariadb/my-project/ddl/config.js
@@ -714,16 +720,16 @@ migrate validate -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 ---
 
-## 附錄: 密碼管理最佳實踐
+## Appendix: Password Management Best Practices
 
-### 使用環境變數 (推薦用於生產環境)
+### Using Environment Variables (Recommended for Production)
 
 ```sql
--- 不要在 SQL 中硬編碼密碼
--- 改用 placeholder 或環境變數
+-- Do not hardcode passwords in SQL
+-- Use a placeholder or environment variable instead
 
--- 範例: 使用 shell 預處理
--- 在執行前用 envsubst 替換
+-- Example: preprocess with a shell
+-- Substitute with envsubst before running
 
 DROP USER IF EXISTS 'app_readonly'@'%';
 CREATE USER 'app_readonly'@'%' 
@@ -731,13 +737,13 @@ CREATE USER 'app_readonly'@'%'
   PASSWORD EXPIRE;
 ```
 
-### 使用 Secret Manager
+### Using a Secret Manager
 
 ```bash
-# 從 Secret Manager 取得密碼後設定環境變數
+# Fetch the password from a secret manager and set it as an environment variable
 export DB_READONLY_PASSWORD=$(az keyvault secret show --name db-readonly-pass --vault-name myvault --query value -o tsv)
 
-# 然後執行 migration
+# Then run the migration
 docker compose run --rm \
   -e DB_READONLY_PASSWORD="$DB_READONLY_PASSWORD" \
   migrate node src/cli.js dcl -c /app/test-fixtures/mariadb/my-project/dcl/config.js
@@ -745,25 +751,25 @@ docker compose run --rm \
 
 ---
 
-## 問題排解
+## Troubleshooting
 
-### Q: DCL 執行失敗，顯示 "not idempotent"
+### Q: DCL Fails With "not idempotent"
 
-**A:** 確保你的 DCL 腳本使用 `DROP USER IF EXISTS` + `CREATE USER` 模式，而不是只用 `CREATE USER`。
+**A:** Make sure your DCL script uses the `DROP USER IF EXISTS` + `CREATE USER` pattern, not `CREATE USER` alone.
 
-### Q: DDL Down 失敗
-
-**A:** 
-1. 確認 `-- +migrate Down` 區塊有正確的 rollback 語句
-2. 確認順序正確 (先 drop index，再 drop column)
-
-### Q: PostCheck 失敗
+### Q: DDL Down Fails
 
 **A:** 
-1. 檢查 SQL 語法是否正確
-2. 確認 `DATABASE()` 函數返回正確的資料庫名稱
-3. 使用 `docker compose exec mariadb mariadb -u root -prootpass -e "SELECT DATABASE();"` 確認
+1. Confirm the `-- +migrate Down` block has the correct rollback statements
+2. Confirm the order is correct (drop the index before dropping the column)
+
+### Q: PostCheck Fails
+
+**A:** 
+1. Check that the SQL syntax is correct
+2. Confirm the `DATABASE()` function returns the expected database name
+3. Confirm with `docker compose exec mariadb mariadb -u root -prootpass -e "SELECT DATABASE();"`
 
 ---
 
-**最後更新:** 2026-01-21
+**Last updated:** 2026-01-21

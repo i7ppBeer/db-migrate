@@ -1,0 +1,84 @@
+# db-migrate sync Job — one-shot: status -> up -> report -> real schema snapshot.
+#
+# Fill in {{ project }}, {{ namespace }}, {{ contentHash }}, and the image
+# tag before applying. Depends on the Secret from secret.example.yaml, the
+# two ConfigMaps from configmap-migrations.example.yaml, and the
+# ServiceAccount/Role/RoleBinding from serviceaccount-rbac.yaml already
+# existing in the cluster.
+#
+# See k8s/README.md for the full workflow and why several of these fields
+# are set the way they are (especially backoffLimit).
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate-{{ project }}-sync-{{ contentHash }}
+  namespace: "{{ namespace }}"
+  labels:
+    app: db-migrate
+    project: "{{ project }}"
+spec:
+  # DO NOT raise this. A DDL migration that fails partway through can leave
+  # the database in a half-applied state (see docs/DDL-PRODUCTION-SAFETY.md
+  # section 1.8) — an automatic retry would blindly re-run against that
+  # uncertain state. A failed migration should stop and wait for a human to
+  # look, not be retried by the scheduler.
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400 # keep the Pod (and its logs) around for a day, then GC
+  template:
+    metadata:
+      labels:
+        app: db-migrate
+        project: "{{ project }}"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: db-migrate-{{ project }}-runner
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: migrate
+          image: your-registry/db-migrate:2.1.0
+          args: ["sync", "-c", "/app/config/config.js", "-o", "/app/reports"]
+          envFrom:
+            - secretRef:
+                name: db-migrate-{{ project }}-credentials
+          env:
+            - name: MARIADB_HOST
+              value: "mariadb.{{ namespace }}.svc.cluster.local"
+            - name: MARIADB_PORT
+              value: "3306"
+            - name: MARIADB_DATABASE
+              value: "{{ project }}"
+          volumeMounts:
+            - name: migrations
+              mountPath: /app/migrations
+              readOnly: true
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+            - name: reports
+              mountPath: /app/reports
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: migrations
+          configMap:
+            name: db-migrate-{{ project }}-ddl-migrations-{{ contentHash }}
+        - name: config
+          configMap:
+            name: db-migrate-{{ project }}-config
+        - name: reports
+          emptyDir: {}
+      # Optional: add a sidecar or a separate Job step here to ship
+      # /app/reports (the JSON+HTML sync report) to wherever you keep
+      # build artifacts (S3/GCS/artifact registry) before the Pod is
+      # garbage-collected. Not included here since it depends entirely on
+      # what you already use for artifact storage.

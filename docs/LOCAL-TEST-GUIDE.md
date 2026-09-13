@@ -1,146 +1,148 @@
-# 本地測試 Migration Image 手冊
+# Local Migration Image Testing Guide
 
-本手冊說明如何在本地環境測試 Migration Image，包含啟動假 DB 和執行 up/down/up 流程。
+> ⚠️ **Known to be outdated (audited 2026-09-11)**: This document consistently references `docker-compose.local-test.yml`, which **does not exist in the repo** (`scripts/local-test.sh` also depends on this same nonexistent file, and is equally broken). The service names in this document (`mongodb-auth`, `migration-auth`, etc.) also don't match the real `docker-compose.yml` (the real services are `mongodb`/`mariadb`/`runner-mongodb`/`runner-mariadb`/`test-all`/`migrate`). To test locally right now, use the `docker-compose.yml` in the repo root instead (see [DOCKER-USAGE.md](./DOCKER-USAGE.md)). Whether to rewrite this document or create the missing compose file is still to be decided.
 
-## 目錄
+This guide explains how to test a Migration Image locally, including starting a mock DB and running the up/down/up flow.
 
-1. [快速開始](#快速開始)
-2. [手動步驟詳解](#手動步驟詳解)
-3. [使用不同資料庫](#使用不同資料庫)
-4. [從 Registry 拉取 Image](#從-registry-拉取-image)
-5. [常用指令速查](#常用指令速查)
+## Table of Contents
+
+1. [Quick Start](#quick-start)
+2. [Manual Steps in Detail](#manual-steps-in-detail)
+3. [Using Different Databases](#using-different-databases)
+4. [Pulling the Image from a Registry](#pulling-the-image-from-a-registry)
+5. [Common Command Reference](#common-command-reference)
 
 ---
 
-## 快速開始
+## Quick Start
 
-### 方式一：一鍵測試腳本
+### Method 1: One-click test script
 
 ```bash
-# 執行完整測試 (up -> down -> up)
+# Run the full test (up -> down -> up)
 ./scripts/local-test.sh
 
-# 指定 image 版本
+# Specify an image version
 ./scripts/local-test.sh -i db-migrate:v1.2.3
 
-# 測試 MariaDB
+# Test MariaDB
 ./scripts/local-test.sh -d mariadb
 
-# 測試完後清理
+# Clean up after testing
 ./scripts/local-test.sh -c
 ```
 
-### 方式二：手動執行
+### Method 2: Manual execution
 
 ```bash
-# 1. 啟動假 MongoDB
+# 1. Start a mock MongoDB
 docker compose -f docker-compose.local-test.yml up -d mongodb
 
-# 2. 等待 DB 啟動 (約 10 秒)
+# 2. Wait for the DB to start (about 10 seconds)
 sleep 10
 
-# 3. 執行 up
+# 3. Run up
 docker compose -f docker-compose.local-test.yml run --rm migration up
 
-# 4. 執行 down
+# 4. Run down
 docker compose -f docker-compose.local-test.yml run --rm migration down
 
-# 5. 再次執行 up
+# 5. Run up again
 docker compose -f docker-compose.local-test.yml run --rm migration up
 
-# 6. 查看狀態
+# 6. Check status
 docker compose -f docker-compose.local-test.yml run --rm migration status
 
-# 7. 清理
+# 7. Clean up
 docker compose -f docker-compose.local-test.yml down -v
 ```
 
 ---
 
-## 手動步驟詳解
+## Manual Steps in Detail
 
-### Step 1: 建置 Migration Image
+### Step 1: Build the Migration Image
 
-如果還沒有 image，先建置：
+If you don't have an image yet, build one first:
 
 ```bash
-# 建置本地 image
+# Build a local image
 ./scripts/build-migration-image.sh -t v1.0.0
 
-# 或從 registry 拉取
+# Or pull one from a registry
 docker pull myregistry.azurecr.io/db-migrate:v1.0.0
 docker tag myregistry.azurecr.io/db-migrate:v1.0.0 db-migrate:v1.0.0
 ```
 
-### Step 2: 啟動測試用資料庫
+### Step 2: Start the test database
 
 ```bash
-# 啟動 MongoDB (無認證)
+# Start MongoDB (no auth)
 docker compose -f docker-compose.local-test.yml up -d mongodb
 
-# 或啟動 MongoDB (帶認證)
+# Or start MongoDB (with auth)
 docker compose -f docker-compose.local-test.yml up -d mongodb-auth
 
-# 或啟動 MariaDB
+# Or start MariaDB
 docker compose -f docker-compose.local-test.yml up -d mariadb
 
-# 等待資料庫就緒
+# Wait for the database to be ready
 sleep 10
 
-# 確認資料庫狀態
+# Confirm the database status
 docker compose -f docker-compose.local-test.yml ps
 ```
 
-### Step 3: 執行 Migration 指令
+### Step 3: Run migration commands
 
 ```bash
-# 查看狀態 (有哪些 migration 待執行)
+# Check status (which migrations are pending)
 docker compose -f docker-compose.local-test.yml run --rm migration status
 
-# 執行所有待執行的 migrations
+# Run all pending migrations
 docker compose -f docker-compose.local-test.yml run --rm migration up
 
-# 回滾最後一個 migration
+# Roll back the last migration
 docker compose -f docker-compose.local-test.yml run --rm migration down
 
-# 驗證 migration 檔案
+# Validate migration files
 docker compose -f docker-compose.local-test.yml run --rm migration validate
 ```
 
-### Step 4: 清理測試環境
+### Step 4: Clean up the test environment
 
 ```bash
-# 停止容器
+# Stop the containers
 docker compose -f docker-compose.local-test.yml down
 
-# 停止並刪除資料 (volumes)
+# Stop and delete data (volumes)
 docker compose -f docker-compose.local-test.yml down -v
 ```
 
 ---
 
-## 使用不同資料庫
+## Using Different Databases
 
-### MongoDB (無認證)
+### MongoDB (no auth)
 
 ```bash
 docker compose -f docker-compose.local-test.yml up -d mongodb
 docker compose -f docker-compose.local-test.yml run --rm migration up
 ```
 
-環境變數:
+Environment variables:
 - `DB_HOST=mongodb`
 - `DB_PORT=27017`
 - `DB_NAME=test_db`
 
-### MongoDB (帶認證)
+### MongoDB (with auth)
 
 ```bash
 docker compose -f docker-compose.local-test.yml up -d mongodb-auth
 docker compose -f docker-compose.local-test.yml run --rm migration-auth up
 ```
 
-環境變數:
+Environment variables:
 - `DB_HOST=mongodb-auth`
 - `DB_USER=admin`
 - `DB_PASSWORD=testpassword`
@@ -152,7 +154,7 @@ docker compose -f docker-compose.local-test.yml up -d mariadb
 docker compose -f docker-compose.local-test.yml run --rm migration-mariadb up
 ```
 
-環境變數:
+Environment variables:
 - `DB_HOST=mariadb`
 - `DB_PORT=3306`
 - `DB_USER=migrate`
@@ -160,21 +162,21 @@ docker compose -f docker-compose.local-test.yml run --rm migration-mariadb up
 
 ---
 
-## 從 Registry 拉取 Image
+## Pulling the Image from a Registry
 
 ### Azure Container Registry
 
 ```bash
-# 登入 ACR
+# Log in to ACR
 az acr login --name myregistry
 
-# 拉取 image
+# Pull the image
 docker pull myregistry.azurecr.io/db-migrate:v1.2.3
 
-# 設定環境變數
+# Set the environment variable
 export MIGRATION_IMAGE=myregistry.azurecr.io/db-migrate:v1.2.3
 
-# 執行測試
+# Run the test
 docker compose -f docker-compose.local-test.yml up -d mongodb
 docker compose -f docker-compose.local-test.yml run --rm migration up
 ```
@@ -182,27 +184,27 @@ docker compose -f docker-compose.local-test.yml run --rm migration up
 ### GitHub Container Registry
 
 ```bash
-# 登入 GHCR
+# Log in to GHCR
 echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
 
-# 拉取 image
+# Pull the image
 docker pull ghcr.io/myorg/db-migrate:v1.2.3
 
-# 設定環境變數
+# Set the environment variable
 export MIGRATION_IMAGE=ghcr.io/myorg/db-migrate:v1.2.3
 
-# 執行測試
+# Run the test
 docker compose -f docker-compose.local-test.yml up -d mongodb
 docker compose -f docker-compose.local-test.yml run --rm migration up
 ```
 
-### 直接使用 docker run
+### Using docker run directly
 
 ```bash
-# 啟動 MongoDB
+# Start MongoDB
 docker run -d --name test-mongo -p 27017:27017 mongo:7
 
-# 執行 migration (替換 image 名稱)
+# Run the migration (replace with your image name)
 docker run --rm \
   --network host \
   -e DB_TYPE=mongodb \
@@ -212,44 +214,44 @@ docker run --rm \
   myregistry.azurecr.io/db-migrate:v1.2.3 \
   up
 
-# 清理
+# Clean up
 docker stop test-mongo && docker rm test-mongo
 ```
 
 ---
 
-## 常用指令速查
+## Common Command Reference
 
-### Migration 指令
+### Migration commands
 
-| 指令 | 說明 |
+| Command | Description |
 |------|------|
-| `up` | 執行所有未執行的 migration |
-| `down` | 回滾最後一個 migration |
-| `status` | 查看 migration 狀態 |
-| `validate` | 驗證 migration 檔案 |
-| `test` | 測試 migration (up 後立即 down) |
+| `up` | Run all pending migrations |
+| `down` | Roll back the last migration |
+| `status` | Show migration status |
+| `validate` | Validate migration files |
+| `test` | Test a migration (up, then immediately down) |
 
-### Docker Compose 指令
+### Docker Compose commands
 
 ```bash
-# 啟動服務
+# Start a service
 docker compose -f docker-compose.local-test.yml up -d mongodb
 
-# 執行 migration
+# Run a migration
 docker compose -f docker-compose.local-test.yml run --rm migration <command>
 
-# 查看日誌
+# View logs
 docker compose -f docker-compose.local-test.yml logs -f mongodb
 
-# 停止服務
+# Stop services
 docker compose -f docker-compose.local-test.yml down
 
-# 停止並清除資料
+# Stop and clear data
 docker compose -f docker-compose.local-test.yml down -v
 ```
 
-### 測試腳本參數
+### Test script parameters
 
 ```bash
 ./scripts/local-test.sh [options]
@@ -257,79 +259,79 @@ docker compose -f docker-compose.local-test.yml down -v
 Options:
   -i, --image     Migration image (default: db-migrate:v1.0.0)
   -d, --db        Database: mongodb, mongodb-auth, mariadb
-  -c, --clean     測試完後清理
-  -h, --help      顯示說明
+  -c, --clean     Clean up after testing
+  -h, --help      Show help
 ```
 
 ---
 
-## 完整測試流程範例
+## Complete Test Workflow Example
 
 ```bash
-# 1. 建置 image
+# 1. Build the image
 ./scripts/build-migration-image.sh -t v1.0.0
 
-# 2. 啟動 MongoDB
+# 2. Start MongoDB
 docker compose -f docker-compose.local-test.yml up -d mongodb
 sleep 10
 
-# 3. 查看初始狀態
+# 3. Check the initial status
 docker compose -f docker-compose.local-test.yml run --rm migration status
-# 預期: 5 pending migrations
+# Expected: 5 pending migrations
 
-# 4. 執行 UP
+# 4. Run UP
 docker compose -f docker-compose.local-test.yml run --rm migration up
-# 預期: 執行所有 migrations
+# Expected: all migrations run
 
-# 5. 再次查看狀態
+# 5. Check status again
 docker compose -f docker-compose.local-test.yml run --rm migration status
-# 預期: 4-5 applied, 0-1 pending
+# Expected: 4-5 applied, 0-1 pending
 
-# 6. 執行 DOWN (回滾 1 個)
+# 6. Run DOWN (roll back 1)
 docker compose -f docker-compose.local-test.yml run --rm migration down
-# 預期: 回滾最後一個 migration
+# Expected: the last migration is rolled back
 
-# 7. 再次執行 UP
+# 7. Run UP again
 docker compose -f docker-compose.local-test.yml run --rm migration up
-# 預期: 重新執行剛回滾的 migration
+# Expected: the just-rolled-back migration runs again
 
-# 8. 最終狀態
+# 8. Final status
 docker compose -f docker-compose.local-test.yml run --rm migration status
-# 預期: 與 step 5 相同
+# Expected: same as step 5
 
-# 9. 清理
+# 9. Clean up
 docker compose -f docker-compose.local-test.yml down -v
 ```
 
 ---
 
-## 疑難排解
+## Troubleshooting
 
-### 連線逾時
+### Connection timeout
 
-如果看到 `Database connection timeout`，確認:
+If you see `Database connection timeout`, check:
 
-1. 資料庫容器是否已啟動: `docker ps`
-2. 網路是否正確: `docker network ls`
-3. 等待足夠時間讓 DB 啟動
+1. Whether the database container has started: `docker ps`
+2. Whether the network is correct: `docker network ls`
+3. Whether you've waited long enough for the DB to start
 
 ### Permission Denied
 
-如果腳本無法執行:
+If the scripts won't execute:
 
 ```bash
 chmod +x scripts/local-test.sh
 chmod +x scripts/build-migration-image.sh
 ```
 
-### Image 找不到
+### Image not found
 
-如果 image 不存在:
+If the image doesn't exist:
 
 ```bash
-# 查看本地 images
+# List local images
 docker images | grep db-migrate
 
-# 如果沒有，建置一個
+# If it's missing, build one
 ./scripts/build-migration-image.sh -t v1.0.0
 ```

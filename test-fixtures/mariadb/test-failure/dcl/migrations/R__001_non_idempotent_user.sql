@@ -1,3 +1,4 @@
+-- @expect-fail: true
 -- Repeatable Migration: INVALID - Not idempotent
 -- This should FAIL idempotency check
 

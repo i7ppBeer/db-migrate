@@ -1,6 +1,27 @@
 # ============================================================
 # GitHub Actions - Build & Deploy Migrations
 # ============================================================
+# Rewritten 2026-09-11: this workflow previously referenced infrastructure
+# that was never committed to the repo (Dockerfile.migrations, a multi-stage
+# "runner" build target, ./charts/db-migrate Helm chart) and a CLI flag that
+# doesn't exist (`validate --database <dir>`), so the test/build jobs would
+# fail immediately and the deploy jobs would fail at the `helm upgrade` step
+# every time they ran. This version uses the real Dockerfile and the
+# kubectl + ConfigMap/Secret/Job pattern documented in k8s/README.md instead
+# of Helm. Unverified against a live GitHub Actions run — validate on a real
+# PR/staging trigger before trusting it in production, and adjust the
+# `env.PROJECT` / secret names below to match your actual project.
+#
+# IMPORTANT — this file lives in db-migrate's own repo, but the deploy jobs'
+# `migrations/ddl` and `config/{staging,production}.config.js` paths are
+# NOT db-migrate's own structure (this tool has no top-level migrations/ or
+# config/ directory — its own tests use test-fixtures/, referenced correctly
+# in the `test` job above). Those two paths are placeholders for whatever
+# PROJECT actually consumes this tool and has real migration files + a
+# config.js checked in at those locations. If you're copying this workflow
+# into a project that uses db-migrate as a dependency, point them at your
+# project's real layout; if this is meant to test db-migrate itself end to
+# end, replace them with a test-fixtures/ path instead.
 
 name: Build and Deploy Migrations
 
@@ -28,6 +49,10 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/db-migrate
+  # Used to name/label the generated ConfigMaps, Secret, ServiceAccount, and
+  # Job in-cluster (see k8s/README.md's {{ project }} placeholder) -- change
+  # this to your actual project name.
+  PROJECT: app
 
 jobs:
   # ============================================================
@@ -36,6 +61,31 @@ jobs:
   test:
     name: Test & Validate
     runs-on: ubuntu-latest
+    # validate-all's DCL path runs a live idempotency check (connect, run
+    # twice, diff state) rather than pure static analysis, so it needs real
+    # databases reachable at the config defaults' localhost ports below.
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1})'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      mariadb:
+        image: mariadb:11
+        ports:
+          - 3306:3306
+        env:
+          MYSQL_ROOT_PASSWORD: rootpass
+          MYSQL_DATABASE: migrate_test
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,8 +107,8 @@ jobs:
 
       - name: Validate Migrations
         run: |
-          node src/cli.js validate --database databases/mongodb/test-success
-          node src/cli.js validate --database databases/mariadb/test-success
+          node src/cli.js validate-all test-fixtures/mongodb/test-success
+          node src/cli.js validate-all test-fixtures/mariadb/test-success
 
   # ============================================================
   # Job 2: Build Image
@@ -99,35 +149,18 @@ jobs:
             type=sha,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
 
-      # Build base image
-      - name: Build Base Image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          target: runner
-          push: false
-          load: true
-          tags: db-migrate:base
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # Build and push migration image
-      - name: Build and Push Migration Image
+      # The real Dockerfile is single-stage (src/ + node_modules + entrypoint.sh,
+      # see the file itself) -- no separate Dockerfile.migrations, no "runner"
+      # build target, no BASE_IMAGE/MIGRATIONS_PATH build-args to pass.
+      - name: Build and Push Image
         id: build
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile.migrations
+          file: ./Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BASE_IMAGE=db-migrate:base
-            MIGRATIONS_PATH=./migrations
-            BUILD_VERSION=${{ steps.meta.outputs.version }}
-            GIT_COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ github.event.head_commit.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -146,14 +179,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')
+    env:
+      NAMESPACE: staging
+      CONTENT_HASH: ${{ github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Helm
-        uses: azure/setup-helm@v3
-        with:
-          version: 'latest'
 
       - name: Setup Kubectl
         uses: azure/setup-kubectl@v3
@@ -163,32 +194,50 @@ jobs:
           echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > kubeconfig
           echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
 
-      - name: Deploy with Helm
+      - name: Verify credentials Secret exists
         run: |
-          helm upgrade --install db-migrate-staging ./charts/db-migrate \
-            --namespace staging \
-            --create-namespace \
-            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
-            --set image.tag=${{ needs.build.outputs.image_tag }} \
-            --set mongodb.host=mongodb-staging.staging.svc.cluster.local \
-            --set mongodb.database=staging_db \
-            --set mongodb.auth.enabled=true \
-            --set mongodb.auth.username=admin \
-            --set mongodb.auth.existingSecret=mongodb-staging-secret \
-            --set migration.command=up \
-            --set migration.validation.enabled=true \
-            --wait \
-            --timeout=5m
+          if ! kubectl get secret "db-migrate-${PROJECT}-credentials" -n "$NAMESPACE" >/dev/null 2>&1; then
+            echo "ERROR: db-migrate-${PROJECT}-credentials not found in $NAMESPACE."
+            echo "Create it from your secrets manager first -- see k8s/README.md."
+            exit 1
+          fi
+
+      - name: Apply ServiceAccount + RBAC
+        run: |
+          sed -e "s/{{ project }}/${PROJECT}/g" -e "s/{{ namespace }}/${NAMESPACE}/g" \
+            k8s/serviceaccount-rbac.yaml | kubectl apply -f -
+
+      - name: Generate migrations + config ConfigMaps
+        run: |
+          kubectl create configmap "db-migrate-${PROJECT}-ddl-migrations-${CONTENT_HASH:0:7}" \
+            --from-file=migrations/ddl \
+            -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+          # config.js is non-secret (reads credentials from env vars) -- safe
+          # to generate straight from the repo's staging config file.
+          kubectl create configmap "db-migrate-${PROJECT}-config" \
+            --from-file=config.js=config/staging.config.js \
+            -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy migration Job
+        run: |
+          sed \
+            -e "s/{{ project }}/${PROJECT}/g" \
+            -e "s/{{ namespace }}/${NAMESPACE}/g" \
+            -e "s/{{ contentHash }}/${CONTENT_HASH:0:7}/g" \
+            -e "s|your-registry/db-migrate:2.1.0|${REGISTRY}/${IMAGE_NAME}:${{ needs.build.outputs.image_tag }}|g" \
+            k8s/job.yaml \
+            | sed "s/mariadb\.${NAMESPACE}\.svc\.cluster\.local/mongodb-staging.staging.svc.cluster.local/g" \
+            | kubectl apply -f -
 
       - name: Wait for Migration Job
         run: |
-          kubectl wait --for=condition=complete job \
-            -l app.kubernetes.io/instance=db-migrate-staging \
-            -n staging \
-            --timeout=300s
-          
+          kubectl wait --for=condition=complete \
+            "job/db-migrate-${PROJECT}-sync-${CONTENT_HASH:0:7}" \
+            -n "$NAMESPACE" --timeout=300s
+
           echo "=== Migration Logs ==="
-          kubectl logs -l app.kubernetes.io/instance=db-migrate-staging -n staging --tail=50
+          kubectl logs "job/db-migrate-${PROJECT}-sync-${CONTENT_HASH:0:7}" -n "$NAMESPACE" --tail=100
 
   # ============================================================
   # Job 4: Deploy to Production (Manual Approval)
@@ -199,14 +248,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: production  # Requires manual approval
     if: github.ref == 'refs/heads/main'
+    env:
+      NAMESPACE: production
+      CONTENT_HASH: ${{ github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Helm
-        uses: azure/setup-helm@v3
-        with:
-          version: 'latest'
 
       - name: Setup Kubectl
         uses: azure/setup-kubectl@v3
@@ -216,39 +263,50 @@ jobs:
           echo "${{ secrets.PRODUCTION_KUBECONFIG }}" | base64 -d > kubeconfig
           echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
 
-      - name: Verify Secret Exists
+      - name: Verify credentials Secret exists
         run: |
-          if ! kubectl get secret mongodb-production-secret -n production; then
-            echo "ERROR: mongodb-production-secret not found!"
-            echo "Please create the secret before deploying."
+          if ! kubectl get secret "db-migrate-${PROJECT}-credentials" -n "$NAMESPACE" >/dev/null 2>&1; then
+            echo "ERROR: db-migrate-${PROJECT}-credentials not found in $NAMESPACE."
+            echo "Please create the secret before deploying (see k8s/README.md)."
             exit 1
           fi
 
-      - name: Deploy with Helm
+      - name: Apply ServiceAccount + RBAC
         run: |
-          helm upgrade --install db-migrate-production ./charts/db-migrate \
-            --namespace production \
-            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
-            --set image.tag=${{ needs.build.outputs.image_tag }} \
-            --set mongodb.host=mongodb-production.production.svc.cluster.local \
-            --set mongodb.database=production_db \
-            --set mongodb.auth.enabled=true \
-            --set mongodb.auth.username=admin \
-            --set mongodb.auth.existingSecret=mongodb-production-secret \
-            --set migration.command=up \
-            --set migration.validation.enabled=true \
-            --set migration.validation.allowDangerous=false \
-            --set job.backoffLimit=5 \
-            --set job.ttlSecondsAfterFinished=86400 \
-            --wait \
-            --timeout=10m
+          sed -e "s/{{ project }}/${PROJECT}/g" -e "s/{{ namespace }}/${NAMESPACE}/g" \
+            k8s/serviceaccount-rbac.yaml | kubectl apply -f -
+
+      - name: Generate migrations + config ConfigMaps
+        run: |
+          kubectl create configmap "db-migrate-${PROJECT}-ddl-migrations-${CONTENT_HASH:0:7}" \
+            --from-file=migrations/ddl \
+            -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl create configmap "db-migrate-${PROJECT}-config" \
+            --from-file=config.js=config/production.config.js \
+            -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy migration Job
+        run: |
+          # backoffLimit: 0 is already set in k8s/job.yaml and intentionally
+          # NOT overridden here -- see docs/DDL-PRODUCTION-SAFETY.md section
+          # 1.8. A failed production DDL migration must stop and be looked
+          # at by a human, not be retried automatically by the Job
+          # controller against a possibly half-applied state.
+          sed \
+            -e "s/{{ project }}/${PROJECT}/g" \
+            -e "s/{{ namespace }}/${NAMESPACE}/g" \
+            -e "s/{{ contentHash }}/${CONTENT_HASH:0:7}/g" \
+            -e "s|your-registry/db-migrate:2.1.0|${REGISTRY}/${IMAGE_NAME}:${{ needs.build.outputs.image_tag }}|g" \
+            k8s/job.yaml \
+            | sed "s/mariadb\.${NAMESPACE}\.svc\.cluster\.local/mongodb-production.production.svc.cluster.local/g" \
+            | kubectl apply -f -
 
       - name: Wait for Migration Job
         run: |
-          kubectl wait --for=condition=complete job \
-            -l app.kubernetes.io/instance=db-migrate-production \
-            -n production \
-            --timeout=600s
-          
+          kubectl wait --for=condition=complete \
+            "job/db-migrate-${PROJECT}-sync-${CONTENT_HASH:0:7}" \
+            -n "$NAMESPACE" --timeout=600s
+
           echo "=== Migration Completed Successfully ==="
-          kubectl logs -l app.kubernetes.io/instance=db-migrate-production -n production --tail=100
+          kubectl logs "job/db-migrate-${PROJECT}-sync-${CONTENT_HASH:0:7}" -n "$NAMESPACE" --tail=200
