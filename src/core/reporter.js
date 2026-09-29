@@ -210,6 +210,189 @@ export async function saveSyncReport(outputDir, report, format = 'all') {
   return files;
 }
 
+// ─── Run notification email ──────────────────────────────────────────────
+// Renders the run's account/schema changes as a single self-contained,
+// table-based, inline-styled HTML email — the only place a DCL-generated
+// password appears (RepeatableRunner never writes one to disk; see
+// recordCredentialEvents() in repeatable-runner.js and docs/DCL-PASSWORD.md).
+// Deliberately styled for maximum mail-client compatibility: no webfonts, no
+// external CSS/JS, bgcolor attributes alongside inline background-color for
+// Outlook's Word rendering engine, and color-scheme pinned to light so a
+// client's dark mode doesn't invert the event colors.
+
+const DCL_EVENT_STYLE = {
+  new:                 { label: 'NEW',                  bg: '#e4f2e8', chipBg: '#c9e6d3', border: '#2f7a4f', text: '#20553a', chipText: '#20553a' },
+  password_changed:    { label: 'PASSWORD CHANGED',      bg: '#dff1f3', chipBg: '#bfe3e8', border: '#1f7a8c', text: '#134c56', chipText: '#125764' },
+  no_change:           { label: 'NO CHANGE',             bg: '#eceef1', chipBg: '#dfe2e6', border: '#6b7280', text: '#494e55', chipText: '#41464e' },
+  removed:             { label: 'REMOVED',                bg: '#fbe8ea', chipBg: '#f3ccd1', border: '#b0303f', text: '#6e232d', chipText: '#7a1f2b' },
+  permissions_updated: { label: 'PERMISSIONS UPDATED',    bg: '#ecebfa', chipBg: '#d6d5f5', border: '#5b5fc7', text: '#33368f', chipText: '#33368f' }
+};
+
+function dclEventRowHTML(event) {
+  const style = DCL_EVENT_STYLE[event.type];
+  if (!style) return '';
+  const chip = `<span style="font-family:Arial,sans-serif;font-size:10px;font-weight:bold;color:${style.chipText};background:${style.chipBg};padding:2px 7px;">${escapeHtml(style.label)}</span>`;
+  const user = `<span style="font-family:'Courier New',monospace;font-size:14px;color:#1c211d;font-weight:bold;">${escapeHtml(event.username)}</span>`;
+
+  let detail;
+  if (event.type === 'new' || event.type === 'password_changed') {
+    const label = event.type === 'new' ? 'Password' : 'New password';
+    detail = event.password
+      ? `<span style="font-family:Arial,sans-serif;font-size:12px;color:${style.text};">${label}: </span>` +
+        `<span style="font-family:'Courier New',monospace;font-size:13px;color:#1c211d;font-weight:bold;background:#ffffff;padding:1px 6px;border:1px solid ${style.border};">${escapeHtml(event.password)}</span><br>` +
+        `<span style="font-family:Arial,sans-serif;font-size:11px;color:#5b6259;">Temporary password - expires on first login, must be changed immediately.</span>`
+      : `<span style="font-family:Arial,sans-serif;font-size:12px;color:${style.text};">New account - credentials were not auto-generated for this one.</span>`;
+  } else if (event.type === 'no_change') {
+    detail = `<span style="font-family:Arial,sans-serif;font-size:12px;color:${style.text};">Account already existed - password unchanged.</span>`;
+  } else if (event.type === 'removed') {
+    detail = `<span style="font-family:Arial,sans-serif;font-size:12px;color:${style.text};">Account and all grants revoked.</span>`;
+  } else {
+    const added = (event.grantsAdded || []).map(g => `+ ${g}`);
+    const removed = (event.grantsRemoved || []).map(g => `- ${g}`);
+    const lines = [...removed, ...added].map(g => escapeHtml(g)).join('<br>');
+    detail = `<span style="font-family:'Courier New',monospace;font-size:12px;color:${style.text};">${lines}</span>`;
+  }
+
+  return `<tr><td style="padding:0 28px 8px;">` +
+    `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>` +
+    `<td bgcolor="${style.bg}" style="background:${style.bg};border-left:3px solid ${style.border};padding:12px 14px;">` +
+    `${chip}<br>${user}<br>${detail}</td></tr></table></td></tr>`;
+}
+
+/**
+ * Build a structured notification-email report for one migration run.
+ * @param {Object} data
+ * @param {string} data.project - project/config name shown in the header
+ * @param {string} [data.environment] - e.g. 'production', 'staging'
+ * @param {string} data.dbType - 'mariadb' | 'mongodb'
+ * @param {'success'|'failed'|'skipped'} [data.status] - default 'success'. 'failed'
+ *   shows a red banner and renders ddl.errors/dcl.errors as a failure block above
+ *   the normal sections, so a partial run's applied/events lists still show what
+ *   DID complete before the failure. 'skipped' is for a deliberate no-op (e.g.
+ *   sync's "0 pending migrations" exit) — distinct from success so it's visibly
+ *   not "nothing happened, silently".
+ * @param {Object} [data.ddl] - { applied: string[], diff?: schemaDiff, errors?: string[] }
+ * @param {Object} [data.dcl] - { events?: Array<{type, username, password?, grantsAdded?, grantsRemoved?}>, errors?: string[], skipped?: Array<{fileName, reason}> }
+ * @returns {Object} plain JSON-serializable report object
+ */
+export function buildNotificationEmail(data) {
+  return {
+    generatedAt: new Date().toISOString(),
+    project: data.project,
+    environment: data.environment ?? null,
+    dbType: data.dbType,
+    status: data.status ?? 'success',
+    ddl: data.ddl ?? null,
+    dcl: data.dcl ?? null
+  };
+}
+
+/**
+ * Render a notification-email report as a single, standalone, mail-client-safe
+ * HTML document (own <!doctype>/<html> — this is not an Artifact-style page
+ * fragment, it is the literal email body).
+ * @param {Object} report - from buildNotificationEmail()
+ * @returns {string}
+ */
+const STATUS_BANNER = {
+  success: { label: 'Success', bg: '#e4f2e8', border: '#2f7a4f', text: '#20553a' },
+  failed:  { label: 'Failed',  bg: '#fbe8ea', border: '#b0303f', text: '#6e232d' },
+  skipped: { label: 'Skipped — nothing to do', bg: '#fdf3e3', border: '#a8752a', text: '#6e4d1c' }
+};
+
+function failureBlockHTML(heading, errors) {
+  if (!errors || errors.length === 0) return '';
+  const lines = errors.map(e => escapeHtml(e)).join('<br>');
+  return `<tr><td style="padding:18px 28px 6px;border-top:1px solid #d7ddd4;font-family:Arial,sans-serif;font-size:12px;color:#5b6259;text-transform:uppercase;">${escapeHtml(heading)}</td></tr>` +
+    `<tr><td style="padding:0 28px 16px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>` +
+    `<td bgcolor="#fbe8ea" style="background:#fbe8ea;border-left:3px solid #b0303f;padding:10px 14px;font-family:'Courier New',monospace;font-size:12px;color:#6e232d;">${lines}</td>` +
+    `</tr></table></td></tr>`;
+}
+
+export function notificationEmailToHTML(report) {
+  const metaParts = [report.environment, report.dbType].filter(Boolean);
+  const meta = escapeHtml([...metaParts, new Date(report.generatedAt).toISOString().replace('T', ' ').slice(0, 16) + ' UTC'].join(' | '));
+
+  const status = STATUS_BANNER[report.status] || STATUS_BANNER.success;
+  const statusHTML = `<tr><td style="padding:4px 28px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>` +
+    `<td bgcolor="${status.bg}" style="background:${status.bg};border-left:3px solid ${status.border};padding:8px 14px;font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:${status.text};">${escapeHtml(status.label)}</td>` +
+    `</tr></table></td></tr>`;
+
+  const ddlFailureHTML = failureBlockHTML(
+    report.ddl && report.ddl.applied && report.ddl.applied.length > 0 ? 'Schema changes — failed after partial apply' : 'Schema changes — failed',
+    report.ddl && report.ddl.errors
+  );
+  const dclFailureHTML = failureBlockHTML('Account changes — failed', report.dcl && report.dcl.errors);
+  const dclSkippedHTML = (report.dcl && report.dcl.skipped && report.dcl.skipped.length > 0)
+    ? failureBlockHTML('Account changes — skipped by validation', report.dcl.skipped.map(s => `${s.fileName}: ${s.reason}`))
+    : '';
+
+  let ddlHTML = '';
+  if (report.ddl && report.ddl.applied && report.ddl.applied.length > 0) {
+    const list = report.ddl.applied.map(m => escapeHtml(m)).join('<br>');
+    const diff = report.ddl.diff;
+    let diffRows = '';
+    if (diff && (diff.added.length || diff.removed.length || diff.changed.length)) {
+      const lines = [];
+      for (const item of diff.added) lines.push(`+ ${item.table ?? item.collection} added`);
+      for (const item of diff.removed) lines.push(`- ${item.table ?? item.collection} removed`);
+      for (const c of diff.changed) {
+        for (const f of c.addedFields) lines.push(`+ ${c.name}.${f.name} ${f.type ?? ''}`.trim());
+        for (const f of c.removedFields) lines.push(`- ${c.name}.${f.name}`);
+        for (const f of c.changedFields) lines.push(`~ ${c.name}.${f.name}: ${f.before.type ?? ''} -> ${f.after.type ?? ''}`);
+      }
+      diffRows = `<tr><td style="padding:0 28px 16px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">` +
+        lines.map((l, i) => `<tr><td bgcolor="#e4f2e8" style="background:#e4f2e8;border-left:3px solid #2f7a4f;padding:8px 12px;font-family:'Courier New',monospace;font-size:12px;color:#20553a;">${escapeHtml(l)}</td></tr>` +
+          (i < lines.length - 1 ? `<tr><td style="height:6px;font-size:1px;line-height:6px;">&nbsp;</td></tr>` : '')).join('') +
+        `</table></td></tr>`;
+    }
+    const appliedLabel = report.status === 'failed'
+      ? `Schema changes - ${report.ddl.applied.length} migration${report.ddl.applied.length === 1 ? '' : 's'} applied before the failure`
+      : `Schema changes - ${report.ddl.applied.length} migration${report.ddl.applied.length === 1 ? '' : 's'} applied`;
+    ddlHTML = `<tr><td style="padding:18px 28px 6px;border-top:1px solid #d7ddd4;font-family:Arial,sans-serif;font-size:12px;color:#5b6259;text-transform:uppercase;">${escapeHtml(appliedLabel)}</td></tr>` +
+      `<tr><td style="padding:2px 28px 12px;font-family:'Courier New',monospace;font-size:13px;color:#1c211d;">${list}</td></tr>` +
+      diffRows;
+  }
+
+  let dclHTML = '';
+  if (report.dcl && report.dcl.events && report.dcl.events.length > 0) {
+    dclHTML = `<tr><td style="padding:18px 28px 10px;border-top:1px solid #d7ddd4;font-family:Arial,sans-serif;font-size:12px;color:#5b6259;text-transform:uppercase;">Account changes - ${report.dcl.events.length} event${report.dcl.events.length === 1 ? '' : 's'}</td></tr>` +
+      report.dcl.events.map(dclEventRowHTML).join('');
+  }
+
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light"><title>Migration Notification</title></head>` +
+    `<body style="margin:0;padding:0;background:#eef1ee;font-family:Arial,Helvetica,sans-serif;">` +
+    `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#eef1ee" style="background:#eef1ee;"><tr><td align="center" style="padding:32px 16px;">` +
+    `<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#ffffff;border:1px solid #d7ddd4;">` +
+    `<tr><td bgcolor="#171b21" style="background:#171b21;padding:18px 28px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>` +
+    `<td style="font-family:Arial,sans-serif;color:#ffffff;font-size:15px;font-weight:bold;">Migration Notification</td>` +
+    `<td align="right" style="font-family:Arial,sans-serif;color:#c9cdc6;font-size:12px;">${escapeHtml(report.project)}</td>` +
+    `</tr></table></td></tr>` +
+    `<tr><td style="padding:20px 28px 4px;font-family:Arial,sans-serif;font-size:12px;color:#5b6259;">${meta}</td></tr>` +
+    statusHTML +
+    ddlFailureHTML + dclFailureHTML + dclSkippedHTML +
+    ddlHTML + dclHTML +
+    `<tr><td style="padding:18px 28px 22px;border-top:1px solid #d7ddd4;font-family:Arial,sans-serif;font-size:11px;color:#8a8f86;">This is an automated migration notification. Do not reply.</td></tr>` +
+    `</table></td></tr></table></body></html>`;
+}
+
+/**
+ * Save a notification email to <outputDir>/<fileName>. Unlike saveSyncReport,
+ * the file name is fixed (not timestamped) by default — this file is meant to
+ * be fetched by a fixed, known path (e.g. `kubectl exec ... cat`) right after
+ * the run, not archived alongside other reports.
+ * @param {string} outputDir
+ * @param {string} html - from notificationEmailToHTML()
+ * @param {string} [fileName]
+ * @returns {Promise<string>} path written
+ */
+export async function saveNotificationEmail(outputDir, html, fileName = 'notification.html') {
+  await fs.mkdir(outputDir, { recursive: true });
+  const filePath = path.join(outputDir, fileName);
+  await fs.writeFile(filePath, html, 'utf-8');
+  return filePath;
+}
+
 export class Reporter {
   constructor() {
     this.results = [];

@@ -28,45 +28,73 @@ Every gate below is one of two kinds, and this distinction is deliberate:
 
 ---
 
-## Gate R0 — Connectivity & identity (absolute)
+## Gate R0 — Connectivity & identity (absolute) — ✅ Implemented
 
-**When**: immediately after `connect()`, before anything else.
+**When**: inside `connect()` itself, before it returns — applies to every command that
+connects, not just `up`/`sync`/`dcl`.
 
 **Checks**:
-- Connection succeeds within a short timeout (fail fast on an unreachable host rather
-  than hanging on the driver's own default — which can be very long).
-- The connection actually points at the database/schema named in `config` — query
-  `SELECT DATABASE()` (MariaDB) or `db.databaseName` (MongoDB) and compare against
-  `config.database` / `config.mongodb.databaseName`. A mismatch here means an env var
-  resolved to the wrong environment, which is exactly the kind of mistake that leads
-  to running a migration meant for staging against production.
+- ✅ Connection succeeds within a short timeout (`connectTimeout` / `connectTimeoutMS` +
+  `serverSelectionTimeoutMS`, default 10s, configurable via `mariadb.connectTimeoutMs` /
+  `mongodb.options`) — fails fast on an unreachable host rather than hanging on the
+  driver's own default (MariaDB: OS TCP timeout, can be very long; MongoDB driver
+  default is 30s).
+- ✅ The connection actually points at the database/schema named in `config` —
+  `SELECT DATABASE()` (MariaDB) or `db.databaseName` (MongoDB, no query needed — the
+  driver reports it directly) compared against `config.database` /
+  `config.mongodb.databaseName`. A mismatch here means an env var resolved to the wrong
+  environment, which is exactly the kind of mistake that leads to running a migration
+  meant for staging against production.
 
-**On failure**: abort immediately, print which database was expected vs. actually
-connected, exit non-zero. No `--force`.
+**On failure**: abort immediately (connection is closed first), print which database
+was expected vs. actually connected, exit non-zero. No `--force` — see
+`connect()` in both `src/adapters/mariadb-adapter.js` and `mongodb-adapter.js`, and
+`test/mariadb-adapter.test.js` / `test/mongodb-adapter.test.js`'s `describe('connect()
+— Gate R0 identity check', ...)` blocks.
 
 ---
 
-## Gate R1 — Changelog / baseline consistency (absolute)
+## Gate R1 — Changelog / baseline consistency (absolute) — ✅ Implemented for DDL
 
-**When**: right after Gate R0, before computing the pending-migration list.
+**When**: `status()` computes all of this every time it runs; `up`/`sync` enforce it
+(via `enforceChangelogConsistencyGate()` + `enforceChecksumGate()` in `src/cli.js`)
+right after connecting, before computing/applying anything. `status` itself only
+displays it — it never blocks, being a read-only diagnostic.
 
-**Checks (DDL)**:
+**Checks (DDL)** — all three implemented, both adapters:
+- ✅ **Checksum content check**. The changelog stores a SHA-256 checksum of each
+  migration file's content alongside `id`/`applied_at` (self-healing `ALTER TABLE ADD
+  COLUMN IF NOT EXISTS` for MariaDB tables created before this existed). `status()`
+  recomputes every applied file's current checksum and compares it against what was
+  stored at apply time. A mismatch means the file was edited after being applied —
+  `up`/`sync` refuse to proceed past it; `--allow-checksum-drift` is the explicit,
+  logged override (it also updates the stored checksum, so the same accepted drift
+  doesn't re-trigger next run). A row with no stored checksum at all (upgraded from
+  before this existed) adopts the current file as its baseline rather than erroring.
+  See docs/DDL-PRODUCTION-SAFETY.md §3.
+- ✅ **Orphaned changelog entries**. Every row in the changelog is checked against the
+  files actually in `migrationsDir` — `status().orphanedChangelogEntries` lists any row
+  with no matching file (deleted or renamed after being applied, or `migrationsDir`
+  pointing at the wrong place). **No override** — `up`/`sync` refuse unconditionally.
+- ✅ **Out-of-order applied migrations**. Applied migrations should form a contiguous
+  prefix of the sorted file list — `status().outOfOrderApplied` lists any applied file
+  that sorts *after* a still-pending one (a sign of out-of-order application or a
+  rename after the fact). **No override** — same as above.
 - Changelog table exists and is readable (it self-heals via `CREATE TABLE IF NOT
   EXISTS` already — this gate is about what's *in* it, not whether it exists).
-- Every row in the changelog corresponds to a migration file still present in
-  `migrationsDir`. A changelog entry with no matching file means either a file was
-  deleted after being applied (in which case `down()` can never run it) or the
-  changelog points at the wrong `migrationsDir` entirely.
-- Applied migrations form a contiguous prefix of the sorted file list — a "pending"
-  migration that sorts *before* an already-applied one is a sign migrations were
-  applied out of order or a file was renamed after being applied.
 
-**Checks (DCL)**: checksum table readable; a stored checksum for a file that no longer
-exists on disk is flagged (same "file deleted after being applied" concern).
+**Checks (DCL)**: ⬜ still not implemented — checksum table readable; a stored checksum
+for a file that no longer exists on disk is flagged (same "file deleted after being
+applied" concern). Note DCL already re-runs on checksum change by design (that's the
+whole "repeatable" model) — what's missing here specifically is flagging a checksum
+recorded for a file that's since vanished from disk entirely, not content drift.
 
-**On failure**: abort with a diff-style report (`expected N applied, found M on disk`,
-listing the specific mismatched filenames), exit non-zero. No `--force` — this is a
-"someone should look at this by hand" situation, not a "proceed anyway" situation.
+**On failure**: orphaned-entry/out-of-order failures abort with a report of the
+specific offending rows/files, exit non-zero, **no `--force`** — "someone should look
+at this by hand," not "proceed anyway." The checksum-content check takes a different
+stance (see above) because unlike a missing file or reordered history, "this file's
+content changed" has a legitimate, common cause: someone intentionally fixed a comment
+or typo in an already-applied file.
 
 ---
 
@@ -183,14 +211,19 @@ starts*; R5 gates *each statement*; R6 gates the *result*.
 
 ## Implementation status
 
-**Not yet implemented** — this is the design for the next phase of work after Lock
-Guard (R5) ships. R6 already exists. Recommended build order: R0/R1 first (cheapest,
-catches the most embarrassing class of mistake — wrong database), then R2/R3 (the
-actual incident-prevention value), R4 last (lowest value, needs a privilege the
-connecting user may not have).
+**R0 is live. R1 is fully live for DDL (all three checks), still unimplemented for
+DCL. R2–R5 are still design** (R6 already existed before this plan). Recommended build
+order for what's left: DCL's side of R1 next (same shape as the DDL work, smaller),
+then R2/R3 (the actual incident-prevention value against real lock contention/replica
+state), R4 last (lowest value, needs a privilege the connecting user may not have).
 
 Needs the same thing Lock Guard's e2e suite needs: a reachable MariaDB/MongoDB to
-verify against, which this environment doesn't have. Test plan once available:
-deliberately misconfigure `config.database` (R0), delete an applied migration file
-(R1), hold a transaction open (R2), point at a read-only replica if one is available
-(R3).
+verify against — R0 and R1 above were both verified with mocked connections
+(`test/mariadb-adapter.test.js`, `test/mongodb-adapter.test.js`), not a real database,
+for the same reason. Test plan once a real DB is available: deliberately misconfigure
+`config.database` and confirm `connect()` actually refuses (R0); delete an applied
+migration file and confirm `status`/`up`/`sync` flag it as orphaned; apply migrations
+out of order (e.g. via direct changelog manipulation) and confirm the out-of-order
+check catches it; edit an already-applied file's content and confirm `up`/`sync`
+refuse to proceed (checksum part of R1); hold a transaction open (R2); point at a
+read-only replica if one is available (R3).

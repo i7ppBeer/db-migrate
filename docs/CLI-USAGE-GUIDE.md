@@ -1,5 +1,10 @@
 # Database Migration Operations Guide
 
+Every command below runs either as `node src/cli.js <command> ...` (local Node) or
+`docker compose run --rm migrate <command> ...` (no local Node needed — container
+paths use `/app/` in place of the repo root, e.g. `/app/test-fixtures/...`). Both
+forms take identical flags; only the prefix and path root differ.
+
 ## Directory Structure
 
 ```
@@ -299,13 +304,13 @@ node src/cli.js -c <config> test-instances
 
 ```bash
 # Start MongoDB and MariaDB
-docker compose -f docker-compose.local-test.yml up -d mongodb mariadb
+docker compose -f docker-compose.yml up -d mongodb mariadb
 
 # Check status
-docker compose -f docker-compose.local-test.yml ps
+docker compose -f docker-compose.yml ps
 
 # View logs
-docker compose -f docker-compose.local-test.yml logs -f
+docker compose -f docker-compose.yml logs -f
 ```
 
 ### Database Connection Info
@@ -336,3 +341,31 @@ docker compose -f docker-compose.local-test.yml logs -f
    - Only deletes tracking records in changelog/checksum; does not run `down()` and does not touch the actual tables/collections
    - After a reset, running `up` will fail outright if the tables/collections already exist (without `IF NOT EXISTS`)
    - Defaults to dry-run; requires `--yes` to actually delete
+
+---
+
+## Example: Production Server Workflow (multiple DDL projects sharing one DCL)
+
+```bash
+# 1. Run DCL first (create users and permissions)
+docker compose run --rm migrate dcl -c /app/test-fixtures/mariadb/production-server/dcl/config.js
+
+# 2. Batch validate all DDL
+docker compose run --rm migrate validate-all --ddl-only /app/test-fixtures/mariadb/production-server
+
+# 3. Run each database's DDL
+docker compose run --rm migrate up -c /app/test-fixtures/mariadb/production-server/ddl/analytics/config.js
+docker compose run --rm migrate up -c /app/test-fixtures/mariadb/production-server/ddl/ecommerce/config.js
+docker compose run --rm migrate up -c /app/test-fixtures/mariadb/production-server/ddl/logging/config.js
+
+# 4. Comprehensive testing (all databases)
+docker compose run --rm migrate test-all \
+  --pattern "test-fixtures/mariadb/production-server/ddl/**/config.js" \
+  -o /app/reports
+
+# 5. Verify DCL idempotency
+docker compose run --rm migrate dcl:verify -c /app/test-fixtures/mariadb/production-server/dcl/config.js
+```
+
+> **Path note**: container paths start with `/app/test-fixtures/`. The
+> `migrationsDir: './migrations'` in `config.js` is relative and doesn't need to change.

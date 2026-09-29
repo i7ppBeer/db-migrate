@@ -3,7 +3,8 @@
  * DCL Repeatable Migration: Secret service accounts (auto-generated passwords)
  * CHANGE_ME_ON_FIRST_LOGIN will be replaced at runtime with a secure password.
  * Each account receives its own unique password (one per CHANGE_ME occurrence).
- * Credentials are saved to /tmp/secret on first creation only.
+ * Credentials are recorded as a credential event on first creation only,
+ * rendered into the run's notification email (see docs/DCL-PASSWORD.md).
  */
 export async function up(db, client) {
   const adminDb = client.db('admin');
@@ -38,7 +39,7 @@ export async function up(db, client) {
     }
   }
 
-  // passwordSet: true  → at least one new account created → write /tmp/secret + inject customData
+  // passwordSet: true  → at least one new account created → record credential event + inject customData
   // passwordSet: false → all existed → skip
   // createdUsernames   → explicit list so runner doesn't need to regex-parse
   // allUsernames       → full list used for warning log when accounts already existed

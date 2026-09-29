@@ -8,6 +8,7 @@ import { SanityChecker, SQLChecks } from '../core/sanity-checker.js';
 import mysql from 'mysql2/promise';
 import fs from 'fs/promises';
 import path from 'path';
+import crypto from 'crypto';
 import nodeSqlParserPkg from 'node-sql-parser';
 const { Parser: SQLParser } = nodeSqlParserPkg;
 
@@ -280,25 +281,30 @@ export class MariaDBAdapter extends BaseAdapter {
       // Support both flat config and nested config.mariadb
       const dbConfig = this.config.mariadb || this.config;
       const dbName = dbConfig.database;
-      
+      // Gate R0: fail fast on an unreachable host instead of hanging on the
+      // driver's own default, which relies on the OS TCP timeout and can be
+      // very long. Applies to every connection attempt below, temp or real.
+      const connectTimeout = dbConfig.connectTimeoutMs ?? 10000;
+
       // 🔧 First connect without specifying database to avoid "unknown database" error
       const tempConnection = await mysql.createConnection({
         host: dbConfig.host || 'localhost',
         port: dbConfig.port || 3306,
         user: dbConfig.user || 'root',
         password: dbConfig.password || '',
-        multipleStatements: true
+        multipleStatements: true,
+        connectTimeout
       });
-      
+
       // 🛡️ Auto-create database if it doesn't exist (for development convenience)
       if (dbName) {
         await tempConnection.execute(
-          `CREATE DATABASE IF NOT EXISTS \`${dbName}\` 
-           DEFAULT CHARACTER SET utf8mb4 
+          `CREATE DATABASE IF NOT EXISTS \`${dbName}\`
+           DEFAULT CHARACTER SET utf8mb4
            DEFAULT COLLATE utf8mb4_unicode_ci`
         );
         await tempConnection.end();
-        
+
         // Now connect to the specified database
         this.connection = await mysql.createConnection({
           host: dbConfig.host || 'localhost',
@@ -306,10 +312,28 @@ export class MariaDBAdapter extends BaseAdapter {
           user: dbConfig.user || 'root',
           password: dbConfig.password || '',
           database: dbName,
-          multipleStatements: true
+          multipleStatements: true,
+          connectTimeout
         });
       } else {
         this.connection = tempConnection;
+      }
+
+      // Gate R0: identity check — confirm the connection actually points at
+      // the database config says it should, before anything else touches it.
+      // Defense-in-depth against a resolved-wrong-environment env var or a
+      // connection-reuse bug, not just a redundant re-check of the option we
+      // just passed to createConnection() above — see docs/RUNTIME-GATE-PLAN.md.
+      if (dbName) {
+        const [[identityRow]] = await this.connection.execute('SELECT DATABASE() AS db');
+        if (identityRow.db !== dbName) {
+          await this.connection.end();
+          this.connection = null;
+          throw new Error(
+            `Connected to the wrong database — expected '${dbName}' but the connection reports '${identityRow.db}'. ` +
+            `This usually means an environment variable resolved to the wrong host/database. Refusing to proceed.`
+          );
+        }
       }
 
       // Ensure changelog table exists (DDL/versioned mode only;
@@ -349,9 +373,43 @@ export class MariaDBAdapter extends BaseAdapter {
     await this.connection.execute(`
       CREATE TABLE IF NOT EXISTS ${qualifiedTable} (
         id VARCHAR(255) PRIMARY KEY,
-        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        checksum VARCHAR(64) NULL
       )
     `);
+    // Self-heal for changelog tables created before checksum tracking existed —
+    // CREATE TABLE IF NOT EXISTS above is a no-op against them, so the column
+    // needs adding explicitly. IF NOT EXISTS makes this a cheap no-op once done.
+    await this.connection.execute(
+      `ALTER TABLE ${qualifiedTable} ADD COLUMN IF NOT EXISTS checksum VARCHAR(64) NULL`
+    );
+  }
+
+  /**
+   * SHA-256 checksum of a migration file's raw content — same algorithm
+   * RepeatableRunner uses for DCL, applied here to DDL so an already-applied
+   * migration file being edited afterward is detectable instead of silently
+   * invisible (see docs/DDL-PRODUCTION-SAFETY.md).
+   */
+  calculateChecksum(content) {
+    return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+  }
+
+  /**
+   * Explicitly accept a migration file's current on-disk content as the new
+   * checksum baseline — used by `--allow-checksum-drift` after a human has
+   * confirmed an already-applied file's post-hoc edit was intentional. Not
+   * used for the automatic first-time backfill in status() (that path has
+   * no prior checksum to have drifted from; this one overwrites one that did).
+   */
+  async repairChecksum(fileName) {
+    const content = await fs.readFile(path.join(this.config.migrationsDir, fileName), 'utf-8');
+    const checksum = this.calculateChecksum(content);
+    await this.connection.execute(
+      `UPDATE ${this.changelogTable} SET checksum = ? WHERE id = ?`,
+      [checksum, fileName.replace('.sql', '')]
+    );
+    return checksum;
   }
 
   async status() {
@@ -368,35 +426,94 @@ export class MariaDBAdapter extends BaseAdapter {
 
       // Get applied migrations from changelog
       const [rows] = await this.connection.execute(
-        `SELECT id, applied_at FROM ${this.changelogTable} ORDER BY applied_at`
+        `SELECT id, applied_at, checksum FROM ${this.changelogTable} ORDER BY applied_at`
       );
-      const appliedIds = new Set(rows.map(r => r.id));
+      const appliedById = new Map(rows.map(r => [r.id, r]));
 
       // Get all migration files
       const migrationsDir = this.config.migrationsDir;
       const files = await fs.readdir(migrationsDir);
       const migrationFiles = files.filter(f => f.endsWith('.sql')).sort();
 
+      // Gate R1 (remaining checks): a changelog row with no file on disk to
+      // back it means the file was deleted/renamed after being applied
+      // (down() can never run it again) or the changelog points at the
+      // wrong migrationsDir entirely — flag it rather than silently
+      // ignoring it. Set-membership only, so a rename shows up as one
+      // orphaned entry, not as a false "modified" anything.
+      const fileIds = new Set(migrationFiles.map(f => f.replace('.sql', '')));
+      const orphanedChangelogEntries = rows
+        .filter(r => !fileIds.has(r.id))
+        .map(r => ({ id: r.id, appliedAt: r.applied_at }));
+
       const pending = [];
       const applied = [];
+      const checksumMismatches = [];
+      const checksumBaselined = [];
+      // Gate R1 (remaining checks): applied migrations should form a
+      // contiguous prefix of the sorted file list. Once we've seen a
+      // pending (not-yet-applied) file, any LATER file (in sort order) that
+      // IS applied means migrations ran out of order or a file was renamed
+      // after being applied — both signs the changelog's ordering
+      // assumptions no longer hold.
+      const outOfOrderApplied = [];
+      let seenPending = false;
 
       for (const file of migrationFiles) {
         const id = file.replace('.sql', '');
-        if (appliedIds.has(id)) {
-          const row = rows.find(r => r.id === id);
+        const row = appliedById.get(id);
+        if (row) {
+          // Compare the currently-on-disk content's checksum against what was
+          // recorded at apply time, so a migration file edited AFTER being
+          // applied is detectable instead of silently invisible.
+          let currentChecksum = null;
+          try {
+            const content = await fs.readFile(path.join(migrationsDir, file), 'utf-8');
+            currentChecksum = this.calculateChecksum(content);
+          } catch {
+            // File unreadable (permissions, race) — skip the checksum check
+            // for this entry rather than fail status() entirely.
+          }
+
+          if (currentChecksum) {
+            if (row.checksum == null) {
+              // Row predates checksum tracking (upgraded from an older version
+              // of this tool). There's no historical checksum to compare
+              // against, so adopt the current on-disk content as the trusted
+              // baseline going forward — same as Flyway's behavior when
+              // checksum validation is enabled after migrations already ran.
+              await this.connection.execute(
+                `UPDATE ${this.changelogTable} SET checksum = ? WHERE id = ?`,
+                [currentChecksum, id]
+              );
+              checksumBaselined.push(file);
+            } else if (row.checksum !== currentChecksum) {
+              checksumMismatches.push({ fileName: file, appliedAt: row.applied_at });
+            }
+          }
+
+          if (seenPending) {
+            outOfOrderApplied.push(file);
+          }
+
           applied.push({
             fileName: file,
             appliedAt: row.applied_at
           });
         } else {
           pending.push(file);
+          seenPending = true;
         }
       }
 
       return {
         pending,
         applied,
-        total: migrationFiles.length
+        total: migrationFiles.length,
+        checksumMismatches,
+        checksumBaselined,
+        orphanedChangelogEntries,
+        outOfOrderApplied
       };
     } catch (error) {
       throw new Error(`Failed to get status: ${error.message}`);
@@ -431,9 +548,14 @@ export class MariaDBAdapter extends BaseAdapter {
       for (const file of files) {
         try {
           const id = file.replace('.sql', '');
+          // Baseline establishes the trust baseline itself — store the
+          // current file's checksum so future edits to it are still detected,
+          // even though the SQL was never actually executed here.
+          const content = await fs.readFile(path.join(this.config.migrationsDir, file), 'utf-8');
+          const checksum = this.calculateChecksum(content);
           await this.connection.execute(
-            `INSERT INTO ${this.changelogTable} (id) VALUES (?)`,
-            [id]
+            `INSERT INTO ${this.changelogTable} (id, checksum) VALUES (?, ?)`,
+            [id, checksum]
           );
           result.marked.push(file);
         } catch (error) {
@@ -590,10 +712,10 @@ export class MariaDBAdapter extends BaseAdapter {
             // Record in changelog
             const id = file.replace('.sql', '');
             await this.connection.execute(
-              `INSERT INTO ${this.changelogTable} (id) VALUES (?)`,
-              [id]
+              `INSERT INTO ${this.changelogTable} (id, checksum) VALUES (?, ?)`,
+              [id, this.calculateChecksum(content)]
             );
-            
+
             result.applied.push(file);
           }
         } catch (error) {
@@ -675,8 +797,8 @@ export class MariaDBAdapter extends BaseAdapter {
                   await this.executeWithLockGuard(wrappedUpSQL);
                   const id = file.replace('.sql', '');
                   await this.connection.execute(
-                    `INSERT INTO ${this.changelogTable} (id) VALUES (?)`,
-                    [id]
+                    `INSERT INTO ${this.changelogTable} (id, checksum) VALUES (?, ?)`,
+                    [id, this.calculateChecksum(content)]
                   );
                 }
               },
@@ -724,8 +846,8 @@ export class MariaDBAdapter extends BaseAdapter {
               await this.executeWithLockGuard(wrappedUpSQL);
               const id = file.replace('.sql', '');
               await this.connection.execute(
-                `INSERT INTO ${this.changelogTable} (id) VALUES (?)`,
-                [id]
+                `INSERT INTO ${this.changelogTable} (id, checksum) VALUES (?, ?)`,
+                [id, this.calculateChecksum(content)]
               );
               result.applied.push(file);
               result.sanityResults.push({
@@ -1169,22 +1291,20 @@ export class MariaDBAdapter extends BaseAdapter {
       }
 
       // Cross-file FK dependency check (DDL mode only; repeatable returns [])
-      const crossFKErrors = this.validateCrossFileFKDependencies(filesData);
-      for (const { fileName, errors: fkErrors } of crossFKErrors) {
+      const crossFKResults = this.validateCrossFileFKDependencies(filesData, options);
+      for (const { fileName, errors: fkErrors, warnings: fkWarnings } of crossFKResults) {
         const fileResult = results.results.find(r => r.file === fileName);
         if (fileResult) {
-          fileResult.errors.push(...fkErrors);
-          fileResult.summary.structural += fkErrors.length;
-          if (!fileResult.valid) {
-            // already invalid — keep
-          } else {
+          if (fkWarnings && fkWarnings.length > 0) {
+            fileResult.warnings.push(...fkWarnings);
+          }
+          if (fkErrors.length > 0) {
+            fileResult.errors.push(...fkErrors);
+            fileResult.summary.structural += fkErrors.length;
             fileResult.valid = false;
             results.valid = false;
           }
         }
-      }
-      if (crossFKErrors.length > 0) {
-        results.valid = false;
       }
     } catch (error) {
       results.valid = false;
@@ -1458,6 +1578,7 @@ export class MariaDBAdapter extends BaseAdapter {
 
     // === 1. Extract created and dropped tables ===
     const createdTables = this.extractCreatedTables(upSQL);
+    const createdTablesInDown = this.extractCreatedTables(downSQL);
     const droppedTablesInDown = this.extractDroppedTables(downSQL);
     const droppedTablesInUp = this.extractDroppedTables(upSQL);
     
@@ -1467,25 +1588,62 @@ export class MariaDBAdapter extends BaseAdapter {
     const hasDropDatabaseInUp = /DROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?/i.test(normalizedUpSQL);
 
     // === 2. DDL only: Check for orphan drops in DOWN section (R__ repeatable files have no UP/DOWN) ===
+    // A table this migration didn't create being dropped is only a FALSE
+    // POSITIVE away from a completely normal pattern — table X created by an
+    // earlier migration, removed by a later one — because this check only
+    // sees one file at a time (no cross-file/changelog history is available
+    // here). So unlike a real forbidden op, it's allowable the same way a
+    // dangerous op is: --allow-dangerous, or the specific code via
+    // --allow/@allow.
     if (this.config.mode !== 'repeatable') {
+      const isOrphanDropAllowed = (code) =>
+        options.allowDangerous || (options.allowedCodes && options.allowedCodes.includes(code));
+
       for (const dropped of droppedTablesInDown) {
         if (!createdTables.map(t => t.toLowerCase()).includes(dropped.toLowerCase())) {
-          errors.push({
-            type: 'orphan-drop',
-            code: 'ORPHAN_DROP_DOWN',
-            message: `Orphan drop: DOWN drops '${dropped}' but UP doesn't create it`
-          });
+          if (isOrphanDropAllowed('ORPHAN_DROP_DOWN')) {
+            warnings.push({
+              type: 'orphan-drop-allowed',
+              code: 'ORPHAN_DROP_DOWN',
+              message: `⚠️ [ALLOWED] Orphan drop: DOWN drops '${dropped}' but UP doesn't create it — assumed created by an earlier migration`
+            });
+          } else {
+            errors.push({
+              type: 'orphan-drop',
+              code: 'ORPHAN_DROP_DOWN',
+              message: `Orphan drop: DOWN drops '${dropped}' but UP doesn't create it`
+            });
+          }
         }
       }
 
       // === 2b. Check for orphan drops in UP section ===
       for (const dropped of droppedTablesInUp) {
         if (!createdTables.map(t => t.toLowerCase()).includes(dropped.toLowerCase())) {
-          errors.push({
-            type: 'orphan-drop-in-up',
-            code: 'ORPHAN_DROP_UP',
-            message: `Orphan drop in UP: '${dropped}' is dropped but not created in this migration`
-          });
+          const droppedLower = dropped.toLowerCase();
+          // Smart allowance, same pattern as CREATE/DROP DATABASE below: if DOWN
+          // recreates exactly what UP dropped, this is a genuine, self-contained
+          // reverse migration for a table an earlier file created — no flag needed,
+          // same way DROP TABLE in a DOWN section is auto-allowed when UP created it.
+          if (createdTablesInDown.map(t => t.toLowerCase()).includes(droppedLower)) {
+            warnings.push({
+              type: 'orphan-drop-in-up-allowed',
+              code: 'ORPHAN_DROP_UP',
+              message: `✅ [ALLOWED] Orphan drop in UP: '${dropped}' is dropped but not created in this migration — allowed because DOWN recreates it`
+            });
+          } else if (isOrphanDropAllowed('ORPHAN_DROP_UP')) {
+            warnings.push({
+              type: 'orphan-drop-in-up-allowed',
+              code: 'ORPHAN_DROP_UP',
+              message: `⚠️ [ALLOWED] Orphan drop in UP: '${dropped}' is dropped but not created in this migration — assumed created by an earlier migration`
+            });
+          } else {
+            errors.push({
+              type: 'orphan-drop-in-up',
+              code: 'ORPHAN_DROP_UP',
+              message: `Orphan drop in UP: '${dropped}' is dropped but not created in this migration`
+            });
+          }
         }
       }
     }
@@ -1496,9 +1654,19 @@ export class MariaDBAdapter extends BaseAdapter {
       droppedTablesInDown.every(d => createdTables.map(t => t.toLowerCase()).includes(d.toLowerCase()));
 
     // === 2c. DDL only: Check FK references against tables dropped in the same UP section ===
+    // Set-membership only (no statement-order tracking), same as the
+    // cross-file FK checker (validateCrossFileFKDependencies()) — a table
+    // dropped AND recreated later in the same UP section is not "dropped"
+    // for this purpose, matching that checker's existing behavior. Without
+    // this, `DROP TABLE users; CREATE TABLE users(...); CREATE TABLE orders(
+    // FOREIGN KEY ... REFERENCES users(id))` false-positives even though the
+    // FK is valid by the time `orders` is created. See docs/VALIDATION-RULES-MARIADB.md.
     if (this.config.mode !== 'repeatable') {
       const fkRefs = this.extractFKReferences(upSQL);
-      const droppedInUpSet = new Set(droppedTablesInUp.map(t => t.toLowerCase()));
+      const createdTablesSet = new Set(createdTables.map(t => t.toLowerCase()));
+      const droppedInUpSet = new Set(
+        droppedTablesInUp.map(t => t.toLowerCase()).filter(t => !createdTablesSet.has(t))
+      );
 
       for (const fk of fkRefs) {
         if (droppedInUpSet.has(fk.referencedTable)) {
@@ -1669,11 +1837,24 @@ export class MariaDBAdapter extends BaseAdapter {
     warnings.push(...performanceWarnings);
 
     // === 9. DDL only: Check if DOWN section exists (R__ repeatable files have no DOWN) ===
+    // Mirrors the MongoDB adapter's equivalent check: an empty/missing DOWN
+    // is only a hard error when UP actually did something that needs
+    // rolling back. A no-op or comment-only migration with no DOWN is still
+    // just a warning, not a blocker.
     if (this.config.mode !== 'repeatable' && (!downSQL || downSQL.trim() === '')) {
-      warnings.push({
-        type: 'missing-down',
-        message: '⚠️ DOWN migration is empty or missing'
-      });
+      const upHasOperations = /\b(CREATE\s+TABLE|ALTER\s+TABLE|DROP\s+TABLE|CREATE\s+(?:UNIQUE\s+)?INDEX|INSERT\s+INTO)\b/i.test(normalizedUpSQL);
+      if (upHasOperations) {
+        errors.push({
+          type: 'missing-down',
+          code: 'MISSING_DOWN',
+          message: '🔴 DOWN migration is empty or missing but UP contains operations — rollback missing!'
+        });
+      } else {
+        warnings.push({
+          type: 'missing-down',
+          message: '⚠️ DOWN migration is empty or missing'
+        });
+      }
     }
 
     // Combine errors: forbidden ops + dangerous ops (when not allowed) + structural errors
@@ -1831,10 +2012,18 @@ export class MariaDBAdapter extends BaseAdapter {
    * Schema-qualified references (db.table) strip the schema and check only table name.
    * Tables dropped in a file are removed from the available set for subsequent files.
    *
+   * A table this tool never saw created — baselined via `baseline` rather
+   * than an actual CREATE TABLE migration, or pre-existing in an onboarded
+   * database — makes this a false positive this check can't distinguish
+   * from a genuinely broken reference, so (like ORPHAN_DROP_*) it's
+   * bypassable via --allow-dangerous or --allow FK_UNRESOLVED_REFERENCE
+   * (CLI-wide or the referencing file's own annotation).
+   *
    * @param {{ fileName: string, content: string }[]} filesData - sorted migration files
-   * @returns {{ fileName: string, errors: { type: string, code: string, message: string }[] }[]}
+   * @param {Object} [options] - allowDangerous / allowedCodes, same shape validateContent() takes
+   * @returns {{ fileName: string, errors: Array, warnings: Array }[]}
    */
-  validateCrossFileFKDependencies(filesData) {
+  validateCrossFileFKDependencies(filesData, options = {}) {
     if (!filesData || filesData.length === 0) return [];
     if (this.config.mode === 'repeatable') return [];
 
@@ -1867,21 +2056,29 @@ export class MariaDBAdapter extends BaseAdapter {
       // Available = all previously seen tables + tables created in THIS file (same-file self-ref OK)
       const availableNow = new Set([...allCreatedTables, ...createdNow]);
 
+      // Per-file annotations can allow this the same way validateContent()'s
+      // own checks do; CLI-wide --allow-dangerous/--allow applies to every file.
+      const fileAnnotations = this.parseFileAnnotations(content, fileName);
+      const isAllowed = options.allowDangerous || fileAnnotations.allowDangerous ||
+        [...(options.allowedCodes || []), ...(fileAnnotations.allowedCodes || [])].includes('FK_UNRESOLVED_REFERENCE');
+
       const fileErrors = [];
+      const fileWarnings = [];
       for (const fk of fkRefs) {
         const ref = fk.referencedTable; // already lowercased
         if (!availableNow.has(ref)) {
           const nameLabel = fk.constraintName ? ` '${fk.constraintName}'` : '';
-          fileErrors.push({
-            type: 'fk-unresolved-reference',
-            code: 'FK_UNRESOLVED_REFERENCE',
-            message: `🔴 FOREIGN KEY${nameLabel} references '${fk.referencedTable}' which has not been created in any preceding migration`
-          });
+          const message = `FOREIGN KEY${nameLabel} references '${fk.referencedTable}' which has not been created in any preceding migration`;
+          if (isAllowed) {
+            fileWarnings.push({ type: 'fk-unresolved-reference-allowed', code: 'FK_UNRESOLVED_REFERENCE', message: `⚠️ [ALLOWED] ${message} — assumed to exist via baseline or an externally-managed table` });
+          } else {
+            fileErrors.push({ type: 'fk-unresolved-reference', code: 'FK_UNRESOLVED_REFERENCE', message: `🔴 ${message}` });
+          }
         }
       }
 
-      if (fileErrors.length > 0) {
-        crossErrors.push({ fileName, errors: fileErrors });
+      if (fileErrors.length > 0 || fileWarnings.length > 0) {
+        crossErrors.push({ fileName, errors: fileErrors, warnings: fileWarnings });
       }
 
       // After processing this file, its created tables are available to subsequent files

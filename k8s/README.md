@@ -19,6 +19,7 @@ Kustomize/Helm — not applied to a cluster as-is.
 | `secret.example.yaml` | Shape of the credentials Secret — **placeholder values only** |
 | `configmap-migrations.example.yaml` | Shape of the migrations + config ConfigMaps, with two illustrative sample migrations |
 | `job.yaml` | The actual `sync` Job |
+| `preflight-check.sh` | Run by the executor right before applying `job.yaml` — verifies the ConfigMaps it references actually exist and no other db-migrate Job for this project is already running. See the script's own header comment for env vars and exit codes. |
 
 ## Workflow
 
@@ -32,9 +33,17 @@ Kustomize/Helm — not applied to a cluster as-is.
 
 2. **Create/update the credentials Secret** from your actual secrets manager (Vault, External Secrets Operator, cloud KMS, sealed-secrets — whatever you already use), not by hand-editing `secret.example.yaml`. See the caution below about which DB user to put in it.
 
-3. **Apply the RBAC and Job**, with your CI/CD pipeline substituting `{{ project }}`, `{{ namespace }}`, `{{ contentHash }}`, and the image tag.
+3. **Run the pre-flight check** before applying anything:
+   ```bash
+   PROJECT=shop NAMESPACE=production \
+   MIGRATIONS_CM=db-migrate-shop-ddl-migrations-<hash-from-step-1> \
+   ./k8s/preflight-check.sh
+   ```
+   This catches two failure modes that are otherwise confusing to debug: a ConfigMap that doesn't exist yet (the Pod would sit in `ContainerCreating` instead of producing a clean error — db-migrate's own code never even starts), and a previous db-migrate Job for this project that's still running (starting a second one races it against the same database). On either failure it writes a `notification.html` in the same format `dcl`/`sync` write after a normal run (see [docs/DCL-PASSWORD.md](../docs/DCL-PASSWORD.md)) and exits non-zero — exit `1` for the ConfigMap problem (something's actually wrong, needs a person), exit `2` for the overlapping-Job case (transient, just retry once it finishes). It doesn't send anything itself; whatever your executor already uses to email `reports/notification.html` after a Job run picks this file up the same way.
 
-4. **Watch it**:
+4. **Apply the RBAC and Job**, with your CI/CD pipeline substituting `{{ project }}`, `{{ namespace }}`, `{{ contentHash }}`, and the image tag.
+
+5. **Watch it**:
    ```bash
    kubectl wait --for=condition=complete job/db-migrate-shop-sync-<hash> --timeout=900s -n <namespace>
    kubectl logs job/db-migrate-shop-sync-<hash> -n <namespace>
@@ -61,11 +70,15 @@ plus read/write on the changelog table) — separate from the application's
 own runtime DB user. Different privilege scope, different rotation
 lifecycle, smaller blast radius if either credential ever leaks.
 
-## Pre-flight checklist
+## Manual pre-flight checklist (beyond what `preflight-check.sh` covers)
 
-`sync` doesn't yet implement the Runtime Gate plan (R0–R4 in
-[docs/RUNTIME-GATE-PLAN.md](../docs/RUNTIME-GATE-PLAN.md)) — there's no
+`preflight-check.sh` (step 3 above) only checks two orchestration-level
+things — ConfigMaps exist, no other Job is already running. It says nothing
+about whether the *database itself* is in a safe state — `sync` doesn't yet
+implement the Runtime Gate plan (R0–R4 in
+[docs/RUNTIME-GATE-PLAN.md](../docs/RUNTIME-GATE-PLAN.md)), so there's no
 automated check today for "is now actually a safe time to run this against
-production." Until that exists, run the manual checklist in
-[docs/DDL-PRODUCTION-SAFETY.md](../docs/DDL-PRODUCTION-SAFETY.md) section 5
+production" from the database's side (wrong-database connection, long-held
+locks, a read-only replica, …). Until that exists, run the manual checklist
+in [docs/DDL-PRODUCTION-SAFETY.md](../docs/DDL-PRODUCTION-SAFETY.md) section 5
 before triggering this Job against a production database.

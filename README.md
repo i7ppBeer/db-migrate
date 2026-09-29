@@ -21,9 +21,10 @@ Most migration tools handle schema changes (DDL) and stop there. This one also t
 - **`sync`** — the "just make it match" command: `status` → `up` → a git-diff-style before/after schema diff → the real current schema, straight from the DB (not from the migration files). Refuses to silently no-op: it errors (non-zero exit) if nothing was pending, so a CI/CD pipeline can't mistake "nothing to do" for "it worked."
 - **`dcl` shows what actually changed** — after a DCL run, it diffs before/after account and permission state (both MariaDB and MongoDB) so a reviewer sees the real effect, not just "migration applied."
 - **Validation before execution** — forbidden ops (DCL statements inside DDL), dangerous ops (`TRUNCATE`, `DROP COLUMN`, `collection.drop()`, …), empty `down()`, orphaned drops, FK integrity (MariaDB), and a SQL syntax pre-check — each with an explicit, reviewable escape hatch (`--allow`, `@allow` file annotation) rather than a silent bypass.
+- **DDL checksum verification** — the changelog stores a checksum of every applied migration file's content, not just its filename. If an already-applied file gets edited afterward, `up`/`sync` refuse to proceed instead of silently trusting a file that may no longer match what actually ran — `--allow-checksum-drift` is the explicit override when the edit was intentional. See [docs/DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md).
 - **Lock Guard (MariaDB)** — every DDL statement runs under a bounded `lock_wait_timeout` with retry, so an `ALTER TABLE` stuck behind a long-running transaction's metadata lock fails fast instead of queuing indefinitely and jamming every later query on that table. See [docs/LOCK-GUARD.md](docs/LOCK-GUARD.md).
 - **Sanity Check** — optional Pre-Check / Post-Check assertions per migration, with auto-rollback if the post-condition doesn't hold.
-- **DCL auto-generated passwords** — a `CHANGE_ME_ON_FIRST_LOGIN` placeholder in a DCL script is replaced at runtime with its own cryptographically secure, independently generated password (never printed, never written back to the file); the credential is appended to `/tmp/secret` for one-time retrieval. See [docs/DCL-PASSWORD.md](docs/DCL-PASSWORD.md).
+- **DCL auto-generated passwords** — a `CHANGE_ME_ON_FIRST_LOGIN` placeholder in a DCL script is replaced at runtime with its own cryptographically secure, independently generated password (never printed, never written back to the file). It's never written to a bare file either — every account/permission event from a `dcl`/`sync` run (new password, rotated password, no change, account removed, permissions updated) is rendered into one mail-client-safe **run notification email** (`reports/notification.html` by default), the only place a generated password appears. See [docs/DCL-PASSWORD.md](docs/DCL-PASSWORD.md).
 - **Reports** — `sync`, `test-all`, and `test-instances` can all emit a JSON + HTML report via `-o <dir>`.
 - **Kubernetes-ready** — example manifests in [`k8s/`](k8s/) for running `sync` as a one-shot Job, credentials from a Secret, migrations from a content-hashed ConfigMap.
 
@@ -102,8 +103,8 @@ docker compose run --rm migrate <command> [options] -c /app/test-fixtures/<db-ty
 | Command | What it does |
 |---|---|
 | `status` | Show applied vs. pending migrations |
-| `up [--dry-run] [--sanity-check] [--no-auto-rollback] [--target <m>] [--only <m>] [--instance <n>]` | Apply pending migrations |
-| `sync [--sanity-check] [--target <m>] [--only <m>] [-o <dir>]` | `status` → `up` → diff → real current schema. **Errors (non-zero exit) if nothing was pending** — see [docs/DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md) |
+| `up [--dry-run] [--sanity-check] [--no-auto-rollback] [--target <m>] [--only <m>] [--instance <n>] [--allow-checksum-drift]` | Apply pending migrations. **Refuses to run if an already-applied file's content no longer matches its recorded checksum** — see below |
+| `sync [--sanity-check] [--target <m>] [--only <m>] [-o <dir>] [--allow-checksum-drift]` | `status` → `up` → diff → real current schema, plus a run notification email (`reports/notification.html`). **Errors (non-zero exit) if nothing was pending**, same checksum refusal as `up` — see [docs/DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md) |
 | `down -n <N> [--target <m>] [--instance <n>]` | Rollback the last N migrations |
 | `baseline [--all \| --up-to <m> \| --file <f>] [--dry-run]` | Mark existing migrations as already-applied, for onboarding an existing DB — see [docs/EXISTING-DATABASE-ONBOARDING.md](docs/EXISTING-DATABASE-ONBOARDING.md) |
 | `reset [--yes]` | Delete changelog/checksum records only — **never** runs `down()` or touches schema/data. Dry-run (count only) unless `--yes` |
@@ -124,7 +125,7 @@ docker compose run --rm migrate <command> [options] -c /app/test-fixtures/<db-ty
 
 | Command | What it does |
 |---|---|
-| `dcl [--dry-run] [--validate] [--allow-dangerous] [--allow-forbidden]` | Run pending/changed repeatable scripts, then print an account/permission before/after diff |
+| `dcl [--dry-run] [--validate] [--allow-dangerous] [--allow-forbidden] [-o <dir>]` | Run pending/changed repeatable scripts, then print an account/permission before/after diff and write the run notification email (`<dir>/notification.html`, default `reports/`) |
 | `dcl:status` | Show which `R__*` scripts are applied and whether their checksum still matches |
 | `dcl:verify` | Run each script twice and diff state to confirm idempotency, without leaving changes applied for real use |
 | `create-dcl <name> [-n <seq>]` | Scaffold a new `R__` DCL migration file |
@@ -133,7 +134,7 @@ docker compose run --rm migrate <command> [options] -c /app/test-fixtures/<db-ty
 
 | Command | What it does |
 |---|---|
-| `dcl-all [--dry-run] [--validate] [--allow-*]` | `dcl` across every instance |
+| `dcl-all [--dry-run] [--validate] [--allow-*] [-o <dir>]` | `dcl` across every instance — one `notification-<instance>.html` per instance |
 | `dcl:status-all` | `dcl:status` across every instance |
 | `dcl:verify-all` | `dcl:verify` across every instance |
 
@@ -240,6 +241,7 @@ db-migrate/
 ├── test-fixtures/                # Integration fixtures (run against real DBs)
 │   ├── mariadb/                  # test-success, test-failure, multi-instance, production-server, fk-test, ...
 │   └── mongodb/                  # test-success, test-failure, multi-instance, production-server
+├── templates/                    # Copy-paste starting points per DB type — see templates/README.md
 ├── test/                         # Unit tests (vitest)
 ├── scripts/                      # CI/build shell scripts
 ├── docker/                       # Container entrypoint
@@ -286,7 +288,7 @@ Full rules: [docs/VALIDATION-RULES-REFERENCE.md](docs/VALIDATION-RULES-REFERENCE
 
 ## 🚢 Deployment
 
-- **Docker Compose** — the primary local/dev/CI workflow. Full command reference: [docs/DOCKER-USAGE.md](docs/DOCKER-USAGE.md), [docs/DOCKER-COMPOSE-USER-GUIDE.md](docs/DOCKER-COMPOSE-USER-GUIDE.md).
+- **Docker Compose** — the primary local/dev/CI workflow. Full command reference: [docs/CLI-USAGE-GUIDE.md](docs/CLI-USAGE-GUIDE.md) (every command shown in both `node`/`docker compose run` form), [docs/DOCKER-COMPOSE-USER-GUIDE.md](docs/DOCKER-COMPOSE-USER-GUIDE.md).
 - **Kubernetes** — example manifests in [`k8s/`](k8s/) run `sync` as a one-shot Job: a ServiceAccount scoped to one Secret, migrations delivered via a content-hashed ConfigMap, `backoffLimit: 0` (a half-applied DDL migration should surface to a human, not be silently retried by the scheduler). See [`k8s/README.md`](k8s/README.md) for the full workflow, the pre-flight checklist, and why the DB user in the Secret should **not** be the database superuser.
 
 ---
@@ -316,11 +318,12 @@ npm run docker:test      # Full e2e: builds the image, brings up MongoDB + Maria
 | [DCL-PASSWORD.md](docs/DCL-PASSWORD.md) | DCL auto-generated password mechanism |
 | [MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md) | Multi-instance configuration guide |
 | [EXISTING-DATABASE-ONBOARDING.md](docs/EXISTING-DATABASE-ONBOARDING.md) | Onboarding an existing database with `baseline` |
+| [E2E-SCENARIOS.md](docs/E2E-SCENARIOS.md) | Q&A walkthrough (with flowcharts) of common scenarios — create/remove an account, alter a schema, baseline, MongoDB vs. MariaDB, sanity checks |
 | [CLI-USAGE-GUIDE.md](docs/CLI-USAGE-GUIDE.md) | Detailed CLI usage guide |
 | [USER-GUIDE-MARIADB.md](docs/USER-GUIDE-MARIADB.md) / [USER-GUIDE-MONGODB.md](docs/USER-GUIDE-MONGODB.md) | Per-database user guides |
 | [TESTING-GUIDE.md](docs/TESTING-GUIDE.md) | `test-all`, `validate-all`, CI/CD integration |
 | [CI-MIGRATION-TEST-GUIDE.md](docs/CI-MIGRATION-TEST-GUIDE.md) | Wiring migration tests into CI |
-| [DOCKER-USAGE.md](docs/DOCKER-USAGE.md) / [DOCKER-COMPOSE-USER-GUIDE.md](docs/DOCKER-COMPOSE-USER-GUIDE.md) | Docker Compose command reference |
+| [DOCKER-COMPOSE-USER-GUIDE.md](docs/DOCKER-COMPOSE-USER-GUIDE.md) | Docker Compose command reference |
 | [BUILD-IMAGE-GUIDE.md](docs/BUILD-IMAGE-GUIDE.md) | Building the migration image |
 | [LOCAL-TEST-GUIDE.md](docs/LOCAL-TEST-GUIDE.md) | Running the test suite locally without Docker |
 | [MIGRATION-MANAGEMENT-GUIDE-AWS-STYLE.md](docs/MIGRATION-MANAGEMENT-GUIDE-AWS-STYLE.md) | Ops-runbook-style migration management guide |

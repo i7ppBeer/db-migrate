@@ -1,16 +1,27 @@
-# Local Migration Image Testing Guide
+# Local Migration Testing Guide
 
-> ⚠️ **Known to be outdated (audited 2026-09-11)**: This document consistently references `docker-compose.local-test.yml`, which **does not exist in the repo** (`scripts/local-test.sh` also depends on this same nonexistent file, and is equally broken). The service names in this document (`mongodb-auth`, `migration-auth`, etc.) also don't match the real `docker-compose.yml` (the real services are `mongodb`/`mariadb`/`runner-mongodb`/`runner-mariadb`/`test-all`/`migrate`). To test locally right now, use the `docker-compose.yml` in the repo root instead (see [DOCKER-USAGE.md](./DOCKER-USAGE.md)). Whether to rewrite this document or create the missing compose file is still to be decided.
+This guide explains how to test migrations locally against a real database:
+starting it, running the Up → Down → Up flow, and checking status. It uses the
+repo's real `docker-compose.yml` — there's no separate image to build first;
+`docker compose run` builds the `migrate` service's image automatically from
+the repo's `Dockerfile` the first time it's needed, and rebuilds it if the
+Dockerfile or `src/` changed since.
 
-This guide explains how to test a Migration Image locally, including starting a mock DB and running the up/down/up flow.
+> Rewritten 2026-09-29 — the previous version of this document and
+> `scripts/local-test.sh` both depended on a `docker-compose.local-test.yml`
+> that never existed anywhere in this repo (flagged by an audit on
+> 2026-09-11, left unfixed until now). This version matches what's actually
+> in the repo. `scripts/build-migration-image.sh` has the same class of bug
+> (`-f Dockerfile.migrations --target runner`, neither of which exist) — it's
+> unrelated to this local-test flow and hasn't been fixed; don't use it.
 
 ## Table of Contents
 
 1. [Quick Start](#quick-start)
 2. [Manual Steps in Detail](#manual-steps-in-detail)
 3. [Using Different Databases](#using-different-databases)
-4. [Pulling the Image from a Registry](#pulling-the-image-from-a-registry)
-5. [Common Command Reference](#common-command-reference)
+4. [Common Command Reference](#common-command-reference)
+5. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -19,204 +30,119 @@ This guide explains how to test a Migration Image locally, including starting a 
 ### Method 1: One-click test script
 
 ```bash
-# Run the full test (up -> down -> up)
+# Run the full test (up -> down -> up) against MongoDB
 ./scripts/local-test.sh
 
-# Specify an image version
-./scripts/local-test.sh -i db-migrate:v1.2.3
-
-# Test MariaDB
+# Test MariaDB instead
 ./scripts/local-test.sh -d mariadb
 
-# Clean up after testing
-./scripts/local-test.sh -c
+# Stop and remove containers/volumes when done
+./scripts/local-test.sh --clean
 ```
+
+This runs `status` → `up` → `down` → `up` → `status` against the
+`test-fixtures/<db-type>/test-success/ddl/config.js` fixture, using the real
+`docker-compose.yml`'s `mongodb`/`mariadb` services and its generic `migrate`
+service (`--profile tools`).
 
 ### Method 2: Manual execution
 
 ```bash
-# 1. Start a mock MongoDB
-docker compose -f docker-compose.local-test.yml up -d mongodb
+# 1. Start MongoDB
+docker compose up -d mongodb
 
-# 2. Wait for the DB to start (about 10 seconds)
-sleep 10
+# 2. Run up (docker compose builds the migrate image automatically first time)
+docker compose --profile tools run --rm migrate up -c /app/test-fixtures/mongodb/test-success/ddl/config.js
 
-# 3. Run up
-docker compose -f docker-compose.local-test.yml run --rm migration up
+# 3. Run down
+docker compose --profile tools run --rm migrate down -c /app/test-fixtures/mongodb/test-success/ddl/config.js
 
-# 4. Run down
-docker compose -f docker-compose.local-test.yml run --rm migration down
+# 4. Run up again
+docker compose --profile tools run --rm migrate up -c /app/test-fixtures/mongodb/test-success/ddl/config.js
 
-# 5. Run up again
-docker compose -f docker-compose.local-test.yml run --rm migration up
+# 5. Check status
+docker compose --profile tools run --rm migrate status -c /app/test-fixtures/mongodb/test-success/ddl/config.js
 
-# 6. Check status
-docker compose -f docker-compose.local-test.yml run --rm migration status
-
-# 7. Clean up
-docker compose -f docker-compose.local-test.yml down -v
+# 6. Clean up
+docker compose down -v
 ```
 
 ---
 
 ## Manual Steps in Detail
 
-### Step 1: Build the Migration Image
-
-If you don't have an image yet, build one first:
+### Step 1: Start the test database
 
 ```bash
-# Build a local image
-./scripts/build-migration-image.sh -t v1.0.0
+# MongoDB
+docker compose up -d mongodb
 
-# Or pull one from a registry
-docker pull myregistry.azurecr.io/db-migrate:v1.0.0
-docker tag myregistry.azurecr.io/db-migrate:v1.0.0 db-migrate:v1.0.0
+# Or MariaDB
+docker compose up -d mariadb
+
+# Confirm it's healthy
+docker compose ps
 ```
 
-### Step 2: Start the test database
+### Step 2: Run migration commands
 
-```bash
-# Start MongoDB (no auth)
-docker compose -f docker-compose.local-test.yml up -d mongodb
-
-# Or start MongoDB (with auth)
-docker compose -f docker-compose.local-test.yml up -d mongodb-auth
-
-# Or start MariaDB
-docker compose -f docker-compose.local-test.yml up -d mariadb
-
-# Wait for the database to be ready
-sleep 10
-
-# Confirm the database status
-docker compose -f docker-compose.local-test.yml ps
-```
-
-### Step 3: Run migration commands
+Every command needs `-c <config>` pointing at a real project — there's no
+default config baked into the `migrate` service, unlike the old script's
+per-database services. Use a `test-fixtures/` fixture for testing, or your
+own project's config for real use:
 
 ```bash
 # Check status (which migrations are pending)
-docker compose -f docker-compose.local-test.yml run --rm migration status
+docker compose --profile tools run --rm migrate status -c /app/test-fixtures/mongodb/test-success/ddl/config.js
 
 # Run all pending migrations
-docker compose -f docker-compose.local-test.yml run --rm migration up
+docker compose --profile tools run --rm migrate up -c /app/test-fixtures/mongodb/test-success/ddl/config.js
 
 # Roll back the last migration
-docker compose -f docker-compose.local-test.yml run --rm migration down
+docker compose --profile tools run --rm migrate down -c /app/test-fixtures/mongodb/test-success/ddl/config.js
 
 # Validate migration files
-docker compose -f docker-compose.local-test.yml run --rm migration validate
+docker compose --profile tools run --rm migrate validate -c /app/test-fixtures/mongodb/test-success/ddl/config.js
 ```
 
-### Step 4: Clean up the test environment
+### Step 3: Clean up the test environment
 
 ```bash
 # Stop the containers
-docker compose -f docker-compose.local-test.yml down
+docker compose down
 
 # Stop and delete data (volumes)
-docker compose -f docker-compose.local-test.yml down -v
+docker compose down -v
 ```
 
 ---
 
 ## Using Different Databases
 
-### MongoDB (no auth)
+### MongoDB
 
 ```bash
-docker compose -f docker-compose.local-test.yml up -d mongodb
-docker compose -f docker-compose.local-test.yml run --rm migration up
+docker compose up -d mongodb
+docker compose --profile tools run --rm migrate up -c /app/test-fixtures/mongodb/test-success/ddl/config.js
 ```
 
-Environment variables:
-- `DB_HOST=mongodb`
-- `DB_PORT=27017`
-- `DB_NAME=test_db`
-
-### MongoDB (with auth)
-
-```bash
-docker compose -f docker-compose.local-test.yml up -d mongodb-auth
-docker compose -f docker-compose.local-test.yml run --rm migration-auth up
-```
-
-Environment variables:
-- `DB_HOST=mongodb-auth`
-- `DB_USER=admin`
-- `DB_PASSWORD=testpassword`
+Connection defaults (from `docker-compose.yml`'s `migrate` service): host
+`mongodb`, port `27017`, no auth.
 
 ### MariaDB
 
 ```bash
-docker compose -f docker-compose.local-test.yml up -d mariadb
-docker compose -f docker-compose.local-test.yml run --rm migration-mariadb up
+docker compose up -d mariadb
+docker compose --profile tools run --rm migrate up -c /app/test-fixtures/mariadb/test-success/ddl/config.js
 ```
 
-Environment variables:
-- `DB_HOST=mariadb`
-- `DB_PORT=3306`
-- `DB_USER=migrate`
-- `DB_PASSWORD=migratepass`
+Connection defaults: host `mariadb`, port `3306`, user `root`, password
+`rootpass` (local-dev convenience only — never use `root` for a real
+deployment, see `k8s/README.md`'s "Which DB user goes in the Secret").
 
----
-
-## Pulling the Image from a Registry
-
-### Azure Container Registry
-
-```bash
-# Log in to ACR
-az acr login --name myregistry
-
-# Pull the image
-docker pull myregistry.azurecr.io/db-migrate:v1.2.3
-
-# Set the environment variable
-export MIGRATION_IMAGE=myregistry.azurecr.io/db-migrate:v1.2.3
-
-# Run the test
-docker compose -f docker-compose.local-test.yml up -d mongodb
-docker compose -f docker-compose.local-test.yml run --rm migration up
-```
-
-### GitHub Container Registry
-
-```bash
-# Log in to GHCR
-echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
-
-# Pull the image
-docker pull ghcr.io/myorg/db-migrate:v1.2.3
-
-# Set the environment variable
-export MIGRATION_IMAGE=ghcr.io/myorg/db-migrate:v1.2.3
-
-# Run the test
-docker compose -f docker-compose.local-test.yml up -d mongodb
-docker compose -f docker-compose.local-test.yml run --rm migration up
-```
-
-### Using docker run directly
-
-```bash
-# Start MongoDB
-docker run -d --name test-mongo -p 27017:27017 mongo:7
-
-# Run the migration (replace with your image name)
-docker run --rm \
-  --network host \
-  -e DB_TYPE=mongodb \
-  -e DB_HOST=localhost \
-  -e DB_PORT=27017 \
-  -e DB_NAME=test_db \
-  myregistry.azurecr.io/db-migrate:v1.2.3 \
-  up
-
-# Clean up
-docker stop test-mongo && docker rm test-mongo
-```
+There's no MongoDB-with-auth service in `docker-compose.yml` — add one there
+first (see `mongodb`'s block for the pattern) if you need to test against an
+authenticated MongoDB locally.
 
 ---
 
@@ -225,30 +151,31 @@ docker stop test-mongo && docker rm test-mongo
 ### Migration commands
 
 | Command | Description |
-|------|------|
+|---|---|
+| `status` | Show migration status |
 | `up` | Run all pending migrations |
 | `down` | Roll back the last migration |
-| `status` | Show migration status |
 | `validate` | Validate migration files |
-| `test` | Test a migration (up, then immediately down) |
+| `test` | Up → Down → Up round trip for one config |
+| `sync` | status → up → diff → real schema (see [CLI-USAGE-GUIDE.md](./CLI-USAGE-GUIDE.md)) |
 
 ### Docker Compose commands
 
 ```bash
 # Start a service
-docker compose -f docker-compose.local-test.yml up -d mongodb
+docker compose up -d mongodb
 
-# Run a migration
-docker compose -f docker-compose.local-test.yml run --rm migration <command>
+# Run a migration command
+docker compose --profile tools run --rm migrate <command> -c <config>
 
 # View logs
-docker compose -f docker-compose.local-test.yml logs -f mongodb
+docker compose logs -f mongodb
 
 # Stop services
-docker compose -f docker-compose.local-test.yml down
+docker compose down
 
 # Stop and clear data
-docker compose -f docker-compose.local-test.yml down -v
+docker compose down -v
 ```
 
 ### Test script parameters
@@ -257,81 +184,33 @@ docker compose -f docker-compose.local-test.yml down -v
 ./scripts/local-test.sh [options]
 
 Options:
-  -i, --image     Migration image (default: db-migrate:v1.0.0)
-  -d, --db        Database: mongodb, mongodb-auth, mariadb
-  -c, --clean     Clean up after testing
+  -d, --db        Database: mongodb, mariadb (default: mongodb)
+  -c, --clean     Stop and remove containers/volumes after the test
   -h, --help      Show help
-```
-
----
-
-## Complete Test Workflow Example
-
-```bash
-# 1. Build the image
-./scripts/build-migration-image.sh -t v1.0.0
-
-# 2. Start MongoDB
-docker compose -f docker-compose.local-test.yml up -d mongodb
-sleep 10
-
-# 3. Check the initial status
-docker compose -f docker-compose.local-test.yml run --rm migration status
-# Expected: 5 pending migrations
-
-# 4. Run UP
-docker compose -f docker-compose.local-test.yml run --rm migration up
-# Expected: all migrations run
-
-# 5. Check status again
-docker compose -f docker-compose.local-test.yml run --rm migration status
-# Expected: 4-5 applied, 0-1 pending
-
-# 6. Run DOWN (roll back 1)
-docker compose -f docker-compose.local-test.yml run --rm migration down
-# Expected: the last migration is rolled back
-
-# 7. Run UP again
-docker compose -f docker-compose.local-test.yml run --rm migration up
-# Expected: the just-rolled-back migration runs again
-
-# 8. Final status
-docker compose -f docker-compose.local-test.yml run --rm migration status
-# Expected: same as step 5
-
-# 9. Clean up
-docker compose -f docker-compose.local-test.yml down -v
 ```
 
 ---
 
 ## Troubleshooting
 
-### Connection timeout
+### Connection timeout / database not healthy
 
-If you see `Database connection timeout`, check:
+If the database doesn't come up healthy in time:
 
-1. Whether the database container has started: `docker ps`
-2. Whether the network is correct: `docker network ls`
-3. Whether you've waited long enough for the DB to start
+1. Check the container actually started: `docker ps`
+2. Check its logs: `docker compose logs mongodb` (or `mariadb`)
+3. On Windows, confirm Docker Desktop's WSL2 backend is running
 
-### Permission Denied
-
-If the scripts won't execute:
+### Permission Denied running the script
 
 ```bash
 chmod +x scripts/local-test.sh
-chmod +x scripts/build-migration-image.sh
 ```
 
-### Image not found
+### `docker compose run` fails with an image/build error
 
-If the image doesn't exist:
-
-```bash
-# List local images
-docker images | grep db-migrate
-
-# If it's missing, build one
-./scripts/build-migration-image.sh -t v1.0.0
-```
+The `migrate` service builds from this repo's `Dockerfile` automatically —
+if that fails, the error is about the actual build (missing `package.json`
+dependency, Dockerfile syntax, network access for `npm ci`), not about a
+missing pre-built image. `docker compose build migrate` reproduces just the
+build step on its own to debug it in isolation.

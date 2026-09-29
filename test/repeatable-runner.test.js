@@ -2,70 +2,8 @@
  * Tests for RepeatableRunner
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as fsNative from 'fs/promises';
-import * as os from 'os';
-import * as path from 'path';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { RepeatableRunner } from '../src/core/repeatable-runner.js';
-
-// Test-only path — the real runner always writes to the hardcoded '/tmp/secret'
-// (a documented contract, see docs/DCL-PASSWORD.md), but TestableRepeatableRunner
-// below overrides saveGeneratedPasswords() to write here instead, so this only
-// needs to be a writable scratch path and not match production's path.
-const SECRET_FILE = path.join(os.tmpdir(), 'secret-test-runner');
-
-async function readSecretFile() {
-  try { return await fsNative.readFile(SECRET_FILE, 'utf-8'); } catch { return null; }
-}
-
-// Patch the hardcoded '/tmp/secret' path for tests by overriding appendFile behaviour  
-// via a thin wrapper: re-route writes to SECRET_FILE.
-// This avoids the ESM built-in mock limitation (vi.mock on fs/promises is unreliable).
-class TestableRepeatableRunner extends RepeatableRunner {
-  async saveGeneratedPasswords(originalContent, passwords, alreadyExists = false, explicitNames = null) {
-    const PLACEHOLDER = 'CHANGE_ME_ON_FIRST_LOGIN';
-    const pwArray = Array.isArray(passwords) ? passwords : [passwords];
-    let usernames = [];
-
-    if (explicitNames && explicitNames.length > 0) {
-      usernames = explicitNames.map(n => ({ name: n, isReset: false }));
-    } else {
-      const isJS = originalContent.includes('export async function up');
-      if (isJS) {
-        for (const line of originalContent.split('\n')) {
-          const m = line.match(/const\s+username\s*=\s*['"']([^'"']+)['"']/) ||
-                    line.match(/\buser\s*:\s*['"]([^'"]+)['"]/);
-          if (m) usernames.push({ name: m[1], isReset: false });
-        }
-      } else {
-        const collapsed = this.stripCommentsAndCollapse(originalContent);
-        for (const stmt of collapsed.split(';')) {
-          const isCreate = /\bCREATE\s+USER\b/i.test(stmt);
-          const isAlter  = /\bALTER\s+USER\b/i.test(stmt);
-          if (!isCreate && !isAlter) continue;
-          if (!stmt.includes(PLACEHOLDER)) continue;
-          const m = stmt.match(/['"`]([^'"`@\s]+)['"`]\s*@/);
-          if (m) usernames.push({ name: m[1], isReset: isAlter && !isCreate });
-        }
-      }
-    }
-
-    const isResetPwd = usernames.length > 0 && usernames.every(u => u?.isReset);
-    const usernameList = usernames.map(u => (typeof u === 'string' ? u : u.name));
-
-    if (usernameList.length === 0) return;
-
-    if (alreadyExists && !isResetPwd) {
-      this._lastSkipped = usernameList;
-      return;
-    }
-
-    const lines = usernameList.map((u, i) => `${u}=${pwArray[i] ?? pwArray[pwArray.length - 1]}`).join('\n') + '\n';
-    await fsNative.appendFile(SECRET_FILE, lines, 'utf-8');
-    this._lastWritten = usernameList;
-    this._lastIsReset = isResetPwd;
-  }
-}
 
 describe('RepeatableRunner', () => {
   let runner;
@@ -232,47 +170,38 @@ describe('stripCommentsAndCollapse', () => {
   });
 });
 
-describe('saveGeneratedPasswords — multi-line SQL template format', () => {
+describe('recordCredentialEvents — multi-line SQL template format', () => {
   let runner;
-  beforeEach(async () => {
-    runner = new TestableRepeatableRunner({ checksumTable: 'test_dcl' });
-    // Start each test with a clean slate
-    await fsNative.writeFile(SECRET_FILE, '', 'utf-8');
-  });
-  afterEach(async () => {
-    await fsNative.unlink(SECRET_FILE).catch(() => {});
+  beforeEach(() => {
+    runner = new RepeatableRunner({ checksumTable: 'test_dcl' });
   });
 
-  it('should extract username from multi-line CREATE USER (official template format)', async () => {
+  it('should extract username from multi-line CREATE USER (official template format)', () => {
     // This is exactly the format used by databases/mariadb/_templates/dcl/migrations/
     const sql = `-- R__00_default_users.sql\nCREATE USER IF NOT EXISTS 'app_default'@'%'\n  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'\n  PASSWORD EXPIRE;\nFLUSH PRIVILEGES;\n`;
 
-    await runner.saveGeneratedPasswords(sql, ['testpassword123X'], false);
+    runner.recordCredentialEvents(sql, ['testpassword123X'], false);
 
-    const written = await readSecretFile();
-    expect(written).toContain('app_default=testpassword123X');
+    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'app_default', password: 'testpassword123X' });
   });
 
-  it('should extract username from single-line CREATE USER (legacy format)', async () => {
+  it('should extract username from single-line CREATE USER (legacy format)', () => {
     const sql = `CREATE USER IF NOT EXISTS 'svc_user'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';\nFLUSH PRIVILEGES;\n`;
 
-    await runner.saveGeneratedPasswords(sql, ['testpassword456Y'], false);
+    runner.recordCredentialEvents(sql, ['testpassword456Y'], false);
 
-    const written = await readSecretFile();
-    expect(written).toContain('svc_user=testpassword456Y');
+    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'svc_user', password: 'testpassword456Y' });
   });
 
-  it('should NOT write /tmp/secret when alreadyExists=true (CREATE USER)', async () => {
+  it('should record a no_change event (not a password) when alreadyExists=true (CREATE USER)', () => {
     const sql = `CREATE USER IF NOT EXISTS 'app_user'@'%'\n  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`;
 
-    await runner.saveGeneratedPasswords(sql, ['somepassword'], true);
+    runner.recordCredentialEvents(sql, ['somepassword'], true);
 
-    const written = await readSecretFile();
-    expect(written).toBe('');
-    expect(runner._lastSkipped).toContain('app_user');
+    expect(runner.credentialEvents).toEqual([{ type: 'no_change', username: 'app_user' }]);
   });
 
-  it('should extract multiple usernames from multi-line statements', async () => {
+  it('should extract multiple usernames from multi-line statements', () => {
     const sql = [
       `CREATE USER IF NOT EXISTS 'readonly_svc'@'%'`,
       `  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`,
@@ -280,26 +209,25 @@ describe('saveGeneratedPasswords — multi-line SQL template format', () => {
       `  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`,
     ].join('\n');
 
-    await runner.saveGeneratedPasswords(sql, ['pw1', 'pw2'], false);
+    runner.recordCredentialEvents(sql, ['pw1', 'pw2'], false);
 
-    const written = await readSecretFile();
-    expect(written).toContain('readonly_svc=pw1');
-    expect(written).toContain('readwrite_svc=pw2');
+    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'readonly_svc', password: 'pw1' });
+    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'readwrite_svc', password: 'pw2' });
   });
 
   // ─── Scenario 1: New user → password generated ────────────────────────────
-  it('[Scenario 1] New user: CREATE USER writes credential to secret file', async () => {
+  it('[Scenario 1] New user: CREATE USER records a "new" credential event', () => {
     const sql = `CREATE USER IF NOT EXISTS 'new_app'@'%'\n  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'\n  PASSWORD EXPIRE;\nFLUSH PRIVILEGES;`;
     const { generated, passwords } = runner.resolvePlaceholderPasswords(sql, 'R__01_new_user.sql');
 
     expect(generated).toBe(true);
     expect(passwords).toHaveLength(1);
 
-    await runner.saveGeneratedPasswords(sql, passwords, false);
+    runner.recordCredentialEvents(sql, passwords, false);
 
-    const written = await readSecretFile();
-    expect(written).toMatch(/^new_app=[^\s]+/);
-    expect(written).not.toContain('CHANGE_ME_ON_FIRST_LOGIN');
+    expect(runner.credentialEvents).toHaveLength(1);
+    expect(runner.credentialEvents[0]).toMatchObject({ type: 'new', username: 'new_app' });
+    expect(runner.credentialEvents[0].password).not.toContain('CHANGE_ME_ON_FIRST_LOGIN');
   });
 
   // ─── Scenario 2: Second run → checksum unchanged → no new password ─────────
@@ -317,8 +245,8 @@ describe('saveGeneratedPasswords — multi-line SQL template format', () => {
     expect(resolvedChecksum).not.toBe(checksum1);
   });
 
-  // ─── Scenario 3: Reset password → NOT skipped, credential always written ───
-  it('[Scenario 3] Reset password: ALTER USER writes credential even when alreadyExists=true', async () => {
+  // ─── Scenario 3: Reset password → NOT skipped, recorded as password_changed ─
+  it('[Scenario 3] Reset password: ALTER USER records a password_changed event even when alreadyExists=true', () => {
     // SQL generated by gen-dcl.py when reset_pwd: true
     const sql = [
       `-- @allow-forbidden: true`,
@@ -331,12 +259,11 @@ describe('saveGeneratedPasswords — multi-line SQL template format', () => {
     expect(generated).toBe(true);
 
     // alreadyExists=true simulates the old buggy path — ALTER USER must NOT be skipped
-    await runner.saveGeneratedPasswords(sql, passwords, true /* alreadyExists */);
+    runner.recordCredentialEvents(sql, passwords, true /* alreadyExists */);
 
-    const written = await readSecretFile();
-    expect(written).toMatch(/^existing_user=[^\s]+/);
-    expect(runner._lastIsReset).toBe(true);
-    expect(runner._lastSkipped).toBeUndefined();
+    expect(runner.credentialEvents).toHaveLength(1);
+    expect(runner.credentialEvents[0]).toMatchObject({ type: 'password_changed', username: 'existing_user' });
+    expect(runner.credentialEvents[0].password).toBeTruthy();
   });
 
   // ─── Scenario 4: Second run of reset → same checksum → no execution ────────
@@ -387,17 +314,13 @@ describe('Repeatable Migration File Naming', () => {
   });
 });
 
-describe('saveGeneratedPasswords — JS object property style (user: "xxx")', () => {
+describe('recordCredentialEvents — JS object property style (user: "xxx")', () => {
   let runner;
-  beforeEach(async () => {
-    runner = new TestableRepeatableRunner({ checksumTable: 'test_dcl' });
-    await fsNative.writeFile(SECRET_FILE, '', 'utf-8');
-  });
-  afterEach(async () => {
-    await fsNative.unlink(SECRET_FILE).catch(() => {});
+  beforeEach(() => {
+    runner = new RepeatableRunner({ checksumTable: 'test_dcl' });
   });
 
-  it('should extract usernames from object property style and pair passwords positionally', async () => {
+  it('should extract usernames from object property style and pair passwords positionally', () => {
     const js = [
       `export async function up(db, client) {`,
       `  await createOrUpdateUser(adminDb, {`,
@@ -411,14 +334,13 @@ describe('saveGeneratedPasswords — JS object property style (user: "xxx")', ()
       `}`,
     ].join('\n');
 
-    await runner.saveGeneratedPasswords(js, ['pw_ecommerce', 'pw_analytics'], false);
+    runner.recordCredentialEvents(js, ['pw_ecommerce', 'pw_analytics'], false);
 
-    const written = await readSecretFile();
-    expect(written).toContain('ecommerce_app=pw_ecommerce');
-    expect(written).toContain('analytics_app=pw_analytics');
+    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'ecommerce_app', password: 'pw_ecommerce' });
+    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'analytics_app', password: 'pw_analytics' });
   });
 
-  it('should still support const username = "xxx" style', async () => {
+  it('should still support const username = "xxx" style', () => {
     const js = [
       `export async function up(db, client) {`,
       `  const username = 'legacy_user';`,
@@ -426,9 +348,8 @@ describe('saveGeneratedPasswords — JS object property style (user: "xxx")', ()
       `}`,
     ].join('\n');
 
-    await runner.saveGeneratedPasswords(js, ['pw_legacy'], false);
+    runner.recordCredentialEvents(js, ['pw_legacy'], false);
 
-    const written = await readSecretFile();
-    expect(written).toContain('legacy_user=pw_legacy');
+    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'legacy_user', password: 'pw_legacy' });
   });
 });

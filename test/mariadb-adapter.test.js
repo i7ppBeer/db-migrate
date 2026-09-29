@@ -3,8 +3,12 @@
  * 測試 MariaDB 遷移適配器的 Sanity Check 功能
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MariaDBAdapter } from '../src/adapters/mariadb-adapter.js';
+import * as fsp from 'fs/promises';
+import * as os from 'os';
+import * as path from 'path';
+import * as crypto from 'crypto';
 
 // Mock mysql2/promise
 vi.mock('mysql2/promise', () => ({
@@ -237,6 +241,238 @@ DROP TABLE users;
       expect(result.pending).toEqual([]);
       expect(result.applied).toEqual([]);
       expect(result.total).toBe(0);
+    });
+  });
+
+  describe('status() — DDL checksum verification', () => {
+    let tmpDir;
+    let ddlAdapter;
+    const sha256 = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
+
+    beforeEach(async () => {
+      tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'db-migrate-checksum-'));
+      ddlAdapter = new MariaDBAdapter({
+        ...mockConfig,
+        migrationsDir: tmpDir
+      });
+    });
+
+    afterEach(async () => {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    // Minimal connection.execute mock that branches on the query text —
+    // real SELECT/UPDATE behavior for the checksum queries, no-ops for
+    // ensureChangelogTable()'s CREATE/ALTER statements.
+    function mockConnection({ rows = [], updateSpy = vi.fn().mockResolvedValue([{}]) } = {}) {
+      return {
+        execute: vi.fn((sql, params) => {
+          if (/^SELECT id, applied_at, checksum/.test(sql)) return Promise.resolve([rows]);
+          if (/^UPDATE/.test(sql)) return updateSpy(sql, params);
+          return Promise.resolve([[]]);
+        })
+      };
+    }
+
+    it('reports no mismatch when the stored checksum matches the current file content', async () => {
+      const content = '-- +migrate Up\nCREATE TABLE foo (id INT);\n-- +migrate Down\nDROP TABLE foo;\n';
+      await fsp.writeFile(path.join(tmpDir, '20260101000000-create-foo.sql'), content, 'utf-8');
+      ddlAdapter.connection = mockConnection({
+        rows: [{ id: '20260101000000-create-foo', applied_at: new Date(), checksum: sha256(content) }]
+      });
+
+      const status = await ddlAdapter.status();
+
+      expect(status.checksumMismatches).toEqual([]);
+      expect(status.checksumBaselined).toEqual([]);
+      expect(status.applied).toHaveLength(1);
+    });
+
+    it('detects a checksum mismatch when an applied migration file was edited afterward', async () => {
+      const editedContent = '-- +migrate Up\nCREATE TABLE foo (id INT, name VARCHAR(50));\n-- +migrate Down\nDROP TABLE foo;\n';
+      const originalChecksum = sha256('-- +migrate Up\nCREATE TABLE foo (id INT);\n-- +migrate Down\nDROP TABLE foo;\n');
+      await fsp.writeFile(path.join(tmpDir, '20260101000000-create-foo.sql'), editedContent, 'utf-8');
+      ddlAdapter.connection = mockConnection({
+        rows: [{ id: '20260101000000-create-foo', applied_at: new Date(), checksum: originalChecksum }]
+      });
+
+      const status = await ddlAdapter.status();
+
+      expect(status.checksumMismatches).toHaveLength(1);
+      expect(status.checksumMismatches[0].fileName).toBe('20260101000000-create-foo.sql');
+    });
+
+    it('adopts the current file content as the baseline for a legacy row with no stored checksum, without flagging a mismatch', async () => {
+      const content = '-- +migrate Up\nCREATE TABLE foo (id INT);\n-- +migrate Down\nDROP TABLE foo;\n';
+      await fsp.writeFile(path.join(tmpDir, '20260101000000-create-foo.sql'), content, 'utf-8');
+      const updateSpy = vi.fn().mockResolvedValue([{}]);
+      ddlAdapter.connection = mockConnection({
+        rows: [{ id: '20260101000000-create-foo', applied_at: new Date(), checksum: null }],
+        updateSpy
+      });
+
+      const status = await ddlAdapter.status();
+
+      expect(status.checksumMismatches).toEqual([]);
+      expect(status.checksumBaselined).toEqual(['20260101000000-create-foo.sql']);
+      expect(updateSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/^UPDATE/),
+        [sha256(content), '20260101000000-create-foo']
+      );
+    });
+  });
+
+  describe('status() — Gate R1 orphaned-entry and out-of-order checks', () => {
+    let tmpDir;
+    let ddlAdapter;
+
+    beforeEach(async () => {
+      tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'db-migrate-r1-'));
+      ddlAdapter = new MariaDBAdapter({ ...mockConfig, migrationsDir: tmpDir });
+    });
+
+    afterEach(async () => {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    function mockConnection(rows) {
+      return {
+        execute: vi.fn((sql) => {
+          if (/^SELECT id, applied_at, checksum/.test(sql)) return Promise.resolve([rows]);
+          return Promise.resolve([[]]);
+        })
+      };
+    }
+
+    it('flags a changelog row whose file no longer exists on disk as orphaned', async () => {
+      // No files written to tmpDir at all — the changelog row has nothing to back it.
+      ddlAdapter.connection = mockConnection([
+        { id: '20260101000000-deleted-file', applied_at: new Date(), checksum: 'whatever' }
+      ]);
+
+      const status = await ddlAdapter.status();
+
+      expect(status.orphanedChangelogEntries).toEqual([
+        { id: '20260101000000-deleted-file', appliedAt: expect.any(Date) }
+      ]);
+    });
+
+    it('does not flag a row as orphaned when its file is present', async () => {
+      const content = '-- +migrate Up\nCREATE TABLE foo (id INT);\n-- +migrate Down\nDROP TABLE foo;\n';
+      await fsp.writeFile(path.join(tmpDir, '20260101000000-create-foo.sql'), content, 'utf-8');
+      ddlAdapter.connection = mockConnection([
+        { id: '20260101000000-create-foo', applied_at: new Date(), checksum: crypto.createHash('sha256').update(content, 'utf8').digest('hex') }
+      ]);
+
+      const status = await ddlAdapter.status();
+
+      expect(status.orphanedChangelogEntries).toEqual([]);
+    });
+
+    it('flags a later-sorted file as out-of-order when an earlier-sorted file is still pending', async () => {
+      const contentA = '-- +migrate Up\nCREATE TABLE a (id INT);\n-- +migrate Down\nDROP TABLE a;\n';
+      const contentB = '-- +migrate Up\nCREATE TABLE b (id INT);\n-- +migrate Down\nDROP TABLE b;\n';
+      // 20260101000000-a sorts before 20260101000001-b, but only b is applied.
+      await fsp.writeFile(path.join(tmpDir, '20260101000000-a.sql'), contentA, 'utf-8');
+      await fsp.writeFile(path.join(tmpDir, '20260101000001-b.sql'), contentB, 'utf-8');
+      ddlAdapter.connection = mockConnection([
+        { id: '20260101000001-b', applied_at: new Date(), checksum: crypto.createHash('sha256').update(contentB, 'utf8').digest('hex') }
+      ]);
+
+      const status = await ddlAdapter.status();
+
+      expect(status.outOfOrderApplied).toEqual(['20260101000001-b.sql']);
+      expect(status.pending).toEqual(['20260101000000-a.sql']);
+    });
+
+    it('does not flag anything out-of-order when applied migrations form a contiguous prefix', async () => {
+      const contentA = '-- +migrate Up\nCREATE TABLE a (id INT);\n-- +migrate Down\nDROP TABLE a;\n';
+      const contentB = '-- +migrate Up\nCREATE TABLE b (id INT);\n-- +migrate Down\nDROP TABLE b;\n';
+      await fsp.writeFile(path.join(tmpDir, '20260101000000-a.sql'), contentA, 'utf-8');
+      await fsp.writeFile(path.join(tmpDir, '20260101000001-b.sql'), contentB, 'utf-8');
+      ddlAdapter.connection = mockConnection([
+        { id: '20260101000000-a', applied_at: new Date(), checksum: crypto.createHash('sha256').update(contentA, 'utf8').digest('hex') }
+      ]);
+
+      const status = await ddlAdapter.status();
+
+      expect(status.outOfOrderApplied).toEqual([]);
+      expect(status.pending).toEqual(['20260101000001-b.sql']);
+    });
+  });
+
+  describe('repairChecksum()', () => {
+    it('reads the current file content and writes its checksum to the changelog row', async () => {
+      const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'db-migrate-repair-'));
+      try {
+        const content = '-- +migrate Up\nALTER TABLE foo ADD COLUMN bar INT;\n-- +migrate Down\nALTER TABLE foo DROP COLUMN bar;\n';
+        await fsp.writeFile(path.join(tmpDir, '20260101000001-add-bar.sql'), content, 'utf-8');
+
+        const adapterUnderTest = new MariaDBAdapter({ ...mockConfig, migrationsDir: tmpDir });
+        const executeSpy = vi.fn().mockResolvedValue([{}]);
+        adapterUnderTest.connection = { execute: executeSpy };
+
+        const checksum = await adapterUnderTest.repairChecksum('20260101000001-add-bar.sql');
+
+        expect(checksum).toBe(crypto.createHash('sha256').update(content, 'utf8').digest('hex'));
+        expect(executeSpy).toHaveBeenCalledWith(
+          expect.stringMatching(/^UPDATE .* SET checksum = \? WHERE id = \?/),
+          [checksum, '20260101000001-add-bar']
+        );
+      } finally {
+        await fsp.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('connect() — Gate R0 identity check', () => {
+    // Shared mock connection whose execute() branches on the query text,
+    // used for both the temp (no-database) connection and the real one —
+    // connect() calls mysql.createConnection() twice when dbName is set.
+    function mockConnection(reportedDbName) {
+      return {
+        execute: vi.fn((sql) => {
+          if (/^SELECT DATABASE\(\)/.test(sql)) return Promise.resolve([[{ db: reportedDbName }]]);
+          return Promise.resolve([[]]);
+        }),
+        end: vi.fn().mockResolvedValue(undefined)
+      };
+    }
+
+    it('passes a connectTimeout to mysql.createConnection()', async () => {
+      const mysql = (await import('mysql2/promise')).default;
+      const conn = mockConnection('test');
+      vi.mocked(mysql.createConnection).mockResolvedValue(conn);
+
+      const testAdapter = new MariaDBAdapter({ ...mockConfig });
+      await testAdapter.connect();
+
+      const calledWith = vi.mocked(mysql.createConnection).mock.calls[0][0];
+      expect(calledWith.connectTimeout).toBeTypeOf('number');
+      expect(calledWith.connectTimeout).toBeGreaterThan(0);
+    });
+
+    it('succeeds when the connection reports the expected database', async () => {
+      const mysql = (await import('mysql2/promise')).default;
+      const conn = mockConnection('test'); // mockConfig's database is 'test'
+      vi.mocked(mysql.createConnection).mockResolvedValue(conn);
+
+      const testAdapter = new MariaDBAdapter({ ...mockConfig, mode: 'repeatable' }); // skip ensureChangelogTable
+      const result = await testAdapter.connect();
+
+      expect(result).toBe(conn);
+    });
+
+    it('refuses to proceed and closes the connection when the reported database does not match config', async () => {
+      const mysql = (await import('mysql2/promise')).default;
+      const conn = mockConnection('some_other_db'); // mismatch vs mockConfig's 'test'
+      vi.mocked(mysql.createConnection).mockResolvedValue(conn);
+
+      const testAdapter = new MariaDBAdapter({ ...mockConfig, mode: 'repeatable' });
+
+      await expect(testAdapter.connect()).rejects.toThrow(/wrong database/i);
+      expect(conn.end).toHaveBeenCalled();
+      expect(testAdapter.connection).toBeNull();
     });
   });
 
@@ -657,10 +893,18 @@ REVOKE SELECT ON mydb.* FROM 'app'@'%';
         expect(result.forbiddenOps.some(op => op.code === 'GRANT')).toBe(true);
       });
 
-      it('should emit missing-DOWN warning', () => {
+      it('should emit missing-DOWN error when UP contains real operations (parity with MongoDB adapter)', () => {
         const sql = `-- +migrate Up\nCREATE TABLE foo (id INT);\n`;
         const result = adapter.validateContent(sql, 'V001__create.sql');
+        expect(result.valid).toBe(false);
+        expect(result.errors.some(e => e.type === 'missing-down' && e.code === 'MISSING_DOWN')).toBe(true);
+      });
+
+      it('should emit missing-DOWN warning (not an error) when UP has no real operations', () => {
+        const sql = `-- +migrate Up\n-- just a comment, nothing to roll back\n`;
+        const result = adapter.validateContent(sql, 'V001__noop.sql');
         expect(result.warnings.some(w => w.type === 'missing-down')).toBe(true);
+        expect(result.errors.some(e => e.type === 'missing-down')).toBe(false);
       });
 
       it('should NOT report SQL_SYNTAX_ERROR for column named "status"', () => {

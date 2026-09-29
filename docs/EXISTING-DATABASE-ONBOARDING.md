@@ -654,11 +654,10 @@ docker compose run --rm migrate create 'add-missing-audit-table' -c /app/test-fi
 # 1. Create directories
 mkdir -p test-fixtures/mariadb/my-project/{ddl,dcl}/migrations
 
-# 2. Create config.js (there is no ready-made _templates directory —
-#    just copy a real example and edit it; remember to add
-#    mode: 'repeatable' for DCL, see section 2.3 above)
-cp test-fixtures/mariadb/test-success/ddl/config.js test-fixtures/mariadb/my-project/ddl/
-cp test-fixtures/mariadb/test-success/dcl/config.js test-fixtures/mariadb/my-project/dcl/
+# 2. Create config.js — copy from templates/ (see templates/README.md), or
+#    from a real example; remember mode: 'repeatable' for DCL (section 2.3)
+cp templates/mariadb/ddl/config.js test-fixtures/mariadb/my-project/ddl/
+cp templates/mariadb/dcl/config.js test-fixtures/mariadb/my-project/dcl/
 
 # 3. Export the existing schema and create a baseline file
 # ... (manual editing)

@@ -2,7 +2,8 @@
 -- @allow-dangerous: false
 
 -- These accounts use CHANGE_ME_ON_FIRST_LOGIN as a placeholder.
--- The runner will auto-generate a secure password and save it to /tmp/secret.
+-- The runner will auto-generate a secure password and include it in the
+-- run's notification email (see docs/DCL-PASSWORD.md).
 CREATE USER IF NOT EXISTS 'readonly_svc'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';
 CREATE USER IF NOT EXISTS 'readwrite_svc'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';
 

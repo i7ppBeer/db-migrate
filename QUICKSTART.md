@@ -1,107 +1,129 @@
-# Quick Start — 依任務分類的操作手冊
+# Quick Start — a task-oriented runbook
 
-> 這份文件依「我想做什麼」分類,教你怎麼用 `docker compose run --rm migrate` 完成常見任務。
-> 完整指令選項、設定檔格式、驗證規則等參考資料請看 [README.md](README.md)。
+> This document is organized by "what do I want to do" — it shows you how to use `docker compose run --rm migrate` for common tasks.
+> For full CLI options, config file formats, and validation rules, see [README.md](README.md).
 
 ---
 
-## 0. 前置需求 & 啟動資料庫
+## 0. Prerequisites & starting the databases
 
-- **Docker Desktop**。在 Windows 上,Docker Desktop 需要 WSL2 才能啟動引擎(Windows Home 沒有 Hyper-V):
+- **Docker Desktop**. On Windows, Docker Desktop needs WSL2 to start its engine (Windows Home has no Hyper-V):
   ```powershell
-  # 以系統管理員身分開 PowerShell,執行後重開機
+  # Open PowerShell as Administrator, run this, then reboot
   wsl --install
   ```
-  裝完、重開機後啟動 Docker Desktop 即可(它會自動註冊 `docker-desktop` 這個 WSL2 發行版)。
-- 或者:本機 Node.js ≥ 20,自行準備可連線的 MariaDB/MongoDB。
+  After the reboot, just start Docker Desktop (it registers the `docker-desktop` WSL2 distro automatically).
+- Or: local Node.js ≥ 20 with a reachable MariaDB/MongoDB of your own.
 
-啟動測試資料庫:
+Start the test databases:
 
 ```bash
 docker compose up -d mariadb mongodb
 ```
 
-指令基本格式:
+Basic command shape:
 
 ```bash
-# 本地執行
+# Local
 node src/cli.js <command> [options] -c <config-path>
 
-# Docker(推薦,環境一致)
+# Docker (recommended — consistent environment)
 docker compose run --rm migrate <command> [options] -c /app/test-fixtures/<db-type>/<project>/config.js
 ```
 
-以下範例統一用 Docker 寫法,把路徑換成你自己專案的 config 即可。
+The examples below all use the Docker form — swap the path for your own project's config.
 
 ---
 
-## 我想... 建立並套用一個新的 DDL migration(結構變更)
+## I want to... create and apply a new DDL migration (schema change)
 
 ```bash
-# 1. 建立新 migration
+# 1. Create a new migration
 docker compose run --rm migrate create create-users -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 2. 編輯 config.js — 只需填寫與預設值不同的欄位 (delta)
+# 2. Edit config.js — only fill in fields that differ from the defaults (delta pattern)
 #    export default {
 #      type: 'mariadb',
 #      database: process.env.MARIADB_DB || 'myapp',
 #    };
 
-# 3. 編輯產生的 SQL/JS 檔案 (寫 Up,也寫 Down — 空的 Down 會被 validate 擋下來)
+# 3. Edit the generated SQL/JS file (write Up, and Down — an empty Down is blocked by validate)
 
-# 4. 驗證
+# 4. Validate
 docker compose run --rm migrate validate -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 5. 套用
+# 5. Apply
 docker compose run --rm migrate up -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
-### DDL 指令速查
+Updating an *existing* table's schema is the same flow — `create` still generates a timestamped file, you just write `ALTER TABLE ... ADD COLUMN ...` (with the matching `DROP COLUMN` in Down) instead of `CREATE TABLE`:
 
-| 指令 | 說明 |
-|------|------|
-| `status` | 查看 migration 狀態 |
-| `up` | 執行待處理的 migrations |
-| `up --sanity-check` | 執行並做 Pre-Check/Post-Check(失敗自動 rollback) |
-| `up --dry-run` | 預覽要執行的 migrations,不實際跑 |
-| `down -n 1` | Rollback 最近 1 個 migration |
-| `validate` | 驗證 migration 檔案(語法、危險操作、FK 完整性…) |
-| `test` | 執行 Up→Down→Up 測試,確認來回都乾淨 |
-| `create <name>` | 建立新 migration |
-| `baseline --all` | 既有資料庫導入時,把現有 migration 標記為「已套用」而不實際執行 |
+```sql
+-- +migrate Up
+ALTER TABLE users ADD COLUMN phone VARCHAR(20) NULL;
+
+-- +migrate Down
+ALTER TABLE users DROP COLUMN phone;
+```
+
+```javascript
+// MongoDB equivalent — no ALTER TABLE, just update documents / add a validator
+export async function up(db, client) {
+  await db.collection('users').updateMany({ phone: { $exists: false } }, { $set: { phone: null } });
+}
+export async function down(db, client) {
+  await db.collection('users').updateMany({}, { $unset: { phone: '' } });
+}
+```
+
+### DDL command reference
+
+| Command | Description |
+|---|---|
+| `status` | Show migration status |
+| `up` | Apply pending migrations |
+| `up --sanity-check` | Apply with Pre-Check/Post-Check (auto-rollback on failure) |
+| `up --dry-run` | Preview what would run, without applying it |
+| `down -n 1` | Roll back the last 1 migration |
+| `validate` | Validate migration files (syntax, dangerous ops, FK integrity…) |
+| `test` | Run an Up→Down→Up round trip |
+| `create <name>` | Create a new migration file |
+| `baseline --all` | Onboarding an existing database — mark existing migrations as "applied" without running them |
 
 ---
 
-## 我想... 一次「套用 + 看差異 + 現在的 schema 長怎樣」
+## I want to... "apply + see the diff + see the current schema" in one shot
 
-這是 `sync` 的用途 —— 適合 CI/CD 或部署流程,取代手動跑 `status` → `up` → 再自己確認的三步驟:
+That's what `sync` is for — built for CI/CD and deploy pipelines, replacing the manual status → up → check-for-yourself three-step:
 
 ```bash
 docker compose run --rm migrate sync -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 需要存檔的 JSON+HTML 報表(例如給 CI 上傳成 artifact)
+# Save a JSON+HTML report too (e.g. to upload as a CI artifact)
 docker compose run --rm migrate sync -o /app/reports -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
-`sync` 會依序:
-1. 檢查目前狀態(`status`)
-2. 套用所有待處理的 migrations(`up`)
-3. 印出 **before/after 的 schema diff**(git-diff 風格,而不是丟兩份完整清單要你自己比對)
-4. 印出套用後、直接從資料庫查回來的**真實 schema**(不是照 migration 檔案推測的)
+`sync` runs, in order:
+1. Check current status (`status`)
+2. Apply all pending migrations (`up`)
+3. Print a **before/after schema diff** (git-diff style, not two full listings you have to compare yourself)
+4. Print the **real schema** after applying — queried straight from the database, not inferred from migration files
 
-⚠️ **注意**:如果執行當下沒有任何待處理的 migration,`sync` 會**回傳非 0 的錯誤結束碼**,而不是安靜地什麼都不做 —— 這是刻意設計,避免 CI/CD 把「這次沒事做」誤判成「部署成功」。細節見 [docs/DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md)。
+It also writes a **run notification email** (`notification.html`, see [docs/DCL-PASSWORD.md](docs/DCL-PASSWORD.md)) listing the migrations applied and the schema diff — defaults to `reports/notification.html`, independent of the `-o`-gated JSON+HTML report above.
 
-想直接部署到 Kubernetes 當一次性 Job 跑 `sync`?看下面的[部署到 Kubernetes](#我想-部署到-kubernetes)。
+⚠️ **Note**: if there is nothing pending when it runs, `sync` **returns a non-zero exit code** instead of silently doing nothing — this is deliberate, so CI/CD can't mistake "nothing to do" for "deployment succeeded." Details in [docs/DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md).
+
+Want to run `sync` as a one-shot Kubernetes Job? See [Deploying to Kubernetes](#i-want-to-deploy-to-kubernetes) below.
 
 ---
 
-## 我想... 建立/修改 DCL 帳號權限(Repeatable 模式)
+## I want to... create/modify DCL accounts & permissions (repeatable mode)
 
 ```bash
-# 1. 建立新 DCL 遷移
+# 1. Create a new DCL migration
 docker compose run --rm migrate create-dcl readonly_users -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 
-# 2. 編輯 config.js — 一樣只填 delta
+# 2. Edit config.js — again, only the delta
 #    export default {
 #      type: 'mariadb',
 #      mode: 'repeatable',
@@ -109,34 +131,34 @@ docker compose run --rm migrate create-dcl readonly_users -c /app/test-fixtures/
 #      checksumTable: '_dcl_migrations',
 #    };
 
-# 3. 編輯 migrations/*.sql 中的帳號和權限(務必寫成冪等 —— 例如 CREATE USER IF NOT EXISTS)
+# 3. Edit the accounts/grants in migrations/*.sql (must be idempotent — e.g. CREATE USER IF NOT EXISTS)
 
-# 4. 先驗證冪等性,再真的執行
+# 4. Verify idempotency first, then actually run it
 docker compose run --rm migrate dcl:verify -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 docker compose run --rm migrate dcl -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
-`dcl` 執行完之後會印出**這次帳號/權限的 before/after 差異**(MariaDB 和 MongoDB 都支援),讓 reviewer 一眼看到「這次到底改了什麼」,而不用自己去資料庫裡對帳號清單。
+`dcl` prints **this run's account/permission before/after diff** (MariaDB and MongoDB both supported) so a reviewer sees exactly what changed at a glance, instead of having to diff the account list against the database themselves.
 
-之後要調整權限或新增帳號,直接編輯 SQL/JS 檔案、重跑 `dcl` 即可 —— checksum 變了才會重新執行,沒變的檔案會被跳過。
+It also writes a **run notification email** (`reports/notification.html` by default) with one row per account event — new account, password rotated, no change, account removed, permissions updated. A generated or rotated password appears **only** in that email, in plaintext, as a one-time temporary credential — never in the console, never written back to the migration file. See [docs/DCL-PASSWORD.md](docs/DCL-PASSWORD.md) for the full mechanism and the Kubernetes retrieval pattern.
 
-### DCL 指令速查
+To change permissions or add accounts later, just edit the SQL/JS file and rerun `dcl` — it only re-runs when the checksum changes; unchanged files are skipped.
 
-| 指令 | 說明 |
-|------|------|
-| `dcl` | 執行 DCL migrations,結束後印帳號/權限 diff |
-| `dcl --dry-run` | 預覽要執行的 DCL,不實際跑 |
-| `dcl:status` | 查看各 DCL 檔案的套用狀態與 checksum 是否吻合 |
-| `dcl:verify` | 驗證 DCL 冪等性(跑兩次比對狀態,不留下實際變更) |
-| `create-dcl <name>` | 建立新 DCL 檔案 |
+### DCL command reference
 
-密碼怎麼處理?看 [docs/DCL-PASSWORD.md](docs/DCL-PASSWORD.md) —— 簡單說,遷移檔裡的 `CHANGE_ME_ON_FIRST_LOGIN` 佔位符會在執行當下被換成獨立產生的高強度密碼,原始檔案不會被改動,密碼寫到 `/tmp/secret`(這是容器內路徑;如果你在原生 Windows 直接跑 CLI 而不透過 Docker,這條路徑不存在,務必透過 `docker compose run` 執行 DCL)。
+| Command | Description |
+|---|---|
+| `dcl` | Run DCL migrations, then print the account/permission diff and write the notification email |
+| `dcl --dry-run` | Preview what DCL would run, without running it |
+| `dcl:status` | Show each DCL file's applied status and whether its checksum matches |
+| `dcl:verify` | Verify DCL idempotency (runs twice, compares state, leaves no lasting change) |
+| `create-dcl <name>` | Create a new DCL file |
 
 ---
 
-## 我想... 對多個資料庫實例做同樣的事(Multi-Instance)
+## I want to... do the same thing across multiple database instances (multi-instance)
 
-如果 config.js 用 `instances: [...]` 定義了多個實例(例如 primary/secondary),每個單實例指令都有對應的 `*-all` 版本:
+If config.js defines multiple instances via `instances: [...]` (e.g. primary/secondary), every single-instance command has a `*-all` counterpart:
 
 ```bash
 docker compose run --rm migrate status-all      -c /app/test-fixtures/mariadb/multi-instance/ddl/config.js
@@ -147,31 +169,33 @@ docker compose run --rm migrate dcl:verify-all  -c /app/test-fixtures/mariadb/mu
 docker compose run --rm migrate test-instances -o /app/reports -c /app/test-fixtures/mariadb/multi-instance/ddl/config.js
 ```
 
-設定檔寫法與完整說明見 [docs/MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md)。
+`dcl-all` writes one notification email per instance (`reports/notification-<instance-name>.html`).
+
+Config file format and full details: [docs/MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md).
 
 ---
 
-## 我想... 驗證整個專案目錄(不只單一 config)
+## I want to... validate an entire project directory (not just one config)
 
 ```bash
-# 驗證一個專案下所有 DDL + DCL migration
+# Validate all DDL + DCL migrations under a project
 docker compose run --rm migrate validate-all /app/test-fixtures/mariadb/production-server
 
-# 只驗證 DDL 或只驗證 DCL
+# DDL only, or DCL only
 docker compose run --rm migrate validate-all /app/test-fixtures/mariadb/production-server --ddl-only
 docker compose run --rm migrate validate-all /app/test-fixtures/mariadb/production-server --dcl-only
 ```
 
-驗證擋到危險/被禁止的操作時,有兩種放行方式(擇一):
+When validation blocks a dangerous/forbidden operation, there are two ways to allow it (pick one):
 
 ```bash
-# CLI 參數放行(整次執行有效)
+# Allow via CLI flag (applies to this run only)
 docker compose run --rm migrate validate --allow-dangerous -c <config>
 docker compose run --rm migrate validate --allow TRUNCATE_TABLE,DROP_INDEX -c <config>
 ```
 
 ```sql
--- 檔案內標註放行(推薦 —— 核准紀錄會留在 code review 裡)
+-- Allow via in-file annotation (recommended — the approval stays in code review history)
 -- @allow: DROP_COLUMN
 -- Approved: deprecated since v2.0 (ticket #123)
 
@@ -179,57 +203,57 @@ docker compose run --rm migrate validate --allow TRUNCATE_TABLE,DROP_INDEX -c <c
 ALTER TABLE users DROP COLUMN old_field;
 ```
 
-完整驗證規則見 [docs/VALIDATION-RULES-REFERENCE.md](docs/VALIDATION-RULES-REFERENCE.md)。
+Full validation rules: [docs/VALIDATION-RULES-REFERENCE.md](docs/VALIDATION-RULES-REFERENCE.md).
 
 ---
 
-## 我想... 跑完整測試流程
+## I want to... run the full test suite
 
 ```bash
-# 單一 config:Up → Down → Up 來回測試
+# Single config: Up → Down → Up round trip
 docker compose run --rm migrate test -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 多實例:對每個實例都跑一次
+# Multi-instance: run once per instance
 docker compose run --rm migrate test-instances -o /app/reports -c /app/test-fixtures/mariadb/multi-instance/ddl/config.js
 
-# 整個專案(甚至整個 test-fixtures/):validate + Up-Down-Up / 冪等性,一次跑完並產出報表
+# Whole project (or all of test-fixtures/): validate + Up-Down-Up / idempotency, one run, one report
 docker compose run --rm migrate test-all -o /app/reports --pattern "test-fixtures/**/config.js"
 ```
 
-或者本地端一鍵跑(等同 CI 用的 e2e 流程,會自動建 image + 啟動 DB + 跑 `test-all`):
+Or run it all locally in one command (same e2e flow CI runs — builds the image, starts the DBs, runs `test-all`):
 
 ```bash
 npm run docker:test
 ```
 
-手動分步驟測試流程範例:
+Manual step-by-step test flow:
 
 ```bash
-# 1. 啟動 DB
+# 1. Start the DB
 docker compose up -d mariadb
 
-# 2. DCL — 建立帳號
+# 2. DCL — create accounts
 docker compose run --rm migrate dcl:verify -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 docker compose run --rm migrate dcl -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 
-# 3. DDL — 驗證
+# 3. DDL — validate
 docker compose run --rm migrate validate -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 4. DDL — Up(帶 sanity check)
+# 4. DDL — up (with sanity check)
 docker compose run --rm migrate up --sanity-check -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 5. DDL — Down
+# 5. DDL — down
 docker compose run --rm migrate down -n 1 -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
-# 6. DDL — 再 Up 一次
+# 6. DDL — up again
 docker compose run --rm migrate up -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
 ---
 
-## 🍃 MongoDB 操作指南
+## 🍃 MongoDB guide
 
-### DCL(帳號權限管理)
+### DCL (account & permission management)
 
 ```bash
 docker compose run --rm migrate create-dcl my_users -c /app/test-fixtures/mongodb/my-project/dcl/config.js
@@ -237,7 +261,7 @@ docker compose run --rm migrate dcl:verify -c /app/test-fixtures/mongodb/my-proj
 docker compose run --rm migrate dcl -c /app/test-fixtures/mongodb/my-project/dcl/config.js
 ```
 
-### DDL(結構變更)
+### DDL (schema changes)
 
 ```bash
 docker compose run --rm migrate create create-users -c /app/test-fixtures/mongodb/my-project/ddl/config.js
@@ -245,48 +269,47 @@ docker compose run --rm migrate up -c /app/test-fixtures/mongodb/my-project/ddl/
 docker compose run --rm migrate test -c /app/test-fixtures/mongodb/my-project/ddl/config.js
 ```
 
-### MongoDB 內建角色參考
+### MongoDB built-in role reference
 
-| 角色 | 權限 |
-|------|------|
-| `read` | 唯讀(find, listCollections) |
-| `readWrite` | 讀寫(CRUD 操作) |
-| `dbAdmin` | 資料庫管理(索引、統計、驗證) |
-| `dbOwner` | 完整權限(readWrite + dbAdmin + userAdmin) |
-| `userAdmin` | 使用者管理 |
+| Role | Permissions |
+|---|---|
+| `read` | Read-only (find, listCollections) |
+| `readWrite` | Read/write (CRUD operations) |
+| `dbAdmin` | Database administration (indexes, stats, validation) |
+| `dbOwner` | Full access (readWrite + dbAdmin + userAdmin) |
+| `userAdmin` | User management |
 
 ---
 
-## 我想... 部署到 Kubernetes
+## I want to... deploy to Kubernetes
 
-[`k8s/`](k8s/) 目錄有一組範例 manifest,把 `sync` 包成一次性 Job 執行:
+[`k8s/`](k8s/) has example manifests that package `sync` as a one-shot Job:
 
-- 憑證來自 Secret(**不要**放資料庫真正的 superuser,見 `k8s/README.md` 說明)
-- Migration 檔案透過內容雜湊過的 ConfigMap 送進去(而不是烤進 image 裡)
-- `backoffLimit: 0` —— DDL 遷移半套用失敗時,應該讓人介入處理,而不是被排程器安靜地自動重跑
+- Credentials come from a Secret (**not** the database's real superuser — see `k8s/README.md`)
+- Migration files are delivered via a content-hashed ConfigMap (not baked into the image)
+- `backoffLimit: 0` — a half-applied DDL migration should stop and wait for a human, not be silently retried by the scheduler
 
 ```bash
 kubectl wait --for=condition=complete job/db-migrate-shop-sync-<hash> --timeout=900s -n <namespace>
 kubectl logs job/db-migrate-shop-sync-<hash> -n <namespace>
 ```
 
-正式對 production 跑之前,先過一遍 [docs/DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md) 第 5 節的檢查清單。完整工作流程見 [`k8s/README.md`](k8s/README.md)。
+Fetching the notification email out of the Job pod — `kubectl exec <pod> -n <namespace> -- cat /app/reports/notification.html` — has to happen while the container is still alive (right after the command that wrote it), not after the Job completes; see [docs/DCL-PASSWORD.md](docs/DCL-PASSWORD.md) for why `ttlSecondsAfterFinished` doesn't give you a usable window for this.
+
+Run through the checklist in [docs/DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md) section 5 before pointing this at production. Full workflow: [`k8s/README.md`](k8s/README.md).
 
 ---
 
-## 疑難排解
+## Troubleshooting
 
-**Windows 上 Docker Desktop 起不來 / `docker ps` 連不到引擎**
-Docker Desktop 在 Windows Home 上依賴 WSL2 才能跑它的 Linux 引擎。以系統管理員身分執行 `wsl --install`,重開機,再啟動 Docker Desktop。
+**Docker Desktop won't start on Windows / `docker ps` can't reach the engine**
+Docker Desktop on Windows Home depends on WSL2 for its Linux engine. Run `wsl --install` as Administrator, reboot, then start Docker Desktop.
 
-**跑 DCL 時看到 `⚠️ Lock wait timeout (attempt N/3), retrying...`**
-這是正常的保護機制,不是錯誤 —— 代表這個 `ALTER TABLE` 卡在別的長交易的 metadata lock 後面,guard 正在照設定重試,重試次數用完才會真的失敗。細節見 [docs/LOCK-GUARD.md](docs/LOCK-GUARD.md)。
-
-**在原生 Windows 直接跑 `node src/cli.js dcl` 出現 `ENOENT ... open 'C:\tmp\secret'`**
-DCL 產生的密碼固定寫到 `/tmp/secret`,這是為 Linux/容器部署設計的路徑約定(見 [docs/DCL-PASSWORD.md](docs/DCL-PASSWORD.md))。在原生 Windows 上這個路徑不存在。解法:一律透過 `docker compose run --rm migrate dcl ...` 執行 DCL 相關指令,而不是在 Windows 主機上直接跑。
+**Seeing `⚠️ Lock wait timeout (attempt N/3), retrying...` while running DCL**
+That's the protection mechanism working as intended, not an error — it means this `ALTER TABLE` is queued behind another long transaction's metadata lock, and the guard is retrying per its configuration; it only actually fails once retries are exhausted. Details in [docs/LOCK-GUARD.md](docs/LOCK-GUARD.md).
 
 ---
 
-## 📖 完整文件
+## 📖 Full documentation
 
-指令選項、設定檔格式、驗證規則等完整參考請看 [README.md](README.md),或直接查閱 [docs/](./docs/) 目錄下的細節文件,例如 [docs/DOCKER-USAGE.md](./docs/DOCKER-USAGE.md)。
+For complete CLI options, config file formats, and validation rules, see [README.md](README.md). For a deeper Q&A walkthrough of scenarios like removing an account or onboarding an existing database — with flowcharts of what actually happens internally — see [docs/E2E-SCENARIOS.md](docs/E2E-SCENARIOS.md). More detailed guides under [docs/](./docs/), e.g. [docs/CLI-USAGE-GUIDE.md](./docs/CLI-USAGE-GUIDE.md).

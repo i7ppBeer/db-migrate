@@ -4,9 +4,9 @@
 --
 -- PURPOSE: ALTER USER (not CREATE USER IF NOT EXISTS) so MariaDB does NOT emit
 --          Note 1973 → SHOW WARNINGS stays empty → alreadyExists = false →
---          runner ALWAYS writes new credentials to /tmp/secret.
+--          runner ALWAYS records a password_changed credential event.
 -- This models a "forced rotation" pattern: every time this file is bumped,
--- a fresh password lands in /tmp/secret.
+-- a fresh password lands in the run's notification email.
 
 ALTER USER 'readonly_svc'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';
 ALTER USER 'readwrite_svc'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';

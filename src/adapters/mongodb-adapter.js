@@ -9,6 +9,7 @@ import migrateMongo from 'migrate-mongo';
 import { MongoClient } from 'mongodb';
 import fs from 'fs/promises';
 import path from 'path';
+import crypto from 'crypto';
 
 export class MongoDBAdapter extends BaseAdapter {
   constructor(config) {
@@ -186,17 +187,43 @@ export class MongoDBAdapter extends BaseAdapter {
     try {
       // Set migrate-mongo config
       // migrate-mongo expects 'changelogCollectionName', map from our 'changelogCollection'
+      const existingOptions = this.config.mongodb?.options || {};
       const migrateMongoConfig = {
         ...this.config,
+        mongodb: {
+          ...this.config.mongodb,
+          options: {
+            // Gate R0: fail fast on an unreachable host instead of the
+            // driver's own default server-selection timeout (30s). User-
+            // supplied options (if any) win over these defaults.
+            connectTimeoutMS: 10000,
+            serverSelectionTimeoutMS: 10000,
+            ...existingOptions
+          }
+        },
         changelogCollectionName: this.config.changelogCollection || this.config.changelogCollectionName || 'changelog'
       };
       migrateMongo.config.set(migrateMongoConfig);
-      
+
       // Connect using migrate-mongo's method
       const { db, client } = await migrateMongo.database.connect();
       this.db = db;
       this.client = client;
-      
+
+      // Gate R0: identity check — confirm the connection actually points at
+      // the database config says it should, before anything else touches it.
+      // db.databaseName is reported by the driver itself, no query needed.
+      const expectedDbName = this.config.mongodb?.databaseName;
+      if (expectedDbName && db.databaseName !== expectedDbName) {
+        await client.close();
+        this.db = null;
+        this.client = null;
+        throw new Error(
+          `Connected to the wrong database — expected '${expectedDbName}' but the connection reports '${db.databaseName}'. ` +
+          `This usually means an environment variable resolved to the wrong host/database. Refusing to proceed.`
+        );
+      }
+
       return { db, client };
     } catch (error) {
       throw new Error(`MongoDB connection failed: ${error.message}`);
@@ -211,6 +238,56 @@ export class MongoDBAdapter extends BaseAdapter {
     }
   }
 
+  /**
+   * SHA-256 checksum of a migration file's raw content — same algorithm
+   * RepeatableRunner uses for DCL, applied here to DDL so an already-applied
+   * migration file being edited afterward is detectable instead of silently
+   * invisible (see docs/DDL-PRODUCTION-SAFETY.md).
+   */
+  calculateChecksum(content) {
+    return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+  }
+
+  /**
+   * Explicitly accept a migration file's current on-disk content as the new
+   * checksum baseline — used by `--allow-checksum-drift` after a human has
+   * confirmed an already-applied file's post-hoc edit was intentional. Not
+   * used for the automatic first-time backfill in status() (that path has
+   * no prior checksum to have drifted from; this one overwrites one that did).
+   */
+  async repairChecksum(fileName) {
+    const content = await fs.readFile(path.join(this.config.migrationsDir, fileName), 'utf-8');
+    const checksum = this.calculateChecksum(content);
+    await this.db.collection(this.changelogCollection).updateOne(
+      { fileName },
+      { $set: { checksum } }
+    );
+    return checksum;
+  }
+
+  /**
+   * Set the checksum field on already-inserted changelog documents — used
+   * after migrate-mongo's own migrateMongo.up() writes the changelog entry
+   * itself (its insert has no checksum field), so status()'s comparison
+   * still has something to compare against. Best-effort: a failure here
+   * just leaves that entry unchecksummed until the next status() call
+   * adopts it as a fresh baseline, not a reason to fail the whole run.
+   * @param {string[]} fileNames - migrate-mongo's own applied-filename list
+   */
+  async backfillChecksums(fileNames) {
+    for (const fileName of fileNames || []) {
+      try {
+        const content = await fs.readFile(path.join(this.config.migrationsDir, fileName), 'utf-8');
+        await this.db.collection(this.changelogCollection).updateOne(
+          { fileName },
+          { $set: { checksum: this.calculateChecksum(content) } }
+        );
+      } catch {
+        // best-effort, see doc comment above
+      }
+    }
+  }
+
   async status() {
     try {
       // DCL/repeatable mode uses checksumCollection, not the DDL changelog collection.
@@ -220,17 +297,89 @@ export class MongoDBAdapter extends BaseAdapter {
       }
 
       const statusResult = await migrateMongo.status(this.db);
-      
-      const pending = statusResult.filter(m => m.appliedAt === 'PENDING');
-      const applied = statusResult.filter(m => m.appliedAt !== 'PENDING');
-      
+
+      const pendingList = statusResult.filter(m => m.appliedAt === 'PENDING');
+      const appliedList = statusResult.filter(m => m.appliedAt !== 'PENDING');
+
+      // migrate-mongo's own status() doesn't know about checksums — read the
+      // changelog collection directly (same collection, same documents it
+      // just wrote) to get them, keyed by fileName.
+      const checksumByFile = new Map();
+      if (appliedList.length > 0) {
+        const checksumDocs = await this.db.collection(this.changelogCollection)
+          .find({ fileName: { $in: appliedList.map(m => m.fileName) } })
+          .toArray();
+        for (const d of checksumDocs) checksumByFile.set(d.fileName, d.checksum ?? null);
+      }
+
+      const checksumMismatches = [];
+      const checksumBaselined = [];
+
+      for (const m of appliedList) {
+        const storedChecksum = checksumByFile.get(m.fileName);
+        let currentChecksum = null;
+        try {
+          const content = await fs.readFile(path.join(this.config.migrationsDir, m.fileName), 'utf-8');
+          currentChecksum = this.calculateChecksum(content);
+        } catch {
+          // File unreadable (permissions, race) — skip the checksum check
+          // for this entry rather than fail status() entirely.
+        }
+
+        if (currentChecksum) {
+          if (storedChecksum == null) {
+            // Doc predates checksum tracking (upgraded from an older version
+            // of this tool, or written by migrate-mongo's own up() path which
+            // doesn't set this field). Adopt current content as the trusted
+            // baseline going forward.
+            await this.db.collection(this.changelogCollection).updateOne(
+              { fileName: m.fileName },
+              { $set: { checksum: currentChecksum } }
+            );
+            checksumBaselined.push(m.fileName);
+          } else if (storedChecksum !== currentChecksum) {
+            checksumMismatches.push({ fileName: m.fileName, appliedAt: m.appliedAt });
+          }
+        }
+      }
+
+      // Gate R1 (remaining checks) — migrate-mongo's own status() only ever
+      // lists migrations backed by a file currently on disk, so it can't
+      // surface a changelog doc whose file was deleted/renamed afterward.
+      // Query the raw collection directly to find those.
+      const migrationFiles = await this.getMigrationFiles();
+      const fileNameSet = new Set(migrationFiles);
+      const allChangelogDocs = await this.db.collection(this.changelogCollection).find({}).toArray();
+      const orphanedChangelogEntries = allChangelogDocs
+        .filter(d => !fileNameSet.has(d.fileName))
+        .map(d => ({ id: d.fileName, appliedAt: d.appliedAt }));
+
+      // Applied migrations should form a contiguous prefix of the sorted
+      // file list — once a pending file is seen, any LATER applied file (in
+      // sort order) means migrations ran out of order or a file was renamed
+      // after being applied.
+      const appliedFileNameSet = new Set(appliedList.map(m => m.fileName));
+      const outOfOrderApplied = [];
+      let seenPending = false;
+      for (const file of migrationFiles) {
+        if (appliedFileNameSet.has(file)) {
+          if (seenPending) outOfOrderApplied.push(file);
+        } else {
+          seenPending = true;
+        }
+      }
+
       return {
-        pending: pending.map(m => m.fileName),
-        applied: applied.map(m => ({
+        pending: pendingList.map(m => m.fileName),
+        applied: appliedList.map(m => ({
           fileName: m.fileName,
           appliedAt: m.appliedAt
         })),
-        total: statusResult.length
+        total: statusResult.length,
+        checksumMismatches,
+        checksumBaselined,
+        orphanedChangelogEntries,
+        outOfOrderApplied
       };
     } catch (error) {
       throw new Error(`Failed to get status: ${error.message}`);
@@ -267,10 +416,15 @@ export class MongoDBAdapter extends BaseAdapter {
           if (existing) {
             continue; // Already marked
           }
-          
+
+          // Baseline establishes the trust baseline itself — store the
+          // current file's checksum so future edits to it are still detected,
+          // even though up() was never actually executed here.
+          const content = await fs.readFile(path.join(this.config.migrationsDir, fileName), 'utf-8');
           await this.db.collection(this.changelogCollection).insertOne({
             fileName,
-            appliedAt: new Date()
+            appliedAt: new Date(),
+            checksum: this.calculateChecksum(content)
           });
           result.marked.push(fileName);
         } catch (error) {
@@ -396,15 +550,17 @@ export class MongoDBAdapter extends BaseAdapter {
       for (const fileName of pending) {
         try {
           const filePath = path.join(this.config.migrationsDir, fileName);
+          const content = await fs.readFile(filePath, 'utf-8');
           const migrationModule = await import(`file://${filePath}?t=${Date.now()}`);
-          
+
           // Run the up function
           await migrationModule.up(this.db, this.client);
-          
+
           // Record in changelog
           await this.db.collection(this.changelogCollection).insertOne({
             fileName,
-            appliedAt: new Date()
+            appliedAt: new Date(),
+            checksum: this.calculateChecksum(content)
           });
           
           result.applied.push(fileName);
@@ -476,10 +632,13 @@ export class MongoDBAdapter extends BaseAdapter {
         // Run with sanity check if preCheck or postCheck are defined
         if (migrationModule.preCheck || migrationModule.postCheck) {
           console.log(`\n🔍 Running ${migration.fileName} with sanity checks...`);
-          
+
           const sanityResult = await checker.runWithSanityCheck({
             up: async () => {
-              await migrateMongo.up(this.db, this.client);
+              const migrated = await migrateMongo.up(this.db, this.client);
+              // migrate-mongo's own insert doesn't set checksum — backfill it
+              // on the document(s) it just wrote, same field status() reads.
+              await this.backfillChecksums(migrated);
             },
             down: async () => {
               await migrateMongo.down(this.db, this.client);
@@ -507,6 +666,7 @@ export class MongoDBAdapter extends BaseAdapter {
           const migrated = await migrateMongo.up(this.db, this.client);
           if (migrated.length > 0) {
             result.applied.push(...migrated);
+            await this.backfillChecksums(migrated);
           }
           break; // migrate-mongo.up() processes all pending at once
         }
@@ -930,29 +1090,66 @@ export async function down(db, client) {
 
     // === 2. Extract created collections in up() ===
     const createdCollections = this.extractCreatedCollections(upBody);
+    const createdCollectionsInDown = this.extractCreatedCollections(downBody);
     const droppedCollectionsInDown = this.extractDroppedCollections(downBody);
     const droppedCollectionsInUp = this.extractDroppedCollections(upBody);
     
     // === 3. DDL only: Check for orphan drops in down() (R__ repeatable files have no up/down) ===
+    // Same false-positive concern as MariaDB's equivalent check: a collection
+    // this migration didn't create being dropped is a completely normal
+    // pattern (created by an earlier migration, removed by a later one) that
+    // this single-file check can't distinguish from a real mistake. Allow it
+    // the same way a dangerous op is allowed: --allow-dangerous, or the
+    // specific code via --allow/@allow.
     if (this.config.mode !== 'repeatable') {
+      const isOrphanDropAllowed = (code) =>
+        options.allowDangerous || (options.allowedCodes && options.allowedCodes.includes(code));
+
       for (const dropped of droppedCollectionsInDown) {
         if (!createdCollections.includes(dropped)) {
-          errors.push({
-            type: 'orphan-drop',
-            operation: 'drop',
-            message: `Orphan drop: down() drops '${dropped}' but up() doesn't create it`
-          });
+          if (isOrphanDropAllowed('ORPHAN_DROP_DOWN')) {
+            warnings.push({
+              type: 'orphan-drop-allowed',
+              code: 'ORPHAN_DROP_DOWN',
+              message: `⚠️ [ALLOWED] Orphan drop: down() drops '${dropped}' but up() doesn't create it — assumed created by an earlier migration`
+            });
+          } else {
+            errors.push({
+              type: 'orphan-drop',
+              code: 'ORPHAN_DROP_DOWN',
+              operation: 'drop',
+              message: `Orphan drop: down() drops '${dropped}' but up() doesn't create it`
+            });
+          }
         }
       }
 
       // === 3b. Check for orphan drops in up() ===
       for (const dropped of droppedCollectionsInUp) {
         if (!createdCollections.includes(dropped)) {
-          errors.push({
-            type: 'orphan-drop-in-up',
-            operation: 'drop',
-            message: `Orphan drop in up(): '${dropped}' is dropped but not created in this migration`
-          });
+          // Smart allowance: if down() recreates exactly what up() dropped, this
+          // is a genuine, self-contained reverse migration for a collection an
+          // earlier file created — no flag needed.
+          if (createdCollectionsInDown.includes(dropped)) {
+            warnings.push({
+              type: 'orphan-drop-in-up-allowed',
+              code: 'ORPHAN_DROP_UP',
+              message: `✅ [ALLOWED] Orphan drop in up(): '${dropped}' is dropped but not created in this migration — allowed because down() recreates it`
+            });
+          } else if (isOrphanDropAllowed('ORPHAN_DROP_UP')) {
+            warnings.push({
+              type: 'orphan-drop-in-up-allowed',
+              code: 'ORPHAN_DROP_UP',
+              message: `⚠️ [ALLOWED] Orphan drop in up(): '${dropped}' is dropped but not created in this migration — assumed created by an earlier migration`
+            });
+          } else {
+            errors.push({
+              type: 'orphan-drop-in-up',
+              code: 'ORPHAN_DROP_UP',
+              operation: 'drop',
+              message: `Orphan drop in up(): '${dropped}' is dropped but not created in this migration`
+            });
+          }
         }
       }
     }

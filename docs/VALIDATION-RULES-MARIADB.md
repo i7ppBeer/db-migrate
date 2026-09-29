@@ -15,9 +15,13 @@ from the code; see [Superseded doc](#superseded-doc) at the bottom).
    **escalate** permission (add allowances) — they can never downgrade a CLI flag.
 2. **SQL syntax check** (`node-sql-parser`, MariaDB dialect) — Up section, Down section,
    and any Sanity `PreCheck`/`PostCheck` SQL, each checked independently.
-3. **Structural checks** — orphan drops, FK reference integrity. **These are `errors`,
-   not `forbiddenOps`/`dangerousOps` — they cannot be bypassed by `--allow-forbidden`,
-   `--allow-dangerous`, or `--allow`.** See [Unbypassable structural errors](#unbypassable-structural-errors).
+3. **Structural checks** — orphan drops, FK reference integrity. FK integrity and SQL
+   syntax errors are `errors` that cannot be bypassed by any flag. Orphan-drop
+   (`ORPHAN_DROP_DOWN`/`ORPHAN_DROP_UP`) is now smarter: it auto-allows when a
+   dropped table is recreated in the migration's other section (a genuine
+   self-contained reverse migration), and otherwise **can** be bypassed via
+   `--allow-dangerous` or `--allow CODE` — see
+   [Structural errors](#structural-errors).
 4. **Forbidden operations** — blocks unless `--allow-forbidden` / matching `--allow CODE`.
 5. **Dangerous operations** — blocks unless `--allow-dangerous` / matching `--allow CODE`.
 6. **`INSERT...SELECT`** — special-cased outside the rule tables (see below).
@@ -133,20 +137,17 @@ subqueries inside it don't trigger a second match):
 
 ---
 
-## Unbypassable structural errors
+## Structural errors
 
-These land in `errors`, not `forbiddenOps`/`dangerousOps`. **No CLI flag or annotation
-bypasses them** — see [discussion item #2](#discussion-items) for why this is worth
-a second look.
-
-| Code | Trigger |
-|---|---|
-| `SQL_SYNTAX_ERROR` / `SQL_SYNTAX_ERROR_DOWN` | `node-sql-parser` rejects the Up/Down SQL |
-| `SANITY_SQL_SYNTAX_ERROR` | Sanity `PreCheck`/`PostCheck` SQL fails to parse |
-| `ORPHAN_DROP_DOWN` | `Down` drops a table `Up` never created |
-| `ORPHAN_DROP_UP` | `Up` drops a table not created earlier **in the same file** |
-| `FK_REFERENCES_DROPPED_TABLE` | A FK in `Up` references a table dropped in the same `Up` |
-| `FK_UNRESOLVED_REFERENCE` | (cross-file, `validate` only) FK references a table never created by any prior migration file, in filename order |
+| Code | Trigger | Bypassable? |
+|---|---|---|
+| `SQL_SYNTAX_ERROR` / `SQL_SYNTAX_ERROR_DOWN` | `node-sql-parser` rejects the Up/Down SQL | No |
+| `SANITY_SQL_SYNTAX_ERROR` | Sanity `PreCheck`/`PostCheck` SQL fails to parse | No |
+| `MISSING_DOWN` | `Down` is empty/missing and `Up` contains a real operation (`CREATE`/`ALTER`/`DROP TABLE`, `CREATE INDEX`, `INSERT INTO`) — see [Warnings](#warnings--never-block) for the non-blocking case where `Up` has no real operations. Mirrors the MongoDB adapter's equivalent check — both now block equally; this used to be warning-only here (resolved [discussion item #1](#discussion-items)). | No |
+| `ORPHAN_DROP_DOWN` | `Down` drops a table `Up` never created | **Yes** — `--allow-dangerous` / `--allow ORPHAN_DROP_DOWN` |
+| `ORPHAN_DROP_UP` | `Up` drops a table not created earlier in the same file. **Auto-allowed with no flag** if `Down` recreates that same table (a self-contained reverse migration for a table an earlier file created) — resolves [Bug B](#bug-b----orphan_drop_up-has-no-idea-down-exists-fixed) below. Otherwise bypassable the same way as `ORPHAN_DROP_DOWN`. | **Yes**, or auto-allowed |
+| `FK_REFERENCES_DROPPED_TABLE` | A FK in `Up` references a table dropped in the same `Up` | No |
+| `FK_UNRESOLVED_REFERENCE` | (cross-file, `validate` only) FK references a table never created by any prior migration file, in filename order | No |
 
 **SQL syntax check is silently skipped** (with a `⚠️ syntax-check-skipped` warning,
 not an error) when the SQL contains:

@@ -3,11 +3,12 @@
  * 測試 MongoDB 遷移適配器的 Sanity Check 功能
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MongoDBAdapter } from '../src/adapters/mongodb-adapter.js';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import crypto from 'crypto';
 
 // Mock migrate-mongo
 vi.mock('migrate-mongo', () => ({
@@ -545,9 +546,14 @@ describe('MongoDBAdapter', () => {
       const { default: migrateMongo } = await import('migrate-mongo');
       migrateMongo.status.mockResolvedValueOnce([]);
 
-      const ddlAdapter = new MongoDBAdapter({ ...mockConfig });
-      ddlAdapter.db = {};
+      // status() now also reads migrationsDir directly (Gate R1's orphan/
+      // order checks) and queries the changelog collection for orphan
+      // detection — needs a real, guaranteed-empty dir and a minimal db mock.
+      const emptyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'db-migrate-empty-'));
+      const ddlAdapter = new MongoDBAdapter({ ...mockConfig, migrationsDir: emptyDir });
+      ddlAdapter.db = { collection: vi.fn(() => ({ find: vi.fn(() => ({ toArray: vi.fn().mockResolvedValue([]) })) })) };
       const result = await ddlAdapter.status();
+      await fs.rm(emptyDir, { recursive: true, force: true });
 
       expect(migrateMongo.status).toHaveBeenCalled();
       expect(result.pending).toEqual([]);
@@ -564,6 +570,234 @@ describe('MongoDBAdapter', () => {
       expect(result.pending).toEqual([]);
       expect(result.applied).toEqual([]);
       expect(result.total).toBe(0);
+    });
+  });
+
+  describe('status() — DDL checksum verification', () => {
+    let tmpDir;
+    let ddlAdapter;
+    let migrateMongoMock;
+    const sha256 = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
+
+    beforeEach(async () => {
+      tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'db-migrate-checksum-'));
+      ddlAdapter = new MongoDBAdapter({ ...mockConfig, migrationsDir: tmpDir });
+      migrateMongoMock = (await import('migrate-mongo')).default;
+    });
+
+    afterEach(async () => {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    // Minimal `db` mock: find()/toArray() returns the given checksum docs,
+    // updateOne() is spy-able for the backfill/mismatch-repair assertions.
+    function mockDb({ docs = [], updateSpy = vi.fn().mockResolvedValue({}) } = {}) {
+      return {
+        collection: vi.fn(() => ({
+          find: vi.fn(() => ({ toArray: vi.fn().mockResolvedValue(docs) })),
+          updateOne: updateSpy
+        }))
+      };
+    }
+
+    it('reports no mismatch when the stored checksum matches the current file content', async () => {
+      const content = `export async function up(db, client) { await db.createCollection('foo'); }\nexport async function down(db, client) { await db.collection('foo').drop(); }\n`;
+      await fs.writeFile(path.join(tmpDir, '20260101000000-create-foo.js'), content, 'utf-8');
+      migrateMongoMock.status.mockResolvedValueOnce([
+        { fileName: '20260101000000-create-foo.js', appliedAt: new Date() }
+      ]);
+      ddlAdapter.db = mockDb({ docs: [{ fileName: '20260101000000-create-foo.js', checksum: sha256(content) }] });
+
+      const status = await ddlAdapter.status();
+
+      expect(status.checksumMismatches).toEqual([]);
+      expect(status.checksumBaselined).toEqual([]);
+    });
+
+    it('detects a checksum mismatch when an applied migration file was edited afterward', async () => {
+      const editedContent = `export async function up(db, client) { await db.createCollection('foo'); await db.collection('foo').createIndex({ x: 1 }); }\nexport async function down(db, client) { await db.collection('foo').drop(); }\n`;
+      const originalChecksum = sha256(`export async function up(db, client) { await db.createCollection('foo'); }\n`);
+      await fs.writeFile(path.join(tmpDir, '20260101000000-create-foo.js'), editedContent, 'utf-8');
+      migrateMongoMock.status.mockResolvedValueOnce([
+        { fileName: '20260101000000-create-foo.js', appliedAt: new Date() }
+      ]);
+      ddlAdapter.db = mockDb({ docs: [{ fileName: '20260101000000-create-foo.js', checksum: originalChecksum }] });
+
+      const status = await ddlAdapter.status();
+
+      expect(status.checksumMismatches).toHaveLength(1);
+      expect(status.checksumMismatches[0].fileName).toBe('20260101000000-create-foo.js');
+    });
+
+    it('adopts the current file content as the baseline when no checksum is stored yet, without flagging a mismatch', async () => {
+      const content = `export async function up(db, client) { await db.createCollection('foo'); }\n`;
+      await fs.writeFile(path.join(tmpDir, '20260101000000-create-foo.js'), content, 'utf-8');
+      migrateMongoMock.status.mockResolvedValueOnce([
+        { fileName: '20260101000000-create-foo.js', appliedAt: new Date() }
+      ]);
+      const updateSpy = vi.fn().mockResolvedValue({});
+      ddlAdapter.db = mockDb({ docs: [{ fileName: '20260101000000-create-foo.js' /* no checksum field */ }], updateSpy });
+
+      const status = await ddlAdapter.status();
+
+      expect(status.checksumMismatches).toEqual([]);
+      expect(status.checksumBaselined).toEqual(['20260101000000-create-foo.js']);
+      expect(updateSpy).toHaveBeenCalledWith(
+        { fileName: '20260101000000-create-foo.js' },
+        { $set: { checksum: sha256(content) } }
+      );
+    });
+  });
+
+  describe('status() — Gate R1 orphaned-entry and out-of-order checks', () => {
+    let tmpDir;
+    let ddlAdapter;
+    let migrateMongoMock;
+
+    beforeEach(async () => {
+      tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'db-migrate-r1-'));
+      ddlAdapter = new MongoDBAdapter({ ...mockConfig, migrationsDir: tmpDir });
+      migrateMongoMock = (await import('migrate-mongo')).default;
+    });
+
+    afterEach(async () => {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    function mockDb(allDocs) {
+      return {
+        collection: vi.fn(() => ({
+          find: vi.fn(() => ({ toArray: vi.fn().mockResolvedValue(allDocs) }))
+        }))
+      };
+    }
+
+    it('flags a changelog doc whose file no longer exists on disk as orphaned', async () => {
+      // No files written to tmpDir — migrate-mongo's own status() would never
+      // surface this (it only lists migrations backed by a file), so it
+      // reports nothing pending/applied even though the changelog doc exists.
+      migrateMongoMock.status.mockResolvedValueOnce([]);
+      ddlAdapter.db = mockDb([{ fileName: '20260101000000-deleted-file.js', appliedAt: new Date() }]);
+
+      const status = await ddlAdapter.status();
+
+      expect(status.orphanedChangelogEntries).toEqual([
+        { id: '20260101000000-deleted-file.js', appliedAt: expect.any(Date) }
+      ]);
+    });
+
+    it('does not flag a doc as orphaned when its file is present', async () => {
+      await fs.writeFile(path.join(tmpDir, '20260101000000-create-foo.js'), 'export async function up(db) {}\n', 'utf-8');
+      migrateMongoMock.status.mockResolvedValueOnce([
+        { fileName: '20260101000000-create-foo.js', appliedAt: new Date() }
+      ]);
+      ddlAdapter.db = mockDb([{ fileName: '20260101000000-create-foo.js', appliedAt: new Date(), checksum: 'x' }]);
+
+      const status = await ddlAdapter.status();
+
+      expect(status.orphanedChangelogEntries).toEqual([]);
+    });
+
+    it('flags a later-sorted file as out-of-order when an earlier-sorted file is still pending', async () => {
+      await fs.writeFile(path.join(tmpDir, '20260101000000-a.js'), 'export async function up(db) {}\n', 'utf-8');
+      await fs.writeFile(path.join(tmpDir, '20260101000001-b.js'), 'export async function up(db) {}\n', 'utf-8');
+      migrateMongoMock.status.mockResolvedValueOnce([
+        { fileName: '20260101000000-a.js', appliedAt: 'PENDING' },
+        { fileName: '20260101000001-b.js', appliedAt: new Date() }
+      ]);
+      ddlAdapter.db = mockDb([{ fileName: '20260101000001-b.js', checksum: 'x' }]);
+
+      const status = await ddlAdapter.status();
+
+      expect(status.outOfOrderApplied).toEqual(['20260101000001-b.js']);
+      expect(status.pending).toEqual(['20260101000000-a.js']);
+    });
+
+    it('does not flag anything out-of-order when applied migrations form a contiguous prefix', async () => {
+      await fs.writeFile(path.join(tmpDir, '20260101000000-a.js'), 'export async function up(db) {}\n', 'utf-8');
+      await fs.writeFile(path.join(tmpDir, '20260101000001-b.js'), 'export async function up(db) {}\n', 'utf-8');
+      migrateMongoMock.status.mockResolvedValueOnce([
+        { fileName: '20260101000000-a.js', appliedAt: new Date() },
+        { fileName: '20260101000001-b.js', appliedAt: 'PENDING' }
+      ]);
+      ddlAdapter.db = mockDb([{ fileName: '20260101000000-a.js', checksum: 'x' }]);
+
+      const status = await ddlAdapter.status();
+
+      expect(status.outOfOrderApplied).toEqual([]);
+      expect(status.pending).toEqual(['20260101000001-b.js']);
+    });
+  });
+
+  describe('repairChecksum() / backfillChecksums()', () => {
+    it('repairChecksum() reads the current file content and writes its checksum', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'db-migrate-repair-'));
+      try {
+        const content = `export async function up(db, client) { await db.collection('foo').createIndex({ y: 1 }); }\n`;
+        await fs.writeFile(path.join(tmpDir, '20260101000001-add-index.js'), content, 'utf-8');
+
+        const adapterUnderTest = new MongoDBAdapter({ ...mockConfig, migrationsDir: tmpDir });
+        const updateSpy = vi.fn().mockResolvedValue({});
+        adapterUnderTest.db = { collection: vi.fn(() => ({ updateOne: updateSpy })) };
+
+        const checksum = await adapterUnderTest.repairChecksum('20260101000001-add-index.js');
+
+        expect(checksum).toBe(crypto.createHash('sha256').update(content, 'utf8').digest('hex'));
+        expect(updateSpy).toHaveBeenCalledWith(
+          { fileName: '20260101000001-add-index.js' },
+          { $set: { checksum } }
+        );
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('connect() — Gate R0 identity check', () => {
+    it('passes connectTimeoutMS/serverSelectionTimeoutMS defaults through to migrate-mongo config', async () => {
+      const migrateMongoMock = (await import('migrate-mongo')).default;
+      migrateMongoMock.database.connect.mockResolvedValueOnce({
+        client: { close: vi.fn() },
+        db: { databaseName: 'test' } // mockConfig's databaseName is 'test'
+      });
+
+      const testAdapter = new MongoDBAdapter({ ...mockConfig });
+      await testAdapter.connect();
+
+      const configArg = migrateMongoMock.config.set.mock.calls.at(-1)[0];
+      expect(configArg.mongodb.options.connectTimeoutMS).toBeTypeOf('number');
+      expect(configArg.mongodb.options.serverSelectionTimeoutMS).toBeTypeOf('number');
+    });
+
+    it('succeeds when the connection reports the expected database', async () => {
+      const migrateMongoMock = (await import('migrate-mongo')).default;
+      const closeSpy = vi.fn();
+      migrateMongoMock.database.connect.mockResolvedValueOnce({
+        client: { close: closeSpy },
+        db: { databaseName: 'test' }
+      });
+
+      const testAdapter = new MongoDBAdapter({ ...mockConfig });
+      const result = await testAdapter.connect();
+
+      expect(result.db.databaseName).toBe('test');
+      expect(closeSpy).not.toHaveBeenCalled();
+    });
+
+    it('refuses to proceed and closes the client when the reported database does not match config', async () => {
+      const migrateMongoMock = (await import('migrate-mongo')).default;
+      const closeSpy = vi.fn();
+      migrateMongoMock.database.connect.mockResolvedValueOnce({
+        client: { close: closeSpy },
+        db: { databaseName: 'some_other_db' } // mismatch vs mockConfig's 'test'
+      });
+
+      const testAdapter = new MongoDBAdapter({ ...mockConfig });
+
+      await expect(testAdapter.connect()).rejects.toThrow(/wrong database/i);
+      expect(closeSpy).toHaveBeenCalled();
+      expect(testAdapter.db).toBeNull();
+      expect(testAdapter.client).toBeNull();
     });
   });
 

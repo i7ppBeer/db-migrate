@@ -61,6 +61,11 @@ export class RepeatableRunner {
       throw new Error(`Invalid checksum table name: ${tableName}. Must be a valid identifier (letters, digits, underscores).`);
     }
     this.checksumTable = tableName;
+    // Credential events (new/rotated/no-change) recorded during this run,
+    // for the caller to render into the run's notification email —
+    // generated passwords are never written to disk by this class, see
+    // recordCredentialEvents() and docs/DCL-PASSWORD.md.
+    this.credentialEvents = [];
   }
 
   /**
@@ -245,7 +250,9 @@ export class RepeatableRunner {
    * Rules:
    *   - Original file on disk is NEVER modified.
    *   - Checksum must be computed BEFORE calling this (from the raw on-disk content).
-   *   - Passwords are NOT printed to stdout; they are saved to /tmp/secret.
+   *   - Passwords are NOT printed to stdout; they are recorded on
+   *     this.credentialEvents for the caller to render into the run's
+   *     notification email (see recordCredentialEvents() below).
    *
    * @param {string} content  - Raw file content (may contain placeholder)
    * @param {string} fileName - File name used in log output
@@ -296,7 +303,11 @@ export class RepeatableRunner {
 
   /**
    * Parse CREATE USER / ALTER USER lines that contained CHANGE_ME_ON_FIRST_LOGIN
-   * and append `username=password` entries to /tmp/secret.
+   * and push one credential event per username onto this.credentialEvents —
+   * the caller (the `dcl` CLI command) merges these with the account/permission
+   * diff and renders the run's notification email (reporter.js). Nothing is
+   * written to disk here: a generated password exists only in memory and in
+   * that email, never in a file this process leaves behind.
    *
    * Each username is paired with its positionally-matching password:
    *   usernames[0] → passwords[0], usernames[1] → passwords[1], …
@@ -306,7 +317,7 @@ export class RepeatableRunner {
    * @param {boolean}         alreadyExists    - True when account already existed
    * @param {string[]}        [explicitNames]  - Usernames from up() return value (overrides regex)
    */
-  async saveGeneratedPasswords(originalContent, passwords, alreadyExists = false, explicitNames = null) {
+  recordCredentialEvents(originalContent, passwords, alreadyExists = false, explicitNames = null) {
     const PLACEHOLDER = 'CHANGE_ME_ON_FIRST_LOGIN';
     const pwArray = Array.isArray(passwords) ? passwords : [passwords];
     let usernames = [];
@@ -349,19 +360,22 @@ export class RepeatableRunner {
     if (usernameList.length === 0) return;
 
     // CREATE USER: skip if account already existed (password was NOT changed by IF NOT EXISTS)
-    // ALTER USER (reset_pwd): always write — ALTER USER unconditionally changes the password
+    // ALTER USER (reset_pwd): always record — ALTER USER unconditionally changes the password
     if (alreadyExists && !isResetPwd) {
-      console.log(`  ⚠️  [DCL] Account already existed — password NOT changed. Skipped /tmp/secret: ${usernameList.join(', ')}`);
+      for (const u of usernameList) this.credentialEvents.push({ type: 'no_change', username: u });
+      console.log(`  ⚠️  [DCL] Account already existed — password NOT changed: ${usernameList.join(', ')}`);
       return;
     }
 
     // Pair usernames[i] → pwArray[i]; fall back to last password if arrays diverge
-    const lines = usernameList.map((u, i) => `${u}=${pwArray[i] ?? pwArray[pwArray.length - 1]}`).join('\n') + '\n';
-    await fs.appendFile('/tmp/secret', lines, 'utf-8');
+    const type = isResetPwd ? 'password_changed' : 'new';
+    usernameList.forEach((u, i) => {
+      this.credentialEvents.push({ type, username: u, password: pwArray[i] ?? pwArray[pwArray.length - 1] });
+    });
     if (isResetPwd) {
-      console.log(`  🔄 [DCL] Reset password applied — temporary credential saved to /tmp/secret: ${usernameList.join(', ')} (password not logged)`);
+      console.log(`  🔄 [DCL] Password rotated for: ${usernameList.join(', ')} (included in the run's notification email, not logged here)`);
     } else {
-      console.log(`  🆕 [DCL] New account created — temporary credential saved to /tmp/secret: ${usernameList.join(', ')} (password not logged)`);
+      console.log(`  🆕 [DCL] New account created: ${usernameList.join(', ')} (included in the run's notification email, not logged here)`);
     }
   }
 
@@ -376,14 +390,14 @@ export class RepeatableRunner {
    * @param {Object}   client    - MongoClient
    * @param {string[]} usernames - list of usernames in the admin db
    */
-  async injectCustomDataMongoDB(client, usernames) {
+  async injectCustomDataMongoDB(client, usernames, description = 'Auto-created user, requires password change before expiry.') {
     const expiryDays = parseInt(process.env.DCL_PASSWORD_EXPIRY_DAYS ?? '7', 10);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + expiryDays * 24 * 60 * 60 * 1000);
     const customData = {
       expiresAt,
       passwordLastModified: now,
-      description: 'Auto-created user, requires password change before expiry.'
+      description
     };
 
     const adminDb = client.db('admin');
@@ -513,7 +527,7 @@ export class RepeatableRunner {
     const collapsed = this.stripCommentsAndCollapse(originalContent);
     for (const stmt of collapsed.split(';')) {
       // Only check CREATE USER — ALTER USER (reset_pwd) always targets an existing account,
-      // so alreadyExists would always be true and incorrectly suppress /tmp/secret writes.
+      // so alreadyExists would always be true and incorrectly suppress the credential event.
       if (!/\bCREATE\s+USER\b/i.test(stmt)) continue;
       if (!stmt.includes(PLACEHOLDER)) continue;
       const m = stmt.match(/['"`]([^'"`@\s]+)['"`]\s*@/);
@@ -697,10 +711,10 @@ export class RepeatableRunner {
           }
         }
 
-        // Persist generated credentials; `alreadyExists` was determined above
+        // Record generated credentials; `alreadyExists` was determined above
         // via a direct mysql.user query so it is immune to stale SHOW WARNINGS.
         if (generated) {
-          await this.saveGeneratedPasswords(file.content, passwords, alreadyExists);
+          this.recordCredentialEvents(file.content, passwords, alreadyExists);
         }
 
         // Update checksum
@@ -795,25 +809,38 @@ export class RepeatableRunner {
         // Best-effort cleanup of temp file
         if (tempFilePath) await fs.unlink(tempFilePath).catch(() => {});
 
-        // passwordSet: true  → new account
-        // passwordSet: false → already existed
-        // undefined          → template does not support return value (treat as unknown)
+        // passwordSet: true      → new account
+        // passwordSet: false     → already existed, password NOT changed
+        // passwordSet: 'rotated' → existing account, password forcibly rotated
+        //                          (the MariaDB adapter detects this from ALTER
+        //                          USER syntax; MongoDB has no such syntax to
+        //                          sniff, so the migration must say so explicitly)
+        // undefined              → template does not support return value (treat as unknown)
         const alreadyExists = upResult?.passwordSet === false;
         const isNewAccount  = upResult?.passwordSet === true;
+        const isRotated     = upResult?.passwordSet === 'rotated';
         // Migration may explicitly report which usernames were created / managed
         const createdUsernames = upResult?.createdUsernames ?? null;
         const allUsernames     = upResult?.allUsernames ?? createdUsernames;
 
-        // Persist credentials only for new accounts; pass allUsernames for warning log
+        // Record credentials only for new/rotated accounts; pass allUsernames for the no-change log
         if (generated) {
-          const namesForLog = isNewAccount ? createdUsernames : allUsernames;
-          await this.saveGeneratedPasswords(file.content, passwords, alreadyExists, namesForLog);
+          let namesForLog;
+          if (isRotated) {
+            // { name, isReset: true } shape — recordCredentialEvents() only
+            // classifies as password_changed when every entry is flagged this
+            // way (mirrors the MariaDB ALTER USER detection path).
+            namesForLog = (allUsernames || []).map(name => ({ name, isReset: true }));
+          } else {
+            namesForLog = isNewAccount ? createdUsernames : allUsernames;
+          }
+          this.recordCredentialEvents(file.content, passwords, isRotated ? false : alreadyExists, namesForLog);
         }
 
-        // Inject customData (expiresAt, passwordLastModified) for new accounts
-        if (isNewAccount) {
+        // Inject customData (expiresAt, passwordLastModified) for new or rotated accounts
+        if (isNewAccount || isRotated) {
           // Prefer explicitly returned createdUsernames; fall back to regex parse
-          let injectTargets = createdUsernames;
+          let injectTargets = isRotated ? allUsernames : createdUsernames;
           if (!injectTargets) {
             injectTargets = [];
             for (const line of file.content.split('\n')) {
@@ -822,7 +849,9 @@ export class RepeatableRunner {
             }
           }
           if (injectTargets.length > 0) {
-            await this.injectCustomDataMongoDB(client, injectTargets);
+            await this.injectCustomDataMongoDB(client, injectTargets, isRotated
+              ? 'Password rotated, requires password change before expiry.'
+              : 'Auto-created user, requires password change before expiry.');
           }
         }
 

@@ -69,24 +69,34 @@ The `reset` command (`node src/cli.js reset --yes -c <config>`) **only clears tr
 | Sanity Check Pre/PostCheck + Auto-Rollback | Validates the result after execution against expectations, auto-rolls back if it doesn't match | ✅ Live (existing mechanism) | `src/core/sanity-checker.js` |
 | `reset` command | One remediation option for 1.7 (paired with a full environment reset) | ✅ Live | See Section 2 |
 | `validate` command's `[FORCE ALLOWED]`/`[ALLOWED]` audit trail | Every dangerous operation that gets allowed through leaves an audit record instead of passing silently | ✅ Live | Same validation rule docs as above |
+| DDL checksum verification | 1.7 variant: an already-applied migration file edited after the fact, previously undetectable | ✅ Live | [RUNTIME-GATE-PLAN.md](./RUNTIME-GATE-PLAN.md) Gate R1 |
 
 **This audit also found two existing logic bugs** (which misclassify legitimate migrations as errors) — related to this handbook's theme but the opposite problem: not "a dangerous operation slipping through" but "a safe operation being wrongly blocked." Details in [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md#confirmed-logic-bugs-traced-by-hand-not-inspection-guesses).
 
 ---
 
-## 4. Protections not yet built (in design)
+## 4. Runtime Gate status (R0–R4)
 
-Full spec is in [RUNTIME-GATE-PLAN.md](./RUNTIME-GATE-PLAN.md); this is just the summary:
+Full spec is in [RUNTIME-GATE-PLAN.md](./RUNTIME-GATE-PLAN.md); this is just the
+summary. R0 and R1's DDL checks are live now — R1's DCL side and R2–R4 are still
+design only:
 
-| Gate | Checks | Addresses | `--force`-able? |
-|---|---|---|---|
-| R0 Connection identity | Does the connection actually point at the database the config says it should? | 1.6 | ❌ No |
-| R1 changelog consistency | Does the changelog/checksum match the files on disk? | 1.7 | ❌ No |
-| R2 Long transactions / lock waits | Are there already stuck transactions or MDL waits before execution? | 1.1 | ✅ Yes |
-| R3 Writability / replica check | Is the target a read-only replica? | Variant of 1.6 | Read-only → ❌; lagging → ✅ |
-| R4 Disk/binlog space | Could a large ALTER exhaust available space? | 1.2 | ✅ Yes |
+| Gate | Checks | Addresses | Status | `--force`-able? |
+|---|---|---|---|---|
+| R0 Connection identity | Does the connection actually point at the database the config says it should? | 1.6 | ✅ Live | ❌ No |
+| R1 changelog consistency (DDL) | Does the changelog/checksum match the files on disk? | 1.7 | ✅ Live (checksum, orphaned entries, out-of-order all implemented) | Checksum content → ✅ `--allow-checksum-drift`; orphaned/out-of-order → ❌ No |
+| R1 changelog consistency (DCL) | Same, for the DCL checksum table/collection | 1.7 | ⬜ Not yet built | — |
+| R2 Long transactions / lock waits | Are there already stuck transactions or MDL waits before execution? | 1.1 | ⬜ Not yet built | ✅ Yes (planned) |
+| R3 Writability / replica check | Is the target a read-only replica? | Variant of 1.6 | ⬜ Not yet built | Read-only → ❌; lagging → ✅ (planned) |
+| R4 Disk/binlog space | Could a large ALTER exhaust available space? | 1.2 | ⬜ Not yet built | ✅ Yes (planned) |
 
-R0/R1 deliberately have no override option — connecting to the wrong database or a mismatched changelog is a "someone needs to go look at this" situation, not a "skip it if the risk is acceptable" situation.
+R0 and R1's orphaned/out-of-order checks deliberately have no override option —
+connecting to the wrong database or a changelog that's out of sync with the files on
+disk is a "someone needs to go look at this" situation, not a "skip it if the risk is
+acceptable" situation. R1's checksum-content check is the one exception in this table:
+it's force-able (`--allow-checksum-drift`) because a file being edited after being
+applied has a legitimate common cause (fixing a comment/typo), unlike the other checks
+here.
 
 ---
 
