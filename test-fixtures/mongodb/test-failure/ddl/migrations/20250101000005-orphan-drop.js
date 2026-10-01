@@ -1,3 +1,4 @@
+// @expect-error: ORPHAN_DROP_DOWN
 /**
  * FAILURE CASE: Orphan drop in down()
  * 

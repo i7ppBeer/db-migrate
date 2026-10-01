@@ -1,3 +1,4 @@
+// @expect-error: MISSING_DOWN
 /**
  * FAILURE CASE: Missing down() implementation
  * 

@@ -10,14 +10,14 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { createAdapter, createAdapters, loadConfig } from './adapters/index.js';
-import { Reporter, buildSyncReport, saveSyncReport, buildNotificationEmail, notificationEmailToHTML, saveNotificationEmail } from './core/reporter.js';
+import { Reporter, buildSyncReport, saveSyncReport, buildNotificationEmail, notificationEmailToHTML, saveNotificationEmail, buildDCLNotificationEvents, buildMultiInstanceSummary, multiInstanceSummaryToHTML, partialApplyNote } from './core/reporter.js';
 import { diffSchemaSnapshots, isDiffEmpty } from './core/schema-diff.js';
 import { RepeatableRunner, mongodbHelpers } from './core/repeatable-runner.js';
 import { DCLIdempotentChecker } from './core/dcl-idempotent-checker.js';
+import { checkMigrationsToRun, describeValidationFailures, allowHintForFailures } from './core/validation-gate.js';
+import { parseExpectedErrors, checkFileExpectation } from './core/fixture-expectations.js';
 import fs from 'fs/promises';
 import path from 'path';
-import os from 'os';
-import crypto from 'crypto';
 
 const program = new Command();
 
@@ -239,6 +239,15 @@ async function enforceChecksumGate(status, adapter, options) {
 function printChangelogConsistency(status) {
   const orphaned = status.orphanedChangelogEntries || [];
   const outOfOrder = status.outOfOrderApplied || [];
+  // Informational, never blocking: R__ files are not versioned migrations.
+  const ignoredFiles = status.ignoredRepeatableFiles || [];
+  const ignoredEntries = status.ignoredRepeatableEntries || [];
+  if (ignoredFiles.length > 0) {
+    console.log(chalk.yellow(`\n⚠️  Ignoring ${ignoredFiles.length} R__ file(s) in this versioned directory — repeatable (DCL) migrations belong in a DCL project (mode: 'repeatable'): ${ignoredFiles.join(', ')}`));
+  }
+  if (ignoredEntries.length > 0) {
+    console.log(chalk.yellow(`⚠️  The changelog has ${ignoredEntries.length} R__ entr${ignoredEntries.length === 1 ? 'y' : 'ies'} from an older version that ran R__ files as versioned migrations — left untouched and ignored: ${ignoredEntries.join(', ')}`));
+  }
   if (orphaned.length > 0) {
     console.log(chalk.red(`\n🔴 Orphaned changelog entries — ${orphaned.length} row(s) recorded as applied have no matching file on disk:`));
     for (const o of orphaned) {
@@ -272,6 +281,62 @@ function enforceChangelogConsistencyGate(status) {
  * changed between two snapshots, git-diff style, instead of two full listings
  * a reader has to compare by hand.
  */
+/**
+ * The pre-run validation gate (see src/core/validation-gate.js): the same
+ * rules as `validate`, applied to exactly the migrations about to run.
+ * Throws before anything executes if any of them fails. Allowances that were
+ * used (CLI flags or a file's @allow annotations) are printed, so the run log
+ * records what was let through.
+ *
+ * @param {boolean} [opts.report] - dry-run: print the outcome, set a failing
+ *   exit code, but don't throw
+ */
+async function enforceValidationGate(adapter, status, options, { report = false } = {}) {
+  const gate = await checkMigrationsToRun(adapter, status.pending, options);
+  if (gate.error) throw new Error(gate.error);
+  if (gate.files.length === 0) return gate;
+
+  if (options.allowDangerous) console.log(chalk.yellow('   🟠 --allow-dangerous given: dangerous operations will be allowed'));
+  if (options.allowForbidden) console.log(chalk.red('   🔴 --allow-forbidden given: forbidden operations will be allowed (REQUIRES APPROVAL)'));
+  if (options.allow && options.allow.length > 0) console.log(chalk.cyan(`   📋 --allow given: ${options.allow.join(', ')}`));
+  for (const w of gate.configWarnings || []) console.log(chalk.yellow(`   ⚠️  ${w}`));
+  for (const a of gate.allowed) {
+    console.log(chalk.yellow(`   ⚠️  Allowed in ${a.file}${a.code ? ` [${a.code}]` : ''}: ${a.message.replace(/^.*?\[(?:FORCE )?ALLOWED\]\s*/, '')}`));
+  }
+
+  if (gate.failures.length === 0) {
+    console.log(chalk.green(`\n🛡️  Validation passed for the ${gate.files.length} migration(s) about to run.`));
+    return gate;
+  }
+
+  console.error(chalk.red(`\n🛡️  Validation failed — ${report ? 'this run would be refused' : 'nothing was applied'}:`));
+  for (const f of gate.failures) {
+    console.error(chalk.red(`   ❌ ${f.file}`));
+    for (const m of f.messages) console.error(chalk.red(`      ${m}`));
+  }
+  const hint = allowHintForFailures(gate.failures);
+  if (hint.needsFix) {
+    console.error(chalk.gray('   Some of these can only be fixed in the migration file itself.'));
+  }
+  if (hint.allow) {
+    const marker = adapter.dbType === 'mongodb' ? '//' : '--';
+    console.error(chalk.gray(`   If reviewed and intended, allow them explicitly: add "${marker} @allow: ${hint.allow}" at the top of the file, or rerun with --allow ${hint.allow}`));
+  }
+  if (report) {
+    process.exitCode = 1;
+    return gate;
+  }
+  throw new Error(`Validation failed — nothing was applied: ${describeValidationFailures(gate.failures).join('; ')}`);
+}
+
+/** The --allow* options shared by validate and the commands it gates. */
+function addAllowOptions(command) {
+  return command
+    .option('--allow-dangerous', 'Allow dangerous operations (🟠 level)')
+    .option('--allow-forbidden', 'Allow forbidden operations (🔴 level) - requires team approval')
+    .option('--allow <codes>', 'Allow specific operation codes (comma-separated)', (val) => val.split(','));
+}
+
 function printSchemaDiff(diff, dbType) {
   if (isDiffEmpty(diff)) {
     console.log(chalk.gray('   (schema unchanged)'));
@@ -362,62 +427,6 @@ function printDCLDiff(diff, dbType) {
 }
 
 /**
- * Merge RepeatableRunner's credential events (new/password_changed/no_change --
- * only known from *running* the migration, DCLIdempotentChecker's before/after
- * diff can't see a password) with the account/permission diff (removed
- * accounts and permission-only changes -- only known from the diff, a
- * migration run doesn't report those directly) into one ordered event list
- * for the run's notification email. Dedupes against usernames already
- * covered by a credential event, mirroring printDCLDiff()'s own dedup.
- *
- * @param {Array} credentialEvents - runner.credentialEvents
- * @param {Object} diff - DCLIdempotentChecker.diffStates() result
- * @param {string} dbType - 'mariadb' | 'mongodb'
- * @returns {Array} events shaped for reporter.js's notificationEmailToHTML()
- */
-function buildDCLNotificationEvents(credentialEvents, diff, dbType) {
-  const events = [...credentialEvents];
-  const known = new Set(credentialEvents.map(e => e.username));
-
-  if (dbType === 'mariadb') {
-    for (const u of diff.removedUsers) events.push({ type: 'removed', username: u });
-
-    const addedUsersSet = new Set(diff.addedUsers);
-    const removedUsersSet = new Set(diff.removedUsers);
-    const byUser = new Map();
-    const collect = (grants, key) => {
-      for (const g of grants) {
-        if (addedUsersSet.has(g.user) || removedUsersSet.has(g.user)) continue;
-        if (!byUser.has(g.user)) byUser.set(g.user, { grantsAdded: [], grantsRemoved: [] });
-        byUser.get(g.user)[key].push(g.grant);
-      }
-    };
-    collect(diff.addedGrants, 'grantsAdded');
-    collect(diff.removedGrants, 'grantsRemoved');
-    for (const [username, grants] of byUser) {
-      events.push({ type: 'permissions_updated', username, ...grants });
-    }
-
-    // Accounts added without a CHANGE_ME_ON_FIRST_LOGIN placeholder have no
-    // password to show, but should still be reported as new.
-    for (const u of diff.addedUsers) {
-      if (!known.has(u)) events.push({ type: 'new', username: u, password: null });
-    }
-  } else if (dbType === 'mongodb') {
-    for (const u of diff.removedUsers) events.push({ type: 'removed', username: `${u.user}@${u.db}` });
-    for (const c of diff.changedUsers) {
-      events.push({ type: 'permissions_updated', username: `${c.user}@${c.db}`, grantsAdded: c.addedRoles, grantsRemoved: c.removedRoles });
-    }
-    for (const u of diff.addedUsers) {
-      const key = `${u.user}@${u.db}`;
-      if (!known.has(key)) events.push({ type: 'new', username: key, password: null });
-    }
-  }
-
-  return events;
-}
-
-/**
  * Best-effort project label for the notification email header -- the
  * database/schema name this config targets, same fallback chain
  * captureDCLState() uses to find it.
@@ -428,6 +437,45 @@ function resolveProjectLabel(adapter, config) {
     return dbConfig.database || config.database || 'unknown';
   }
   return config.mongodb?.databaseName || adapter.config.mongodb?.databaseName || 'unknown';
+}
+
+/**
+ * Which server a run hit — "host:port · db <name>" — for the notification
+ * email header. Instances often share a database name (one `app` database per
+ * region), so the database alone can't tell their emails apart. Credentials in
+ * a MongoDB URL are never included.
+ */
+function resolveTargetLabel(adapter) {
+  if (adapter.dbType === 'mariadb') {
+    const dbConfig = adapter.config.mariadb || adapter.config;
+    const server = `${dbConfig.host || 'localhost'}:${dbConfig.port || 3306}`;
+    return dbConfig.database ? `${server} · db ${dbConfig.database}` : server;
+  }
+  const mongo = adapter.config.mongodb || {};
+  // mongodb[+srv]://[user:pass@]host1[:port][,host2…][/db][?opts] → host list only
+  const server = (mongo.url || '').replace(/^[a-z+]+:\/\//i, '').replace(/^[^@/]*@/, '').split(/[/?]/)[0];
+  return [server, mongo.databaseName && `db ${mongo.databaseName}`].filter(Boolean).join(' · ') || null;
+}
+
+/**
+ * Each instance's notification email is written to a file named after the
+ * instance, so two instances sharing a name would silently overwrite each
+ * other's generated passwords. Refuse that up front, before connecting.
+ */
+function assertUniqueInstanceNames(adapters) {
+  const seen = new Set();
+  for (const { name } of adapters) {
+    const fileName = instanceNotificationFileName(name);
+    if (seen.has(fileName)) {
+      throw new Error(`Instance name '${name}' is used more than once (or only differs in characters not allowed in a file name). ` +
+        `Give every entry in 'instances' a unique name — each instance's notification email is written to ${fileName}.`);
+    }
+    seen.add(fileName);
+  }
+}
+
+function instanceNotificationFileName(name) {
+  return `notification-${String(name).replace(/[^A-Za-z0-9._-]/g, '_')}.html`;
 }
 
 /**
@@ -459,6 +507,9 @@ async function captureDCLState(checker, adapter, config) {
   return checker.captureMongoDBState(adapter.db);
 }
 
+// Files already warned about getting a throwaway password (see executeDCLFile()).
+const throwawayPasswordWarned = new Set();
+
 /**
  * Execute one DCL (repeatable) migration file's content once, without any
  * checksum bookkeeping. Used by the read-only verification/dry paths
@@ -467,22 +518,25 @@ async function captureDCLState(checker, adapter, config) {
  * RepeatableRunner.run()'s normal checksum-tracked apply flow.
  */
 async function executeDCLFile(adapter, runner, file) {
+  // The placeholder is always resolved, to a throwaway password nobody sees:
+  // run as-is, CREATE USER … IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN' leaves a
+  // real account whose password is that publicly-known literal — and a later
+  // `dcl` run would then report it as "already existed, password unchanged".
+  const { resolved, generated } = runner.resolvePlaceholderPasswords(file.content, file.fileName);
+  if (generated && !throwawayPasswordWarned.has(file.filePath)) {
+    throwawayPasswordWarned.add(file.filePath); // verify runs each file twice; warn once
+    console.log(chalk.yellow(`     ⚠️  Accounts this check creates get a throwaway password (not recorded anywhere). ` +
+      `Run verification against a scratch database, or rotate those accounts' passwords afterwards.`));
+  }
+
   if (adapter.dbType === 'mariadb') {
-    await adapter.connection.query(file.content);
+    await adapter.connection.query(resolved);
     return;
   }
   if (adapter.dbType === 'mongodb') {
-    const { resolved, generated } = runner.resolvePlaceholderPasswords(file.content, file.fileName);
-    let mod;
-    if (generated) {
-      const baseName = file.fileName.replace(/\.js$/, '.mjs');
-      const tmpPath = path.join(os.tmpdir(), `dcl-exec-${crypto.randomBytes(8).toString('hex')}-${baseName}`);
-      await fs.writeFile(tmpPath, resolved, 'utf-8');
-      mod = await import(`file://${tmpPath}`);
-      await fs.unlink(tmpPath).catch(() => {});
-    } else {
-      mod = await import(`file://${file.filePath}?t=${Date.now()}`);
-    }
+    const mod = generated
+      ? await runner.importResolvedModule(resolved, file.fileName)
+      : await import(`file://${file.filePath}?t=${Date.now()}`);
     if (typeof mod.up === 'function') {
       await mod.up(adapter.db, adapter.client, mongodbHelpers);
     }
@@ -554,16 +608,17 @@ program
     }
   });
 
-program
+const upCommand = program
   .command('up')
-  .description('Run pending migrations')
+  .description('Run pending migrations (validated first, like `validate`)')
   .option('--dry-run', 'Show what would be run without executing')
   .option('--sanity-check', 'Enable sanity check (pre-check, post-check, auto-rollback)')
   .option('--no-auto-rollback', 'Disable auto-rollback on sanity check failure')
   .option('--target <migration>', 'Run migrations up to and including this migration')
   .option('--only <migration>', 'Run only this specific migration')
   .option('--instance <name>', 'Run only on specified instance (for multi-instance configs)')
-  .option('--allow-checksum-drift', 'Accept already-applied migration files whose content changed since being applied, as the new checksum baseline')
+  .option('--allow-checksum-drift', 'Accept already-applied migration files whose content changed since being applied, as the new checksum baseline');
+addAllowOptions(upCommand)
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     let adapter;
@@ -592,12 +647,14 @@ program
         printChecksumBaseline(status);
         printChecksumMismatches(status);
         printChangelogConsistency(status);
+        await enforceValidationGate(adapter, status, options, { report: true });
         return;
       }
 
       const preflightStatus = await adapter.status();
       enforceChangelogConsistencyGate(preflightStatus);
       await enforceChecksumGate(preflightStatus, adapter, options);
+      await enforceValidationGate(adapter, preflightStatus, options);
 
       console.log(chalk.blue(`\n[UP] Running migrations (${adapter.dbType})...`));
       
@@ -656,6 +713,7 @@ program
         for (const e of result.errors) {
           console.error(`   ${e}`);
         }
+        console.error(chalk.yellow(`   ⚠️  ${partialApplyNote(adapter.dbType)}`));
         process.exitCode = 1;
       }
     } catch (error) {
@@ -671,15 +729,16 @@ program
 // Refuses (as an error, not a silent no-op) when there's nothing pending.
 // ─────────────────────────────────────────────────────────────────
 
-program
+const syncCommand = program
   .command('sync')
-  .description('status -> up -> report what changed -> show the real current schema. Errors out if nothing is pending.')
+  .description('status -> validate -> up -> report what changed -> show the real current schema. Errors out if nothing is pending.')
   .option('--sanity-check', 'Enable sanity check (pre-check, post-check, auto-rollback)')
   .option('--no-auto-rollback', 'Disable auto-rollback on sanity check failure')
   .option('--target <migration>', 'Run migrations up to and including this migration')
   .option('--only <migration>', 'Run only this specific migration')
   .option('-o, --output <dir>', 'Save a JSON+HTML report to this directory (sync-report-<timestamp>.{json,html})')
-  .option('--allow-checksum-drift', 'Accept already-applied migration files whose content changed since being applied, as the new checksum baseline')
+  .option('--allow-checksum-drift', 'Accept already-applied migration files whose content changed since being applied, as the new checksum baseline');
+addAllowOptions(syncCommand)
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     const startedAt = Date.now();
@@ -705,6 +764,7 @@ program
     const writeNotification = async (project, dbType, extra) => {
       const report = buildNotificationEmail({
         project,
+        target: adapter ? resolveTargetLabel(adapter) : undefined,
         environment: process.env.DB_MIGRATE_ENVIRONMENT,
         dbType,
         ...extra
@@ -748,6 +808,7 @@ program
       for (const f of status.pending) {
         console.log(`   ⏳ ${f}`);
       }
+      await enforceValidationGate(adapter, status, options);
 
       // Snapshot before applying anything, so the schema section afterward
       // can show what actually changed instead of just the final state.
@@ -769,6 +830,7 @@ program
         for (const e of result.errors) {
           console.error(`   ${e}`);
         }
+        console.error(chalk.yellow(`   ⚠️  ${partialApplyNote(adapter.dbType)}`));
         if (result.applied.length > 0) {
           console.error(chalk.yellow(`\n   ${result.applied.length} migration(s) DID apply before the failure:`));
           for (const m of result.applied) console.error(`   ✅ ${m}`);
@@ -779,7 +841,9 @@ program
         });
         await writeNotification(databaseName, adapter.dbType, {
           status: 'failed',
-          ddl: { applied: result.applied, errors: formatDDLFailureDetails(result) }
+          // Failed while executing (not refused beforehand): the failing
+          // migration itself may have run partway.
+          ddl: { applied: result.applied, errors: formatDDLFailureDetails(result), partialRisk: true }
         });
         process.exitCode = 1;
         return;
@@ -815,7 +879,16 @@ program
         pending: status.pending, applied: result.applied, schema: snapshot, schemaDiff: diff
       });
 
-      await writeNotification(databaseName, adapter.dbType, { ddl: { applied: result.applied, diff } });
+      try {
+        await writeNotification(databaseName, adapter.dbType, { ddl: { applied: result.applied, diff } });
+      } catch (notifyError) {
+        // The migrations DID apply — say so plainly instead of falling into
+        // the generic failure path below (which would also write a
+        // "failed" notification, if it could write anything at all).
+        console.error(chalk.red(`\n❌ ${result.applied.length} migration(s) were applied successfully, but the notification email could not be written: ${notifyError.message}`));
+        console.error(chalk.gray('   Nothing needs to be re-run — fix the output location (-o) for future runs.'));
+        process.exitCode = 1;
+      }
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
       process.exitCode = 1;
@@ -839,10 +912,13 @@ program
 
 program
   .command('down')
-  .description('Rollback migrations')
+  .description('Rollback migrations (shows the plan and asks for confirmation first)')
   .option('-n, --count <number>', 'Number of migrations to rollback', '1')
   .option('--target <migration>', 'Rollback down to and including this migration')
   .option('--instance <name>', 'Run only on specified instance (for multi-instance configs)')
+  .option('--dry-run', 'Show what would be rolled back, without doing it')
+  .option('--yes', 'Skip the confirmation prompt (required when not running in a terminal)')
+  .option('--allow-checksum-drift', 'Roll back migrations whose file was edited after being applied (their Down section may not be the reviewed one)')
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     let adapter;
@@ -852,9 +928,47 @@ program
       await adapter.connect();
       
       const count = parseInt(options.count, 10);
-      console.log(chalk.blue(`\n[DOWN] Rolling back ${count} migration(s) (${adapter.dbType})...`));
-      
-      const result = await adapter.down(count);
+      if (!options.target && (!Number.isInteger(count) || count < 1)) {
+        throw new Error(`--count must be a positive number (got '${options.count}')`);
+      }
+      const plan = await adapter.rollbackPlan({ count, target: options.target });
+      if (plan.error) throw new Error(plan.error.replace(/^Target migration not found/, 'Target migration not found among applied migrations'));
+      if (plan.files.length === 0) {
+        console.log(chalk.gray('\n   No applied migrations to roll back.'));
+        return;
+      }
+
+      const target = resolveTargetLabel(adapter);
+      console.log(chalk.blue(`\n[DOWN] ${target} — ${options.dryRun ? 'would roll back' : 'rolling back'} ${plan.files.length} migration(s), most recent first:`));
+      for (const f of plan.files) console.log(chalk.yellow(`   ⏪ ${f}`));
+      console.log(chalk.gray('   Each runs its Down section, which usually drops tables/columns/collections and the data in them.'));
+
+      if (plan.checksumMismatches.length > 0) {
+        console.log(chalk.red(`\n🔴 ${plan.checksumMismatches.length} of these file(s) were edited after being applied: ${plan.checksumMismatches.join(', ')}`));
+        if (!options.allowChecksumDrift) {
+          throw new Error('Refusing to roll back with edited migration files — the Down section that would run is not the one that was applied with. ' +
+            'Check the edit; if it is intended, rerun with --allow-checksum-drift.');
+        }
+        console.log(chalk.yellow('   ⚠️  --allow-checksum-drift: rolling back with the edited files'));
+      }
+
+      if (options.dryRun) return;
+
+      if (!options.yes) {
+        if (!process.stdin.isTTY) {
+          throw new Error('down needs confirmation — not running in a terminal, so pass --yes to confirm (use --dry-run to only see the plan).');
+        }
+        const readline = await import('readline/promises');
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const answer = await rl.question(chalk.bold(`\nRoll back these ${plan.files.length} migration(s) on ${target}? Type "yes" to continue: `));
+        rl.close();
+        if (answer.trim().toLowerCase() !== 'yes') {
+          console.log(chalk.gray('   Cancelled — nothing was rolled back.'));
+          return;
+        }
+      }
+
+      const result = await adapter.down(plan.files);
       
       if (result.rolledBack.length > 0) {
         console.log(chalk.yellow(`\n⏪ Rolled back ${result.rolledBack.length} migration(s):`));
@@ -1094,12 +1208,11 @@ program
     }
   });
 
-program
+const validateCommand = program
   .command('validate')
   .description('Validate migration files')
-  .option('--allow-dangerous', 'Allow dangerous operations (🟠 level)')
-  .option('--allow-forbidden', 'Allow forbidden operations (🔴 level) - requires team approval')
-  .option('--allow <codes>', 'Allow specific operation codes (comma-separated)', (val) => val.split(','))
+  .option('--pending-only', 'Only validate migrations not yet applied (connects to the database) — what up/sync will check');
+addAllowOptions(validateCommand)
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     let adapter;
@@ -1113,6 +1226,19 @@ program
         allowForbidden: options.allowForbidden,
         allowedCodes: options.allow || []
       };
+
+      // --pending-only: exactly what up/sync's validation gate checks.
+      // Already-applied files ran under the rules of their day; judging them
+      // again would push people to edit them, which the checksum gate rejects.
+      if (options.pendingOnly) {
+        await adapter.connect();
+        const { pending } = await adapter.status();
+        if (pending.length === 0) {
+          console.log(chalk.green('\n✅ No pending migrations — nothing to validate.'));
+          return;
+        }
+        validateOptions.files = pending;
+      }
       
       console.log(chalk.blue(`\n[VALIDATE] Checking migrations (${adapter.dbType})...`));
       
@@ -1129,6 +1255,22 @@ program
       console.log('');
       
       const result = await adapter.validate(validateOptions);
+
+      if (result.error) {
+        console.error(chalk.red(`[ERROR] Validation could not run: ${result.error}`));
+        console.error(chalk.gray(`   migrationsDir: ${adapter.config.migrationsDir}`));
+        process.exitCode = 1;
+        return;
+      }
+      if (result.ignoredRepeatableFiles && result.ignoredRepeatableFiles.length > 0) {
+        console.log(chalk.yellow(`⚠️  Ignored ${result.ignoredRepeatableFiles.length} R__ file(s) — repeatable (DCL) migrations belong in a DCL project (mode: 'repeatable'), not a versioned one:`));
+        for (const f of result.ignoredRepeatableFiles) console.log(chalk.yellow(`   - ${f}`));
+        console.log('');
+      }
+      if (result.skippedFiles && result.skippedFiles.length > 0) {
+        console.log(chalk.gray(`   (${result.skippedFiles.length} already-applied migration(s) not re-validated)\n`));
+      }
+      for (const w of result.configWarnings || []) console.log(chalk.yellow(`⚠️  ${w}`));
       
       for (const fileResult of result.results) {
         if (fileResult.valid) {
@@ -1149,7 +1291,7 @@ program
           for (const op of fileResult.dangerousOps) {
             console.log(chalk.magenta(`   ⛔ [${op.code}] ${op.message}`));
             if (op.suggestion) {
-              console.log(chalk.gray(`      └─ 建議: ${op.suggestion}`));
+              console.log(chalk.gray(`      └─ Suggestion / 建議: ${op.suggestion}`));
             }
           }
         }
@@ -1191,16 +1333,16 @@ program
           if (r.dangerousOps) r.dangerousOps.forEach(op => allDangerous.add(op.code));
         }
         
-        console.log(chalk.cyan('\n💡 放行提示:'));
+        console.log(chalk.cyan('\n💡 If reviewed and intended, allow explicitly / 確認無誤後明確放行 — preferably with an annotation at the top of the file ("-- @allow: CODE" / "// @allow: CODE"), or:'));
         
         if (allDangerous.size > 0) {
-          console.log(chalk.yellow(`   🟠 危險操作放行: --allow-dangerous`));
-          console.log(chalk.gray(`      或指定: --allow ${[...allDangerous].join(',')}`));
+          console.log(chalk.yellow(`   🟠 Dangerous / 危險操作: --allow-dangerous`));
+          console.log(chalk.gray(`      or only these / 或只放行: --allow ${[...allDangerous].join(',')}`));
         }
         
         if (allForbidden.size > 0) {
-          console.log(chalk.red(`   🔴 禁止操作放行: --allow-forbidden (需團隊審批)`));
-          console.log(chalk.gray(`      或指定: --allow ${[...allForbidden].join(',')}`));
+          console.log(chalk.red(`   🔴 Forbidden / 禁止操作: --allow-forbidden (requires team approval / 需團隊審批)`));
+          console.log(chalk.gray(`      or only these / 或只放行: --allow ${[...allForbidden].join(',')}`));
         }
         
         process.exitCode = 1;
@@ -1210,6 +1352,8 @@ program
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
       process.exitCode = 1;
+    } finally {
+      if (options.pendingOnly && adapter) await adapter.disconnect();
     }
   });
 
@@ -1729,10 +1873,12 @@ program
     console.log(chalk.gray('\n' + '═'.repeat(60)));
   });
 
-program
+const upAllCommand = program
   .command('up-all')
-  .description('Run pending migrations on all instances')
+  .description('Run pending migrations on all instances (each validated first, like `up`)')
   .option('--dry-run', 'Show what would be run without executing')
+  .option('--allow-checksum-drift', 'Accept already-applied migration files whose content changed since being applied, as the new checksum baseline');
+addAllowOptions(upAllCommand)
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     
@@ -1752,14 +1898,20 @@ program
       try {
         await adapter.connect();
         
+        const status = await adapter.status();
         if (options.dryRun) {
-          const status = await adapter.status();
-          console.log(chalk.blue(`\n[${name}] Would apply ${status.pending.length} migration(s)`));
+          console.log(chalk.blue(`\n[${name}] ${resolveTargetLabel(adapter)} — would apply ${status.pending.length} migration(s)`));
           for (const p of status.pending) {
             console.log(chalk.gray(`   - ${p}`));
           }
+          printChangelogConsistency(status);
+          await enforceValidationGate(adapter, status, options, { report: true });
         } else {
-          console.log(chalk.blue(`\n[${name}] Running migrations...`));
+          console.log(chalk.blue(`\n[${name}] ${resolveTargetLabel(adapter)} — running migrations...`));
+          // Same pre-run gates as single-instance `up`
+          enforceChangelogConsistencyGate(status);
+          await enforceChecksumGate(status, adapter, options);
+          await enforceValidationGate(adapter, status, options);
           const result = await adapter.up();
           
           if (result.applied.length > 0) {
@@ -2088,41 +2240,54 @@ program
             // DDL: Validate + Up-Down-Up Test
             // ═══════════════════════════════════════════════════════
 
-            // expectFailure fixtures are intentionally broken/dangerous migrations
-            // used to test that validate/execution correctly reject them — failing
-            // there is the correct, expected outcome, so flip the reported pass/fail.
-            const expectFailure = config.expectFailure === true;
-
-            // Run validation
+            // Run validation — judged per file against its @expect-error
+            // annotation (see src/core/fixture-expectations.js): a file meant
+            // to be rejected must fail with exactly the declared codes, every
+            // other file must be valid.
             console.log(chalk.blue(`\n[VALIDATE] ${label} (${dbType})...`));
             const validateStart = Date.now();
             const validateResult = await adapter.validate();
-            const validateReportSuccess = expectFailure ? !validateResult.valid : validateResult.valid;
-            reporter.addResult({
-              database: label,
-              dbType,
-              testType: 'validate',
-              success: validateReportSuccess,
-              duration: Date.now() - validateStart,
-              error: validateReportSuccess
-                ? null
-                : (validateResult.valid ? 'Expected validation to fail, but it passed' : 'Validation failed')
-            });
+            let expectsRejections = false;
+            if (validateResult.error) {
+              reporter.addResult({
+                database: label, dbType, testType: 'validate', success: false,
+                duration: Date.now() - validateStart, error: `Validation could not run: ${validateResult.error}`
+              });
+            }
+            for (const r of validateResult.results) {
+              const content = await fs.readFile(path.join(config.migrationsDir, r.file), 'utf-8');
+              const expected = parseExpectedErrors(content);
+              if (expected) expectsRejections = true;
+              const outcome = checkFileExpectation(r, expected);
+              const note = expected ? ` (expected: ${expected.join(', ')})` : '';
+              console.log(outcome.ok ? chalk.green(`   ✅ ${r.file}${note}`) : chalk.red(`   ❌ ${r.file}: ${outcome.message}`));
+              reporter.addResult({
+                database: `${label} [${r.file}]`,
+                dbType,
+                testType: 'validate',
+                success: outcome.ok,
+                duration: Date.now() - validateStart,
+                error: outcome.message
+              });
+            }
 
-            // Run Up-Down-Up test
-            console.log(chalk.blue(`\n[TEST] ${label} (${dbType}) Up-Down-Up...`));
-            const testResult = await adapter.runUpDownUpTest();
-            const upDownReportSuccess = expectFailure ? !testResult.success : testResult.success;
-            reporter.addResult({
-              database: label,
-              dbType,
-              testType: 'up-down-up',
-              success: upDownReportSuccess,
-              duration: testResult.duration,
-              error: upDownReportSuccess
-                ? null
-                : (testResult.success ? 'Expected up-down-up to fail, but it passed' : testResult.error)
-            });
+            // Up-Down-Up only for fixtures whose migrations are all meant to
+            // be valid: ones meant to be rejected are never executed by
+            // up/sync either (validation gate), so running them proves nothing.
+            if (expectsRejections) {
+              console.log(chalk.gray(`\n[TEST] ${label} — Up-Down-Up skipped: contains migrations that are expected to be rejected`));
+            } else {
+              console.log(chalk.blue(`\n[TEST] ${label} (${dbType}) Up-Down-Up...`));
+              const testResult = await adapter.runUpDownUpTest();
+              reporter.addResult({
+                database: label,
+                dbType,
+                testType: 'up-down-up',
+                success: testResult.success,
+                duration: testResult.duration,
+                error: testResult.success ? null : testResult.error
+              });
+            }
 
             // ═══════════════════════════════════════════════════════
             // DDL: Sanity Check (optional, requires --sanity-check flag)
@@ -2316,6 +2481,7 @@ program
         if (events.length > 0 || result.errors.length > 0 || hasSkipped) {
           const report = buildNotificationEmail({
             project: resolveProjectLabel(adapter, config),
+            target: resolveTargetLabel(adapter),
             environment: process.env.DB_MIGRATE_ENVIRONMENT,
             dbType: adapter.dbType,
             status: result.errors.length > 0 ? 'failed' : 'success',
@@ -2476,32 +2642,36 @@ program
   .option('--validate', 'Enable validation before running')
   .option('--allow-dangerous', 'Allow dangerous operations when validating')
   .option('--allow-forbidden', 'Allow forbidden operations when validating')
-  .option('-o, --output <dir>', 'Directory to write per-instance run notification emails to', 'reports')
+  .option('-o, --output <dir>', 'Directory for the per-instance notification emails and the run summary', 'reports')
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     
     let adapters;
     try {
       adapters = await getAdapters(options);
+      assertUniqueInstanceNames(adapters);
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
       process.exit(1);
     }
     
-    const config = await loadConfig(options.config);
-    const migrationsDir = resolveMigrationsDir(config, options.config);
-    
     console.log(chalk.blue(`\n🔐 Running DCL migrations on ${adapters.length} instance(s)...\n`));
 
     let hasErrors = false;
     const dclChecker = new DCLIdempotentChecker({ verbose: false });
+    const summaryInstances = [];
 
-    for (const { name, adapter } of adapters) {
+    for (const { name, adapter, config: instanceConfig } of adapters) {
+      // Each instance runs its own migrationsDir (falls back to the top-level
+      // one — see getAdapters()), so instances can manage different accounts.
+      const migrationsDir = instanceConfig.migrationsDir;
+      const target = resolveTargetLabel(adapter);
+      const summary = { name, target, dbType: adapter.dbType, status: 'success', events: [], errors: [] };
       try {
         await adapter.connect();
 
         const runner = new RepeatableRunner({
-          checksumTable: resolveChecksumTable(config)
+          checksumTable: resolveChecksumTable(instanceConfig)
         });
 
         const context = buildDCLContext(adapter, migrationsDir, {
@@ -2510,13 +2680,13 @@ program
 
         if (options.dryRun) {
           const status = await runner.status(context);
-          console.log(chalk.blue(`\n[${name}] Would apply ${status.pending.length} DCL migration(s)`));
+          console.log(chalk.blue(`\n[${name}] ${target} — would apply ${status.pending.length} DCL migration(s) from ${migrationsDir}`));
           for (const p of status.pending) {
             console.log(chalk.gray(`   - ${p.fileName} (${p.reason})`));
           }
         } else {
-          console.log(chalk.blue(`\n[${name}] Running DCL migrations...`));
-          const beforeDCLState = await captureDCLState(dclChecker, adapter, config);
+          console.log(chalk.blue(`\n[${name}] ${target} — running DCL migrations from ${migrationsDir}...`));
+          const beforeDCLState = await captureDCLState(dclChecker, adapter, instanceConfig);
           const result = await runner.run(context);
 
           if (result.applied.length > 0) {
@@ -2524,21 +2694,7 @@ program
             for (const m of result.applied) {
               console.log(chalk.gray(`      - ${m.fileName} (${m.reason})`));
             }
-
-            const afterDCLState = await captureDCLState(dclChecker, adapter, config);
-            const dclDiff = dclChecker.diffStates(beforeDCLState, afterDCLState, adapter.dbType);
-            const events = buildDCLNotificationEvents(runner.credentialEvents, dclDiff, adapter.dbType);
-            if (events.length > 0) {
-              const report = buildNotificationEmail({
-                project: `${resolveProjectLabel(adapter, config)} (${name})`,
-                environment: process.env.DB_MIGRATE_ENVIRONMENT,
-                dbType: adapter.dbType,
-                dcl: { events }
-              });
-              const notificationPath = await saveNotificationEmail(options.output, notificationEmailToHTML(report), `notification-${name}.html`);
-              console.log(chalk.gray(`      📧 Notification email written to ${notificationPath}`));
-            }
-          } else {
+          } else if (result.errors.length === 0) {
             console.log(chalk.gray(`   All DCL migrations are up-to-date.`));
           }
           
@@ -2548,18 +2704,64 @@ program
           
           if (result.errors.length > 0) {
             hasErrors = true;
+            summary.status = 'failed';
+            summary.errors = result.errors;
             console.log(chalk.red(`   ❌ Errors:`));
             for (const e of result.errors) {
               console.log(chalk.red(`      - ${e}`));
             }
           }
+
+          // Same rule as single-instance `dcl`: a partially failed run still
+          // gets its email — passwords for what DID apply exist nowhere else.
+          if (result.applied.length > 0 || result.errors.length > 0) {
+            const afterDCLState = await captureDCLState(dclChecker, adapter, instanceConfig);
+            const dclDiff = dclChecker.diffStates(beforeDCLState, afterDCLState, adapter.dbType);
+            summary.events = buildDCLNotificationEvents(runner.credentialEvents, dclDiff, adapter.dbType);
+          }
+          const hasSkipped = result.skipped && result.skipped.length > 0;
+          if (summary.events.length > 0 || result.errors.length > 0 || hasSkipped) {
+            const report = buildNotificationEmail({
+              project: `${resolveProjectLabel(adapter, instanceConfig)} (${name})`,
+              target,
+              environment: process.env.DB_MIGRATE_ENVIRONMENT,
+              dbType: adapter.dbType,
+              status: summary.status,
+              dcl: {
+                events: summary.events,
+                errors: result.errors.length > 0 ? result.errors : undefined,
+                skipped: hasSkipped ? result.skipped : undefined
+              }
+            });
+            const notificationPath = await saveNotificationEmail(options.output, notificationEmailToHTML(report), instanceNotificationFileName(name));
+            summary.notificationFile = notificationPath;
+            console.log(chalk.gray(`      📧 Notification email written to ${notificationPath}`));
+          }
         }
         
       } catch (error) {
         hasErrors = true;
+        summary.status = 'failed';
+        summary.errors = [error.message];
         console.log(chalk.red(`\n[${name}] ❌ Error: ${error.message}`));
       } finally {
         await adapter.disconnect();
+      }
+      summaryInstances.push(summary);
+    }
+
+    if (!options.dryRun) {
+      try {
+        const summaryReport = buildMultiInstanceSummary({
+          project: path.basename(path.dirname(path.resolve(options.config))),
+          environment: process.env.DB_MIGRATE_ENVIRONMENT,
+          instances: summaryInstances
+        });
+        const summaryPath = await saveNotificationEmail(options.output, multiInstanceSummaryToHTML(summaryReport), 'notification-summary.html');
+        console.log(chalk.gray(`\n📋 Run summary (no passwords) written to ${summaryPath}`));
+      } catch (summaryError) {
+        hasErrors = true;
+        console.error(chalk.red(`\n[ERROR] Failed to write run summary: ${summaryError.message}`));
       }
     }
     
@@ -2582,25 +2784,23 @@ program
       process.exit(1);
     }
     
-    const config = await loadConfig(options.config);
-    const migrationsDir = resolveMigrationsDir(config, options.config);
-    
     console.log(chalk.blue(`\n📊 DCL Status for ${adapters.length} instance(s):\n`));
     console.log(chalk.gray('═'.repeat(60)));
     
-    for (const { name, adapter } of adapters) {
+    for (const { name, adapter, config: instanceConfig } of adapters) {
       try {
         await adapter.connect();
         
         const runner = new RepeatableRunner({
-          checksumTable: resolveChecksumTable(config)
+          checksumTable: resolveChecksumTable(instanceConfig)
         });
         
-        const context = buildDCLContext(adapter, migrationsDir);
+        const context = buildDCLContext(adapter, instanceConfig.migrationsDir);
         
         const status = await runner.status(context);
         
-        console.log(chalk.blue(`\n[${name}] (${adapter.dbType})`));
+        console.log(chalk.blue(`\n[${name}] (${adapter.dbType}) ${resolveTargetLabel(adapter)}`));
+        console.log(chalk.gray(`  ${instanceConfig.migrationsDir}`));
         console.log(chalk.gray('─'.repeat(40)));
         console.log(chalk.yellow(`  ⏳ Pending: ${status.pending.length}`));
         console.log(chalk.green(`  ✅ Up-to-date: ${status.upToDate.length}`));
@@ -2636,29 +2836,27 @@ program
       process.exit(1);
     }
     
-    const config = await loadConfig(options.config);
-    const migrationsDir = resolveMigrationsDir(config, options.config);
-    
     console.log(chalk.blue(`\n🔍 Verifying DCL idempotency on ${adapters.length} instance(s)...\n`));
     console.log(chalk.gray('═'.repeat(60)));
     
     let allPassed = true;
     
-    for (const { name, adapter } of adapters) {
+    for (const { name, adapter, config: instanceConfig } of adapters) {
       try {
         await adapter.connect();
         
+        const migrationsDir = instanceConfig.migrationsDir;
         const runner = new RepeatableRunner({
-          checksumTable: resolveChecksumTable(config)
+          checksumTable: resolveChecksumTable(instanceConfig)
         });
         
         const checker = new DCLIdempotentChecker({
-          verbose: config.idempotencyCheck?.verbose ?? true
+          verbose: instanceConfig.idempotencyCheck?.verbose ?? true
         });
         
         const context = buildDCLContext(adapter, migrationsDir);
         
-        console.log(chalk.blue(`\n[${name}] (${adapter.dbType})`));
+        console.log(chalk.blue(`\n[${name}] (${adapter.dbType}) ${resolveTargetLabel(adapter)}`));
         console.log(chalk.gray('─'.repeat(40)));
         
         const files = await runner.getRepeatableFiles(migrationsDir);
@@ -2669,7 +2867,7 @@ program
           const executeScript = () => executeDCLFile(adapter, runner, file);
           
           const result = await checker.verify(context, executeScript, {
-            database: config.database || adapter.config?.mariadb?.database,
+            database: adapter.config?.mariadb?.database || instanceConfig.database,
             scriptName: file.fileName
           });
           

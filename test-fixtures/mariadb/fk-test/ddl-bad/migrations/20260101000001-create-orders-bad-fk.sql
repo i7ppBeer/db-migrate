@@ -1,3 +1,4 @@
+-- @expect-error: FK_UNRESOLVED_REFERENCE
 -- Migration: BAD EXAMPLE — orders references customers which hasn't been created yet
 -- FK Test (cross-file): FK_UNRESOLVED_REFERENCE expected
 

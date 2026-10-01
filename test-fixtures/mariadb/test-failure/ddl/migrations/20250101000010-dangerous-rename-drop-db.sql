@@ -1,3 +1,4 @@
+-- @expect-error: DROP_DATABASE,DROP_SCHEMA,RENAME_TABLE
 -- 測試：RENAME TABLE 搭配 DROP DATABASE
 -- 預期驗證結果：失敗（DROP DATABASE 是最危險的操作）
 

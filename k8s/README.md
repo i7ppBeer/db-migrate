@@ -7,9 +7,27 @@ are small and this pattern is shared across multiple projects — a separate
 derived-image approach would mean rebuilding an image per project per
 migration change, which doesn't fit that setup).
 
+What the Job's `sync` does before touching anything: it refuses (exit 1, nothing
+applied, a failure `notification.html` explaining why) if the configured database
+doesn't exist, if the changelog/checksums don't match the files, or if any pending
+migration fails validation — the same rules `validate` applies. So a reviewed
+dangerous change needs its `@allow` annotation in the file (or `--allow …` added to
+the Job's `args`) before it can ship. The Secret must provide `MARIADB_USER` /
+`MARIADB_PASSWORD`; there is no fallback. For the very first deploy into an empty
+environment, set `createDatabaseIfMissing: true` in that environment's config.
+
 These are templates (`{{ project }}`, `{{ namespace }}`, `{{ contentHash }}`
 placeholders) meant to be filled in by your CI/CD pipeline or a tool like
 Kustomize/Helm — not applied to a cluster as-is.
+
+## CI/CD (`.github/workflows/migrations.yml`)
+
+The workflow's `deploy-staging` / `deploy-production` jobs apply these manifests, but
+only once you turn them on: set the repository variable **`DEPLOY_ENABLED=true`**
+(Settings → Secrets and variables → Actions → Variables). Until then they're skipped,
+so `main` stays green while no cluster is wired up. The Job connects to
+`mariadb.<namespace>.svc.cluster.local` by default; set `STAGING_MARIADB_HOST` /
+`PRODUCTION_MARIADB_HOST` variables to point it elsewhere.
 
 ## Files
 

@@ -1,6 +1,6 @@
 # Multi-Instance Configuration
 
-Manage multiple database instances from a single config file. All instances share the same migration files but each has its own connection settings.
+Manage multiple database instances from a single config file. By default all instances share the same migration files and each has its own connection settings; an instance can also point at its own `migrationsDir` (see [Different accounts per instance](#different-accounts-per-instance-dcl)).
 
 ---
 
@@ -72,6 +72,43 @@ export default {
 
 ---
 
+## Different accounts per instance (DCL)
+
+Typical case: one server per region, every server has a database with the **same name** (`app`), but each region needs its own accounts. Give each instance its own `migrationsDir` — `dcl-all`, `dcl:status-all` and `dcl:verify-all` run each instance against its own directory (an instance without one uses the top-level `migrationsDir`):
+
+```javascript
+// dcl/config.js
+const instance = (name, host, dir) => ({
+  name,                       // must be unique — it names the notification file
+  migrationsDir: dir,         // relative to this config file
+  mariadb: { host, port: 3306, database: 'app', user: 'root', password: process.env.MARIADB_PASSWORD }
+});
+
+export default {
+  type: 'mariadb',
+  mode: 'repeatable',
+  checksumTable: '_dcl_migrations',
+  instances: [
+    instance('prod-tw', 'db-tw.internal', './prod-tw'),   // R__001_tw_report.sql, …
+    instance('prod-jp', 'db-jp.internal', './prod-jp'),   // R__001_jp_analyst.sql, …
+  ]
+};
+```
+
+Accounts every instance needs go into each directory (a copy of the same `R__` file per directory is fine — each instance tracks its own checksums in its own database).
+
+`dcl-all -c dcl/config.js` then writes, under `reports/` (or `-o <dir>`):
+
+| File | Contains | Send to |
+|---|---|---|
+| `notification-prod-tw.html` | prod-tw's account changes **and its generated passwords**; header `prod-tw`, `db-tw.internal:3306 · db app` | prod-tw's owner only |
+| `notification-prod-jp.html` | same for prod-jp — different accounts, different passwords | prod-jp's owner only |
+| `notification-summary.html` | every instance's status, host, which accounts changed and which file has the details — **no passwords** | whoever runs the rollout |
+
+Because the database name alone is ambiguous here, every email and console line identifies an instance by name **and** `host:port`. Duplicate instance names are rejected before anything connects (they would overwrite each other's notification file). If one instance fails, the others still run and get their emails; the summary marks the failure and the command exits non-zero.
+
+---
+
 ## Commands
 
 ### DDL Multi-Instance
@@ -100,7 +137,7 @@ docker compose run --rm migrate test-instances --parallel -c /app/test-fixtures/
 ### DCL Multi-Instance
 
 ```bash
-# Run DCL on all instances
+# Run DCL on all instances (writes notification-<instance>.html per instance + notification-summary.html)
 docker compose run --rm migrate dcl-all -c /app/test-fixtures/mariadb/multi-instance/dcl/config.js
 
 # Check DCL status on all instances

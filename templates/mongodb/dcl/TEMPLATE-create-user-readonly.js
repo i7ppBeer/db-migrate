@@ -4,8 +4,9 @@
 // CHANGE_ME_ON_FIRST_LOGIN is replaced at runtime with an independently
 // generated password — never written back to this file, never printed to
 // the console. It shows up exactly once, in plaintext, in the run's
-// notification email (reports/notification.html), labeled as a temporary
-// credential that expires on first login. See docs/DCL-PASSWORD.md.
+// notification email (reports/notification.html), with the change-by date
+// recorded in customData.expiresAt (MongoDB does not enforce it).
+// See docs/DCL-PASSWORD.md.
 //
 // passwordSet / createdUsernames / allUsernames in the return value are how
 // the runner tells "new account" from "already existed" from "password

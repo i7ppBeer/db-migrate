@@ -1,3 +1,4 @@
+-- @expect-error: CREATE_USER,DROP_USER,GRANT,REVOKE,FLUSH_PRIVILEGES
 -- 混合測試：多種管理員危險操作
 -- 預期驗證結果：失敗（包含多種 DCL 危險指令）
 

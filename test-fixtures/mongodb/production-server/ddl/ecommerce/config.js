@@ -11,6 +11,8 @@
 
 export default {
   type: 'mongodb',
+  // Test fixture: its database is created from scratch on each run
+  createDatabaseIfMissing: true,
   mongodb: {
     url: process.env.MONGODB_URL || 'mongodb://ecommerce_app:ecommerce_app_secure_pass_123@localhost:27017',
     databaseName: process.env.MONGODB_DATABASE || 'ecommerce',

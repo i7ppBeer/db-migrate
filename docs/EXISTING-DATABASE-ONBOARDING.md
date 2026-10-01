@@ -48,8 +48,8 @@ export default {
   mariadb: {
     host: process.env.MARIADB_HOST || 'localhost',
     port: parseInt(process.env.MARIADB_PORT || '3306'),
-    user: process.env.MARIADB_USER || 'root',
-    password: process.env.MARIADB_PASSWORD || 'password',
+    user: process.env.MARIADB_USER,          // required — no built-in default
+    password: process.env.MARIADB_PASSWORD,  // required — no built-in default
     database: process.env.MARIADB_DATABASE || 'my_database',
     multipleStatements: true
   },
@@ -85,8 +85,8 @@ export default {
   mariadb: {
     host: process.env.MARIADB_HOST || 'localhost',
     port: parseInt(process.env.MARIADB_PORT || '3306'),
-    user: process.env.MARIADB_USER || 'root',
-    password: process.env.MARIADB_PASSWORD || 'password',
+    user: process.env.MARIADB_USER,          // required — no built-in default
+    password: process.env.MARIADB_PASSWORD,  // required — no built-in default
     database: process.env.MARIADB_DATABASE || 'my_database',
     multipleStatements: true
   },

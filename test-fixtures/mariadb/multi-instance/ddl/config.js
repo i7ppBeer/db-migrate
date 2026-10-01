@@ -9,6 +9,8 @@
  */
 export default {
   type: 'mariadb',
+  // Test fixture: its database is created from scratch on each run
+  createDatabaseIfMissing: true,
   changelogTable: '_migrations',
 
   // 多個 database instances

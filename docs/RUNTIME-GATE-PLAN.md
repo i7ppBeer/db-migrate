@@ -45,9 +45,19 @@ connects, not just `up`/`sync`/`dcl`.
   `config.mongodb.databaseName`. A mismatch here means an env var resolved to the wrong
   environment, which is exactly the kind of mistake that leads to running a migration
   meant for staging against production.
+- ✅ The database **exists**. Before this check, `connect()` ran `CREATE DATABASE IF NOT
+  EXISTS` (MariaDB) and MongoDB creates a database on first write — so a typo'd name or
+  wrong environment got a brand-new empty database, every migration was applied to it,
+  and the identity check above could never fail. Now a missing database is an error
+  unless the config sets `createDatabaseIfMissing: true` (new environments, local/test
+  fixtures). MariaDB checks `information_schema.SCHEMATA`; MongoDB checks
+  `listDatabases({ nameOnly, authorizedDatabases })` for versioned runs and only warns
+  if the account isn't allowed to list databases.
+- ✅ Credentials are configured. MariaDB no longer falls back to `root`/`rootpass` when
+  `user`/`password` (or `MARIADB_USER`/`MARIADB_PASSWORD`) are missing — it stops.
 
 **On failure**: abort immediately (connection is closed first), print which database
-was expected vs. actually connected, exit non-zero. No `--force` — see
+was expected vs. actually connected (or that it doesn't exist), exit non-zero. No `--force` — see
 `connect()` in both `src/adapters/mariadb-adapter.js` and `mongodb-adapter.js`, and
 `test/mariadb-adapter.test.js` / `test/mongodb-adapter.test.js`'s `describe('connect()
 — Gate R0 identity check', ...)` blocks.

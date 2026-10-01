@@ -570,7 +570,9 @@ describe('Cross-Adapter Edge Cases', () => {
     it('MariaDB: should handle empty content', () => {
       const adapter = new MariaDBAdapter({ migrationsDir: '.', changelogTable: 'test' });
       const result = adapter.validateContent('', 'empty.sql');
-      expect(result.valid).toBe(true);
+      // An empty versioned file has no Up section — it would never run
+      expect(result.valid).toBe(false);
+      expect(result.errors.map(e => e.code)).toEqual(['MISSING_UP_MARKER']);
     });
 
     it('MariaDB: should handle null in normalizeSQL', () => {

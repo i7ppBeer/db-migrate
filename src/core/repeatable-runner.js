@@ -22,6 +22,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
 import os from 'os';
+import { maskComments } from './source-scan.js';
 
 /**
  * Built-in helpers passed as the third argument to MongoDB DCL up(db, client, helpers).
@@ -260,16 +261,30 @@ export class RepeatableRunner {
    */
   resolvePlaceholderPasswords(content, fileName) {
     const PLACEHOLDER = 'CHANGE_ME_ON_FIRST_LOGIN';
-    if (!content.includes(PLACEHOLDER)) {
+    // Only occurrences outside comments are real credentials. A placeholder
+    // mentioned in a comment (every official template has one) must not get
+    // a password of its own, or recordCredentialEvents() — which pairs
+    // usernames to passwords positionally, ignoring comments — would hand
+    // out the comment's password instead of the one actually executed.
+    const masked = this.maskComments(content, this.detectLanguage(content, fileName));
+    const positions = [];
+    for (let i = masked.indexOf(PLACEHOLDER); i !== -1; i = masked.indexOf(PLACEHOLDER, i + PLACEHOLDER.length)) {
+      positions.push(i);
+    }
+    if (positions.length === 0) {
       return { resolved: content, generated: false, passwords: null };
     }
 
     const passwords = [];
-    const resolved = content.replace(/CHANGE_ME_ON_FIRST_LOGIN/g, () => {
+    let resolved = '';
+    let cursor = 0;
+    for (const pos of positions) {
       const pw = this.generateSecurePassword();
       passwords.push(pw);
-      return pw;
-    });
+      resolved += content.slice(cursor, pos) + pw;
+      cursor = pos + PLACEHOLDER.length;
+    }
+    resolved += content.slice(cursor);
 
     // Detect whether this is a reset-password (ALTER USER) or new account (CREATE USER)
     const isReset = /\bALTER\s+USER\b/i.test(content) && !/\bCREATE\s+USER\b/i.test(content);
@@ -293,12 +308,24 @@ export class RepeatableRunner {
    */
   stripCommentsAndCollapse(sql) {
     if (!sql) return '';
-    return sql
-      // Remove single-line comments (-- …) but keep the newline as a space
-      .replace(/--[^\n]*/g, ' ')
+    return this.maskComments(sql, 'sql')
       // Collapse all whitespace (including newlines) to a single space
       .replace(/\s+/g, ' ')
       .trim();
+  }
+
+  /**
+   * 'js' for MongoDB migration files, 'sql' otherwise. Falls back to sniffing
+   * the content when no file name is available (recordCredentialEvents()).
+   */
+  detectLanguage(content, fileName) {
+    if (fileName) return /\.[cm]?js$/i.test(fileName) ? 'js' : 'sql';
+    return content.includes('export async function up') ? 'js' : 'sql';
+  }
+
+  /** See maskComments() in src/core/source-scan.js. */
+  maskComments(content, lang) {
+    return maskComments(content, lang);
   }
 
   /**
@@ -331,7 +358,9 @@ export class RepeatableRunner {
         // JS: scan line by line for:
         //   const username = 'app_xxx';   (single-var style)
         //   user: 'app_xxx',              (object property style)
-        for (const line of originalContent.split('\n')) {
+        // Comments masked out so a commented-out user isn't paired with a
+        // password (resolvePlaceholderPasswords() ignores comments too).
+        for (const line of this.maskComments(originalContent, 'js').split('\n')) {
           const m = line.match(/const\s+username\s*=\s*['"']([^'"']+)['"']/) ||
                     line.match(/\buser\s*:\s*['"]([^'"]+)['"]/);
           if (m) usernames.push(m[1]);
@@ -346,31 +375,46 @@ export class RepeatableRunner {
           const isAlter  = /\bALTER\s+USER\b/i.test(stmt);
           if (!isCreate && !isAlter) continue;
           if (!stmt.includes(PLACEHOLDER)) continue;
-          // SQL pattern: 'username'@host  or  `username`@host
-          const m = stmt.match(/['"`]([^'"`@\s]+)['"`]\s*@/);
-          if (m) usernames.push({ name: m[1], isReset: isAlter && !isCreate });
+          // SQL pattern: 'username'@'host'  or  `username`@host
+          const m = stmt.match(/['"`]([^'"`@\s]+)['"`]\s*@\s*['"`]?([^'"`\s;]+)['"`]?/);
+          if (m) {
+            usernames.push({
+              name: m[1],
+              host: m[2],
+              isReset: isAlter && !isCreate,
+              // Only a bare PASSWORD EXPIRE forces a change on first login;
+              // EXPIRE NEVER / DEFAULT / INTERVAL n DAY don't.
+              expiresOnFirstLogin: /\bPASSWORD\s+EXPIRE\b(?!\s+(?:NEVER|DEFAULT|INTERVAL)\b)/i.test(stmt)
+            });
+          }
         }
       }
     }
 
-    // Normalise to plain string list for writing; detect if all entries are resets
+    // Normalise to { name, host?, expiresOnFirstLogin? }; detect if all entries are resets
     const isResetPwd = usernames.length > 0 && usernames.every(u => u?.isReset);
-    const usernameList = usernames.map(u => (typeof u === 'string' ? u : u.name));
+    const accounts = usernames.map(u => (typeof u === 'string' ? { name: u } : u));
+    const usernameList = accounts.map(a => a.name);
 
     if (usernameList.length === 0) return;
+
+    // host is only known for SQL (MariaDB 'user'@'host'); left off otherwise
+    const identity = (a) => (a.host ? { username: a.name, host: a.host } : { username: a.name });
 
     // CREATE USER: skip if account already existed (password was NOT changed by IF NOT EXISTS)
     // ALTER USER (reset_pwd): always record — ALTER USER unconditionally changes the password
     if (alreadyExists && !isResetPwd) {
-      for (const u of usernameList) this.credentialEvents.push({ type: 'no_change', username: u });
+      for (const a of accounts) this.credentialEvents.push({ type: 'no_change', ...identity(a) });
       console.log(`  ⚠️  [DCL] Account already existed — password NOT changed: ${usernameList.join(', ')}`);
       return;
     }
 
     // Pair usernames[i] → pwArray[i]; fall back to last password if arrays diverge
     const type = isResetPwd ? 'password_changed' : 'new';
-    usernameList.forEach((u, i) => {
-      this.credentialEvents.push({ type, username: u, password: pwArray[i] ?? pwArray[pwArray.length - 1] });
+    accounts.forEach((a, i) => {
+      const event = { type, ...identity(a), password: pwArray[i] ?? pwArray[pwArray.length - 1] };
+      if (a.expiresOnFirstLogin) event.expiry = { onFirstLogin: true };
+      this.credentialEvents.push(event);
     });
     if (isResetPwd) {
       console.log(`  🔄 [DCL] Password rotated for: ${usernameList.join(', ')} (included in the run's notification email, not logged here)`);
@@ -408,6 +452,30 @@ export class RepeatableRunner {
       } catch (err) {
         console.warn(`  ⚠️  [DCL] customData inject failed for ${username}: ${err.message}`);
       }
+    }
+    return expiresAt;
+  }
+
+  /**
+   * Import a MongoDB migration's placeholder-resolved source, which contains
+   * plaintext generated passwords. It has to exist as a file for import(), so
+   * it goes into a fresh private directory (mkdtemp → 0700, file 0600 — not
+   * readable by other users on the host) that is removed as soon as the
+   * module has loaded, whether or not the import succeeded.
+   *
+   * @param {string} resolvedContent - Output of resolvePlaceholderPasswords()
+   * @param {string} fileName        - Original file name (for the .mjs name)
+   * @returns {Promise<Object>} the imported module
+   */
+  async importResolvedModule(resolvedContent, fileName) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dcl-'));
+    try {
+      // .mjs so Node treats it as ESM regardless of the temp dir having no package.json
+      const tempFilePath = path.join(dir, fileName.replace(/\.js$/, '.mjs'));
+      await fs.writeFile(tempFilePath, resolvedContent, { encoding: 'utf-8', mode: 0o600 });
+      return await import(`file://${tempFilePath}`);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
     }
   }
 
@@ -787,27 +855,15 @@ export class RepeatableRunner {
         // For JS files a temp file is written so the module can be dynamically imported.
         const { resolved: resolvedContent, generated, passwords } = this.resolvePlaceholderPasswords(file.content, file.fileName);
 
-        let moduleToRun;
-        let tempFilePath = null;
-        if (generated) {
-          // Write resolved JS to a temp file using .mjs extension so Node.js
-          // treats it as ESM regardless of the /tmp directory having no package.json.
-          const baseName = file.fileName.replace(/\.js$/, '.mjs');
-          tempFilePath = path.join(os.tmpdir(), `dcl-${crypto.randomBytes(8).toString('hex')}-${baseName}`);
-          await fs.writeFile(tempFilePath, resolvedContent, 'utf-8');
-          moduleToRun = await import(`file://${tempFilePath}`);
-        } else {
-          moduleToRun = await import(`file://${file.filePath}?t=${Date.now()}`);
-        }
+        const moduleToRun = generated
+          ? await this.importResolvedModule(resolvedContent, file.fileName)
+          : await import(`file://${file.filePath}?t=${Date.now()}`);
 
         if (typeof moduleToRun.up !== 'function') {
           throw new Error('Migration must export an "up" function');
         }
 
         const upResult = await moduleToRun.up(db, client, mongodbHelpers);
-
-        // Best-effort cleanup of temp file
-        if (tempFilePath) await fs.unlink(tempFilePath).catch(() => {});
 
         // passwordSet: true      → new account
         // passwordSet: false     → already existed, password NOT changed
@@ -849,9 +905,15 @@ export class RepeatableRunner {
             }
           }
           if (injectTargets.length > 0) {
-            await this.injectCustomDataMongoDB(client, injectTargets, isRotated
+            const expiresAt = await this.injectCustomDataMongoDB(client, injectTargets, isRotated
               ? 'Password rotated, requires password change before expiry.'
               : 'Auto-created user, requires password change before expiry.');
+            // Lets the notification email state the real deadline instead of a
+            // generic "expires" claim — MongoDB itself does not enforce it.
+            const targets = new Set(injectTargets);
+            for (const e of this.credentialEvents) {
+              if (e.password && targets.has(e.username) && !e.expiry) e.expiry = { at: expiresAt.toISOString() };
+            }
           }
         }
 

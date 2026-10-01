@@ -1,3 +1,4 @@
+-- @expect-error: RENAME_TABLE,FK_UNRESOLVED_REFERENCE
 -- Migration: BAD EXAMPLE — RENAME removes an old table name; FK in the same file still
 --            references the old name as if it still exists.
 -- FK Test (cross-file): FK_UNRESOLVED_REFERENCE expected

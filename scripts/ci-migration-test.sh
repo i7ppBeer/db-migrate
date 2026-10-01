@@ -218,7 +218,7 @@ run_test_for_db() {
     # ──────────────────────────────────────────────────────────
     print_substep "[Phase 4] Migration DOWN..."
     
-    if docker compose run --rm migrate down -n 999 -c "$ddl_config" 2>&1; then
+    if docker compose run --rm migrate down -n 999 --yes -c "$ddl_config" 2>&1; then
         record_result "[${db_type}] Migration DOWN" 0
     else
         record_result "[${db_type}] Migration DOWN" 1

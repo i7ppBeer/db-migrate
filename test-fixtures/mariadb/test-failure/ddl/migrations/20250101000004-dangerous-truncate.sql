@@ -1,3 +1,4 @@
+-- @expect-error: TRUNCATE_TABLE
 -- FAILURE CASE: Non-idempotent TRUNCATE operation
 -- TRUNCATE is dangerous because it cannot be rolled back
 

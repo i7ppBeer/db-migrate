@@ -1,3 +1,4 @@
+-- @expect-error: ORPHAN_DROP_DOWN
 -- FAILURE CASE: Orphan DROP in down() section
 -- Drops a table that wasn't created in up()
 

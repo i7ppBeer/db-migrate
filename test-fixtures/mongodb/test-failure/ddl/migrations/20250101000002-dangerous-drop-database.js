@@ -1,3 +1,4 @@
+// @expect-error: DROP_DATABASE
 /**
  * FAILURE CASE: Dangerous operation - dropDatabase
  * 

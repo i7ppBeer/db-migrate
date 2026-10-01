@@ -1,12 +1,14 @@
 /**
  * MongoDB Adapter
- * Wraps migrate-mongo for MongoDB migrations
+ * Uses migrate-mongo for connecting and scaffolding; status/up/down are
+ * implemented here (migrate-mongo can't exclude R__ files from a DDL dir).
  */
 
-import { BaseAdapter } from '../core/base-adapter.js';
+import { BaseAdapter, isRepeatableMigrationFile, selectPendingMigrations } from '../core/base-adapter.js';
 import { SanityChecker, MongoDBChecks } from '../core/sanity-checker.js';
 import migrateMongo from 'migrate-mongo';
 import { MongoClient } from 'mongodb';
+import { maskComments, findMatchingBrace } from '../core/source-scan.js';
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
@@ -104,11 +106,14 @@ export class MongoDBAdapter extends BaseAdapter {
       dangerous: {
         dataLoss: [
           { pattern: /\.drop\s*\(\s*\)/i, code: 'DROP_COLLECTION', message: '🟠 DATA LOSS: drop() will delete entire collection / 會刪除整個 Collection', suggestion: 'Confirm deletion and ensure backup exists / 確認真的要刪除，並確保有備份' },
-          { pattern: /\.deleteMany\s*\(\s*\{\s*\}\s*\)/i, code: 'DELETE_ALL', message: '🟠 DATA LOSS: deleteMany({}) will delete all documents / 會刪除所有文件', suggestion: 'Add query condition / 請加上查詢條件' },
-          { pattern: /\.remove\s*\(\s*\{\s*\}\s*\)/i, code: 'REMOVE_ALL', message: '🟠 DATA LOSS: remove({}) will delete all documents / 會刪除所有文件', suggestion: 'Use deleteMany with query condition / 請使用 deleteMany 並加上條件' }
+          { pattern: /\.dropCollection\s*\(/i, code: 'DROP_COLLECTION', message: '🟠 DATA LOSS: dropCollection() will delete entire collection / 會刪除整個 Collection', suggestion: 'Confirm deletion and ensure backup exists / 確認真的要刪除，並確保有備份' },
+          // deleteMany() with no filter deletes everything too (the driver treats it as {})
+          { pattern: /\.deleteMany\s*\(\s*(?:\{\s*\}\s*)?(?:,|\))/i, code: 'DELETE_ALL', message: '🟠 DATA LOSS: deleteMany() with an empty/missing filter will delete all documents / 會刪除所有文件', suggestion: 'Add query condition / 請加上查詢條件' },
+          { pattern: /\bdeleteMany\s*:\s*\{\s*filter\s*:\s*\{\s*\}/i, code: 'DELETE_ALL', message: '🟠 DATA LOSS: bulkWrite deleteMany with an empty filter will delete all documents / 會刪除所有文件', suggestion: 'Add query condition / 請加上查詢條件' },
+          { pattern: /\.remove\s*\(\s*(?:\{\s*\}\s*)?(?:,|\))/i, code: 'REMOVE_ALL', message: '🟠 DATA LOSS: remove({}) will delete all documents / 會刪除所有文件', suggestion: 'Use deleteMany with query condition / 請使用 deleteMany 並加上條件' }
         ],
         bulkOperation: [
-          { pattern: /\.updateMany\s*\(\s*\{\s*\}\s*,/i, code: 'UPDATE_ALL', message: '🟠 DATA RISK: updateMany({}, ...) will update all documents / 會更新所有文件', suggestion: 'Add query condition / 請加上查詢條件' },
+          { pattern: /\.updateMany\s*\(\s*\{\s*\}\s*,|\bupdateMany\s*:\s*\{\s*filter\s*:\s*\{\s*\}/i, code: 'UPDATE_ALL', message: '🟠 DATA RISK: updateMany({}, ...) will update all documents / 會更新所有文件', suggestion: 'Add query condition / 請加上查詢條件' },
           { pattern: /\.replaceOne\s*\(/i, code: 'REPLACE_ONE', message: '🟠 DATA RISK: replaceOne will completely replace document / 會完全取代文件', suggestion: 'Consider using updateOne with $set / 考慮使用 updateOne 搭配 $set' }
         ],
         schemaChange: [
@@ -224,6 +229,30 @@ export class MongoDBAdapter extends BaseAdapter {
         );
       }
 
+      // Gate R0: MongoDB creates a database on first write, so a typo'd name
+      // or wrong environment would quietly get a brand-new empty database.
+      // Versioned (DDL) runs refuse a database that doesn't exist yet unless
+      // createDatabaseIfMissing is set (new environments, local/test setups).
+      if (expectedDbName && this.config.mode !== 'repeatable' && !this.config.createDatabaseIfMissing) {
+        let names = null;
+        try {
+          const { databases } = await client.db('admin').admin().listDatabases({ nameOnly: true, authorizedDatabases: true });
+          names = databases.map(d => d.name);
+        } catch (listError) {
+          // Accounts without listDatabases rights: can't tell, don't block.
+          console.warn(`  ⚠️  Could not check that database '${expectedDbName}' exists (${listError.message}) — continuing.`);
+        }
+        if (names && !names.includes(expectedDbName)) {
+          await client.close();
+          this.db = null;
+          this.client = null;
+          throw new Error(
+            `database '${expectedDbName}' does not exist on this server. Check the URL and database name. ` +
+            'If this is a new environment and it should be created, set createDatabaseIfMissing: true in the config.'
+          );
+        }
+      }
+
       return { db, client };
     } catch (error) {
       throw new Error(`MongoDB connection failed: ${error.message}`);
@@ -265,29 +294,6 @@ export class MongoDBAdapter extends BaseAdapter {
     return checksum;
   }
 
-  /**
-   * Set the checksum field on already-inserted changelog documents — used
-   * after migrate-mongo's own migrateMongo.up() writes the changelog entry
-   * itself (its insert has no checksum field), so status()'s comparison
-   * still has something to compare against. Best-effort: a failure here
-   * just leaves that entry unchecksummed until the next status() call
-   * adopts it as a fresh baseline, not a reason to fail the whole run.
-   * @param {string[]} fileNames - migrate-mongo's own applied-filename list
-   */
-  async backfillChecksums(fileNames) {
-    for (const fileName of fileNames || []) {
-      try {
-        const content = await fs.readFile(path.join(this.config.migrationsDir, fileName), 'utf-8');
-        await this.db.collection(this.changelogCollection).updateOne(
-          { fileName },
-          { $set: { checksum: this.calculateChecksum(content) } }
-        );
-      } catch {
-        // best-effort, see doc comment above
-      }
-    }
-  }
-
   async status() {
     try {
       // DCL/repeatable mode uses checksumCollection, not the DDL changelog collection.
@@ -296,103 +302,135 @@ export class MongoDBAdapter extends BaseAdapter {
         return { pending: [], applied: [], total: 0 };
       }
 
-      const statusResult = await migrateMongo.status(this.db);
+      // Own bookkeeping instead of migrate-mongo's status(): migrate-mongo
+      // treats every .js file in the directory as a migration, including
+      // R__ (DCL) files, and has no way to filter them.
+      const migrationFiles = await this.getMigrationFiles();
+      const changelogDocs = await this.db.collection(this.changelogCollection).find({}).toArray();
+      const docByFile = new Map(changelogDocs.map(d => [d.fileName, d]));
 
-      const pendingList = statusResult.filter(m => m.appliedAt === 'PENDING');
-      const appliedList = statusResult.filter(m => m.appliedAt !== 'PENDING');
-
-      // migrate-mongo's own status() doesn't know about checksums — read the
-      // changelog collection directly (same collection, same documents it
-      // just wrote) to get them, keyed by fileName.
-      const checksumByFile = new Map();
-      if (appliedList.length > 0) {
-        const checksumDocs = await this.db.collection(this.changelogCollection)
-          .find({ fileName: { $in: appliedList.map(m => m.fileName) } })
-          .toArray();
-        for (const d of checksumDocs) checksumByFile.set(d.fileName, d.checksum ?? null);
-      }
-
+      const pending = [];
+      const applied = [];
       const checksumMismatches = [];
       const checksumBaselined = [];
+      // Applied migrations should form a contiguous prefix of the sorted
+      // file list — once a pending file is seen, any LATER applied file (in
+      // sort order) means migrations ran out of order or a file was renamed
+      // after being applied.
+      const outOfOrderApplied = [];
+      let seenPending = false;
 
-      for (const m of appliedList) {
-        const storedChecksum = checksumByFile.get(m.fileName);
+      for (const file of migrationFiles) {
+        const doc = docByFile.get(file);
+        if (!doc) {
+          pending.push(file);
+          seenPending = true;
+          continue;
+        }
+        if (seenPending) outOfOrderApplied.push(file);
+        applied.push({ fileName: file, appliedAt: doc.appliedAt });
+
         let currentChecksum = null;
         try {
-          const content = await fs.readFile(path.join(this.config.migrationsDir, m.fileName), 'utf-8');
+          const content = await fs.readFile(path.join(this.config.migrationsDir, file), 'utf-8');
           currentChecksum = this.calculateChecksum(content);
         } catch {
           // File unreadable (permissions, race) — skip the checksum check
           // for this entry rather than fail status() entirely.
         }
-
         if (currentChecksum) {
-          if (storedChecksum == null) {
+          if (doc.checksum == null) {
             // Doc predates checksum tracking (upgraded from an older version
-            // of this tool, or written by migrate-mongo's own up() path which
-            // doesn't set this field). Adopt current content as the trusted
-            // baseline going forward.
+            // of this tool, or written by migrate-mongo itself). Adopt current
+            // content as the trusted baseline going forward.
             await this.db.collection(this.changelogCollection).updateOne(
-              { fileName: m.fileName },
+              { fileName: file },
               { $set: { checksum: currentChecksum } }
             );
-            checksumBaselined.push(m.fileName);
-          } else if (storedChecksum !== currentChecksum) {
-            checksumMismatches.push({ fileName: m.fileName, appliedAt: m.appliedAt });
+            checksumBaselined.push(file);
+          } else if (doc.checksum !== currentChecksum) {
+            checksumMismatches.push({ fileName: file, appliedAt: doc.appliedAt });
           }
         }
       }
 
-      // Gate R1 (remaining checks) — migrate-mongo's own status() only ever
-      // lists migrations backed by a file currently on disk, so it can't
-      // surface a changelog doc whose file was deleted/renamed afterward.
-      // Query the raw collection directly to find those.
-      const migrationFiles = await this.getMigrationFiles();
+      // Gate R1 (remaining checks): a changelog doc with no file on disk.
+      // R__ entries are reported separately — older versions of this tool
+      // ran R__ files found in a DDL directory as versioned migrations, and
+      // those leftover docs are not a sign of a deleted/renamed migration.
       const fileNameSet = new Set(migrationFiles);
-      const allChangelogDocs = await this.db.collection(this.changelogCollection).find({}).toArray();
-      const orphanedChangelogEntries = allChangelogDocs
-        .filter(d => !fileNameSet.has(d.fileName))
-        .map(d => ({ id: d.fileName, appliedAt: d.appliedAt }));
-
-      // Applied migrations should form a contiguous prefix of the sorted
-      // file list — once a pending file is seen, any LATER applied file (in
-      // sort order) means migrations ran out of order or a file was renamed
-      // after being applied.
-      const appliedFileNameSet = new Set(appliedList.map(m => m.fileName));
-      const outOfOrderApplied = [];
-      let seenPending = false;
-      for (const file of migrationFiles) {
-        if (appliedFileNameSet.has(file)) {
-          if (seenPending) outOfOrderApplied.push(file);
-        } else {
-          seenPending = true;
-        }
+      const orphanedChangelogEntries = [];
+      const ignoredRepeatableEntries = [];
+      for (const d of changelogDocs) {
+        if (fileNameSet.has(d.fileName)) continue;
+        if (isRepeatableMigrationFile(d.fileName)) ignoredRepeatableEntries.push(d.fileName);
+        else orphanedChangelogEntries.push({ id: d.fileName, appliedAt: d.appliedAt });
       }
 
       return {
-        pending: pendingList.map(m => m.fileName),
-        applied: appliedList.map(m => ({
-          fileName: m.fileName,
-          appliedAt: m.appliedAt
-        })),
-        total: statusResult.length,
+        pending,
+        applied,
+        total: migrationFiles.length,
         checksumMismatches,
         checksumBaselined,
         orphanedChangelogEntries,
-        outOfOrderApplied
+        outOfOrderApplied,
+        ignoredRepeatableEntries,
+        ignoredRepeatableFiles: await this.getIgnoredRepeatableFiles()
       };
     } catch (error) {
       throw new Error(`Failed to get status: ${error.message}`);
     }
   }
 
-  /**
-   * Get list of migration files
+    /**
+   * Versioned migration files, in run order. R__ (repeatable/DCL) files are
+   * excluded — see isRepeatableMigrationFile().
    */
   async getMigrationFiles() {
-    const migrationsDir = this.config.migrationsDir;
-    const files = await fs.readdir(migrationsDir);
-    return files.filter(f => f.endsWith('.js')).sort();
+    const files = await fs.readdir(this.config.migrationsDir);
+    return files.filter(f => f.endsWith('.js') && !isRepeatableMigrationFile(f)).sort();
+  }
+
+  /** R__ files sitting in this versioned directory, which status/up/validate ignore. */
+  async getIgnoredRepeatableFiles() {
+    if (this.config.mode === 'repeatable') return [];
+    const files = await fs.readdir(this.config.migrationsDir);
+    return files.filter(f => f.endsWith('.js') && isRepeatableMigrationFile(f)).sort();
+  }
+
+  /** @private */
+  async _loadMigration(fileName) {
+    const filePath = path.join(this.config.migrationsDir, fileName);
+    const content = await fs.readFile(filePath, 'utf-8');
+    const module = await import(`file://${filePath}?t=${Date.now()}`);
+    return { module, content };
+  }
+
+  /**
+   * Run one migration's up() and record it in the changelog.
+   * @private
+   */
+  async _applyOne(fileName) {
+    const { module, content } = await this._loadMigration(fileName);
+    if (typeof module.up !== 'function') throw new Error('Migration must export an "up" function');
+    await module.up(this.db, this.client);
+    await this.db.collection(this.changelogCollection).insertOne({
+      fileName,
+      appliedAt: new Date(),
+      checksum: this.calculateChecksum(content)
+    });
+  }
+
+  /**
+   * Run one migration's down() and remove it from the changelog.
+   * @private
+   */
+  async _rollbackOne(fileName) {
+    const { module } = await this._loadMigration(fileName);
+    if (typeof module.down !== 'function') throw new Error('Migration must export a "down" function');
+    await module.down(this.db, this.client);
+    await this.db.collection(this.changelogCollection).deleteOne({ fileName });
   }
 
   /**
@@ -518,51 +556,16 @@ export class MongoDBAdapter extends BaseAdapter {
     };
 
     try {
-      // Get status to filter migrations
-      const statusResult = await migrateMongo.status(this.db);
-      let pending = statusResult.filter(m => m.appliedAt === 'PENDING').map(m => m.fileName);
-      
-      // Filter by target (up to and including)
-      if (options.target) {
-        const targetIndex = pending.findIndex(f => 
-          f === options.target || f.includes(options.target)
-        );
-        if (targetIndex === -1) {
-          result.errors.push(`Target migration not found: ${options.target}`);
-          return result;
-        }
-        pending = pending.slice(0, targetIndex + 1);
+      const { pending } = await this.status();
+      const { selected, error } = selectPendingMigrations(pending, options);
+      if (error) {
+        result.errors.push(error);
+        return result;
       }
-      
-      // Filter by only (specific migration)
-      if (options.only) {
-        const onlyFile = pending.find(f => 
-          f === options.only || f.includes(options.only)
-        );
-        if (!onlyFile) {
-          result.errors.push(`Migration not found in pending: ${options.only}`);
-          return result;
-        }
-        pending = [onlyFile];
-      }
-      
-      // Run migrations one by one to respect filters
-      for (const fileName of pending) {
+
+      for (const fileName of selected) {
         try {
-          const filePath = path.join(this.config.migrationsDir, fileName);
-          const content = await fs.readFile(filePath, 'utf-8');
-          const migrationModule = await import(`file://${filePath}?t=${Date.now()}`);
-
-          // Run the up function
-          await migrationModule.up(this.db, this.client);
-
-          // Record in changelog
-          await this.db.collection(this.changelogCollection).insertOne({
-            fileName,
-            appliedAt: new Date(),
-            checksum: this.calculateChecksum(content)
-          });
-          
+          await this._applyOne(fileName);
           result.applied.push(fileName);
         } catch (error) {
           result.errors.push(`${fileName}: ${error.message}`);
@@ -591,7 +594,9 @@ export class MongoDBAdapter extends BaseAdapter {
       return await this._runSingleMigrationWithSanityCheck(migrationOrOptions, options);
     }
     
-    // Otherwise, it's options for batch migration
+    // Otherwise, it's options for batch migration — one migration at a
+    // time, so every file's own preCheck/postCheck actually runs (and
+    // --target/--only are honored, same as up()).
     const batchOptions = migrationOrOptions;
     const result = {
       applied: [],
@@ -599,79 +604,46 @@ export class MongoDBAdapter extends BaseAdapter {
       sanityResults: []
     };
 
-    // Get pending migrations
-    const statusResult = await migrateMongo.status(this.db);
-    const pending = statusResult.filter(m => m.appliedAt === 'PENDING');
-
-    if (pending.length === 0) {
+    const { pending } = await this.status();
+    const { selected, error } = selectPendingMigrations(pending, batchOptions);
+    if (error) {
+      result.errors.push(error);
       return result;
     }
 
-    // Process each pending migration
-    for (const migration of pending) {
-      const filePath = path.join(this.config.migrationsDir, migration.fileName);
-      
+    for (const fileName of selected) {
       try {
-        // Dynamically import the migration file
-        const migrationModule = await import(`file://${filePath}`);
-        
-        const context = {
-          db: this.db,
-          client: this.client,
-          config: this.config
-        };
+        const { module: migrationModule } = await this._loadMigration(fileName);
 
-        // Configure sanity checker for this migration
-        const checker = new SanityChecker({
-          enabled: true,
-          autoRollback: this.config.sanityCheck?.autoRollback ?? true,
-          timeoutMs: this.config.sanityCheck?.timeoutMs ?? 30000,
-          verbose: options.verbose ?? this.config.sanityCheck?.verbose ?? true
-        });
-
-        // Run with sanity check if preCheck or postCheck are defined
         if (migrationModule.preCheck || migrationModule.postCheck) {
-          console.log(`\n🔍 Running ${migration.fileName} with sanity checks...`);
-
+          console.log(`\n🔍 Running ${fileName} with sanity checks...`);
+          const checker = new SanityChecker({
+            enabled: true,
+            autoRollback: this.config.sanityCheck?.autoRollback ?? true,
+            timeoutMs: this.config.sanityCheck?.timeoutMs ?? 30000,
+            verbose: options.verbose ?? this.config.sanityCheck?.verbose ?? true
+          });
           const sanityResult = await checker.runWithSanityCheck({
-            up: async () => {
-              const migrated = await migrateMongo.up(this.db, this.client);
-              // migrate-mongo's own insert doesn't set checksum — backfill it
-              // on the document(s) it just wrote, same field status() reads.
-              await this.backfillChecksums(migrated);
-            },
-            down: async () => {
-              await migrateMongo.down(this.db, this.client);
-            },
+            up: () => this._applyOne(fileName),
+            down: () => this._rollbackOne(fileName),
             preCheck: migrationModule.preCheck,
             postCheck: migrationModule.postCheck,
-            context
+            context: { db: this.db, client: this.client, config: this.config }
           });
+          result.sanityResults.push({ file: fileName, ...sanityResult });
 
-          result.sanityResults.push({
-            file: migration.fileName,
-            ...sanityResult
-          });
-
-          if (sanityResult.success) {
-            result.applied.push(migration.fileName);
-          } else {
-            result.errors.push(`${migration.fileName}: ${sanityResult.error}`);
-            if (!sanityResult.rolledBack) {
-              break; // Stop processing if sanity check failed without rollback
-            }
+          if (!sanityResult.success) {
+            result.errors.push(`${fileName}: ${sanityResult.error}`);
+            break;
           }
+          result.applied.push(fileName);
         } else {
-          // No sanity checks defined, run normally
-          const migrated = await migrateMongo.up(this.db, this.client);
-          if (migrated.length > 0) {
-            result.applied.push(...migrated);
-            await this.backfillChecksums(migrated);
-          }
-          break; // migrate-mongo.up() processes all pending at once
+          await this._applyOne(fileName);
+          result.applied.push(fileName);
+          result.sanityResults.push({ file: fileName, success: true, skipped: true });
         }
       } catch (error) {
-        result.errors.push(`${migration.fileName}: ${error.message}`);
+        result.errors.push(`${fileName}: ${error.message}`);
         break;
       }
     }
@@ -705,17 +677,53 @@ export class MongoDBAdapter extends BaseAdapter {
     return await checker.runWithSanityCheck(migration, context, { autoRollback: localAutoRollback });
   }
 
-  async down(count = 1) {
+  /**
+   * What `down` would roll back, most recent first (by appliedAt, file order
+   * as tie-break): the last `count`, or — with `target` — everything applied
+   * after it and the target itself. Also returns which of those files were
+   * edited since being applied.
+   * @returns {Promise<{files: string[], error: string|null, checksumMismatches: string[]}>}
+   */
+  async rollbackPlan({ count = 1, target } = {}) {
+    const status = await this.status();
+    const order = new Map((await this.getMigrationFiles()).map((f, i) => [f, i]));
+    const newestFirst = [...status.applied]
+      .sort((a, b) => (new Date(b.appliedAt) - new Date(a.appliedAt)) || (order.get(b.fileName) - order.get(a.fileName)))
+      .map(a => a.fileName);
+    const { selected, error } = target
+      ? selectPendingMigrations(newestFirst, { target })
+      : { selected: newestFirst.slice(0, count), error: null };
+    const planned = new Set(selected);
+    return {
+      files: selected,
+      error,
+      checksumMismatches: (status.checksumMismatches || []).map(m => m.fileName).filter(f => planned.has(f))
+    };
+  }
+
+  /**
+   * @param {number|string[]} countOrFiles - how many to roll back, or the
+   *   exact files from rollbackPlan() (most recent first)
+   */
+  async down(countOrFiles = 1) {
     const result = {
       rolledBack: [],
       errors: []
     };
 
     try {
-      for (let i = 0; i < count; i++) {
-        const migrated = await migrateMongo.down(this.db, this.client);
-        if (migrated.length === 0) break;
-        result.rolledBack.push(...migrated);
+      const files = Array.isArray(countOrFiles)
+        ? countOrFiles
+        : (await this.rollbackPlan({ count: countOrFiles })).files;
+
+      for (const fileName of files) {
+        try {
+          await this._rollbackOne(fileName);
+          result.rolledBack.push(fileName);
+        } catch (error) {
+          result.errors.push(`${fileName}: ${error.message}`);
+          break;
+        }
       }
     } catch (error) {
       result.errors.push(error.message);
@@ -884,13 +892,30 @@ export async function down(db, client) {
 
     try {
       const migrationsDir = this.config.migrationsDir;
-      const files = await fs.readdir(migrationsDir);
-      const migrationFiles = files.filter(f => f.endsWith('.js'));
+      // Same file set and order status()/up() use: in a versioned project,
+      // R__ (DCL) files are ignored and reported, not validated as DDL.
+      const migrationFiles = this.config.mode === 'repeatable'
+        ? (await fs.readdir(migrationsDir)).filter(f => f.endsWith('.js')).sort()
+        : await this.getMigrationFiles();
+      results.ignoredRepeatableFiles = await this.getIgnoredRepeatableFiles();
+      // options.files: validate only these (e.g. the pending ones); the rest
+      // are listed as skipped so the caller can say so.
+      const wanted = options.files ? new Set(options.files) : null;
+      if (wanted) results.skippedFiles = migrationFiles.filter(f => !wanted.has(f));
 
+      const filesData = [];
       for (const file of migrationFiles) {
-        const filePath = path.join(migrationsDir, file);
-        const content = await fs.readFile(filePath, 'utf-8');
-        const fileResult = this.validateContent(content, file, options);
+        filesData.push({ fileName: file, content: await fs.readFile(path.join(migrationsDir, file), 'utf-8') });
+      }
+      results.configWarnings = this.checkValidationConfig(migrationFiles);
+      const knownBefore = this.config.mode === 'repeatable' ? null : this.collectionsBeforeEachFile(filesData);
+
+      for (const [i, { fileName: file, content }] of filesData.entries()) {
+        if (wanted && !wanted.has(file)) continue;
+        const fileResult = this.validateContent(content, file, {
+          ...options,
+          ...(knownBefore ? { knownCollections: knownBefore[i] } : {})
+        });
         
         results.results.push({
           file,
@@ -1045,7 +1070,11 @@ export async function down(db, client) {
       ...options,
       allowDangerous: options.allowDangerous || fileAnnotations.allowDangerous,
       allowForbidden: options.allowForbidden || fileAnnotations.allowForbidden,
-      allowedCodes: [...(options.allowedCodes || []), ...(fileAnnotations.allowedCodes || [])]
+      allowedCodes: [
+        ...(options.allowedCodes || []),
+        ...(fileAnnotations.allowedCodes || []),
+        ...(this.getValidationConfig().allow[fileName] || [])
+      ]
     };
     options = effectiveOptions;
 
@@ -1065,7 +1094,6 @@ export async function down(db, client) {
     
     // Normalize function bodies
     const normalizedUpBody = this.normalizeJS(upBody);
-    const normalizedDownBody = this.normalizeJS(downBody);
 
     // === 1. DDL only: Check for empty down() (R__ repeatable files have no down()) ===
     if (this.config.mode !== 'repeatable' && this.hasExportedFunction(content, 'down')) {
@@ -1082,6 +1110,7 @@ export async function down(db, client) {
       if (upHasOperations && downIsEmpty) {
         errors.push({
           type: 'missing-down',
+          code: 'MISSING_DOWN',
           operation: 'down()',
           message: 'down() is empty but up() contains operations - rollback missing!'
         });
@@ -1136,6 +1165,10 @@ export async function down(db, client) {
               code: 'ORPHAN_DROP_UP',
               message: `✅ [ALLOWED] Orphan drop in up(): '${dropped}' is dropped but not created in this migration — allowed because down() recreates it`
             });
+          } else if (options.knownCollections && options.knownCollections.has(dropped)) {
+            // validate() knows every earlier file: the collection really
+            // exists, so this isn't a typo. Dropping it still needs approval —
+            // that's the DROP_COLLECTION dangerous rule, reported below.
           } else if (isOrphanDropAllowed('ORPHAN_DROP_UP')) {
             warnings.push({
               type: 'orphan-drop-in-up-allowed',
@@ -1147,7 +1180,9 @@ export async function down(db, client) {
               type: 'orphan-drop-in-up',
               code: 'ORPHAN_DROP_UP',
               operation: 'drop',
-              message: `Orphan drop in up(): '${dropped}' is dropped but not created in this migration`
+              message: options.knownCollections
+                ? `Orphan drop in up(): '${dropped}' was not created by any earlier migration and is not listed in validation.existingCollections — check the name (or declare the collection there if it predates these migrations)`
+                : `Orphan drop in up(): '${dropped}' is dropped but not created in this migration`
             });
           }
         }
@@ -1157,21 +1192,14 @@ export async function down(db, client) {
     // === 4. Check for forbidden operations ===
     for (const category of Object.keys(rules.forbidden)) {
       for (const rule of rules.forbidden[category]) {
-        // Smart allowance: dropDatabase in down() when up() creates database
+        // No automatic allowance for dropDatabase in down(): MongoDB has no
+        // "this migration created the database" — up() creating one
+        // collection doesn't mean rolling it back may delete every other
+        // collection in the database. (MariaDB's equivalent only applies to
+        // a CREATE DATABASE in the same file.) Explicit approval still works.
         if (rule.code === 'DROP_DATABASE' || rule.code === 'DROP_DATABASE_CMD') {
-          const hasDropDBInDown = /dropDatabase/i.test(normalizedDownBody);
           const hasDropDBInUp = /dropDatabase/i.test(normalizedUpBody);
-          const hasDBInitInUp = /createCollection|_db_metadata/i.test(normalizedUpBody);
-          
-          // Allow dropDatabase only in down() when up() initializes database
-          if (hasDropDBInDown && !hasDropDBInUp && hasDBInitInUp) {
-            warnings.push({
-              type: 'allowed-drop-database',
-              message: `✅ [ALLOWED] dropDatabase in down() because up() initializes database`
-            });
-            continue;
-          }
-          
+
           // Forbid dropDatabase in up() unless explicitly approved via @allow-forbidden
           if (hasDropDBInUp) {
             const isAllowed = options.allowForbidden ||
@@ -1313,6 +1341,24 @@ export async function down(db, client) {
     };
   }
 
+  /**
+   * For each file (in run order), the collections that exist before it runs:
+   * validation.existingCollections plus everything earlier files created and
+   * didn't drop.
+   * @returns {Array<Map<string, string>>} collection → where it came from
+   */
+  collectionsBeforeEachFile(filesData) {
+    const known = new Map(this.getValidationConfig().existing.map(c => [c, 'listed in validation.existingCollections']));
+    const out = [];
+    for (const { fileName, content } of filesData) {
+      out.push(new Map(known));
+      const upBody = this.extractFunctionBody(content, 'up');
+      for (const c of this.extractDroppedCollections(upBody)) known.delete(c);
+      for (const c of this.extractCreatedCollections(upBody)) known.set(c, `created by ${fileName}`);
+    }
+    return out;
+  }
+
   extractCreatedCollections(code) {
     const collections = [];
     // Match: createCollection('name') or createCollection("name")
@@ -1333,22 +1379,33 @@ export async function down(db, client) {
     while ((match = regex.exec(code)) !== null) {
       collections.push(match[1]);
     }
+    // db.dropCollection('name')
+    const dropCollectionRegex = /\.dropCollection\s*\(\s*['"]([^'"]+)['"]/g;
+    while ((match = dropCollectionRegex.exec(code)) !== null) {
+      collections.push(match[1]);
+    }
     return collections;
   }
 
+  /**
+   * Body of up()/down() (between its braces), whatever the declaration style:
+   * `export async function up(…) {`, `export const up = async (…) => {`, or a
+   * method `async up(…) {`. Braces are matched (nested object literals,
+   * strings and comments included), not regex-guessed.
+   */
   extractFunctionBody(content, functionName) {
-    const patterns = [
-      // export async function up(db, client) { ... }
-      new RegExp(`export\\s+async\\s+function\\s+${functionName}\\s*\\([^)]*\\)\\s*{([\\s\\S]*?)}(?=\\s*export|\\s*$)`, 'm'),
-      // export const up = async (db, client) => { ... }
-      new RegExp(`export\\s+const\\s+${functionName}\\s*=\\s*async\\s*\\([^)]*\\)\\s*=>\\s*{([\\s\\S]*?)}\\s*;?`, 'm'),
-      // async up(db, client) { ... }
-      new RegExp(`async\\s+${functionName}\\s*\\([^)]*\\)\\s*{([\\s\\S]*?)}`, 'm'),
+    const code = maskComments(content, 'js');
+    const headers = [
+      new RegExp(`export\\s+(?:async\\s+)?function\\s+${functionName}\\s*\\([^)]*\\)\\s*\\{`),
+      new RegExp(`export\\s+const\\s+${functionName}\\s*=\\s*(?:async\\s*)?(?:\\([^)]*\\)|\\w+)\\s*=>\\s*\\{`),
+      new RegExp(`(?:^|[\\s,{])async\\s+${functionName}\\s*\\([^)]*\\)\\s*\\{`)
     ];
-    
-    for (const regex of patterns) {
-      const match = content.match(regex);
-      if (match) return match[1];
+    for (const header of headers) {
+      const m = header.exec(code);
+      if (!m) continue;
+      const open = m.index + m[0].length - 1;
+      const close = findMatchingBrace(content, open);
+      return close === -1 ? content.slice(open + 1) : content.slice(open + 1, close);
     }
     return '';
   }
@@ -1383,16 +1440,16 @@ export async function down(db, client) {
       .replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, '')
       // Convert fullwidth characters to halfwidth (Unicode normalization)
       .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+      // Remove comments FIRST (quote-aware) so an apostrophe in a comment
+      // ("// if there's bad data") can't start a fake string literal that
+      // swallows the real code after it
+      .replace(/[\s\S]*/, src => maskComments(src, 'js'))
       // Remove template literals (backticks) - replace with placeholder
       .replace(/`(?:[^`\\]|\\.)*`/g, "'__STRING__'")
       // Remove string literals (single quotes) to avoid false positives
       .replace(/'(?:[^'\\]|\\.)*'/g, "'__STRING__'")
       // Remove string literals (double quotes)
       .replace(/"(?:[^"\\]|\\.)*"/g, '"__STRING__"')
-      // Remove single-line comments (but not URLs like http://)
-      .replace(/(?<!:)\/\/.*$/gm, ' ')
-      // Remove multi-line comments /* ... */
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
       // Collapse multiple whitespace/newlines to single space
       .replace(/\s+/g, ' ')
       // Trim

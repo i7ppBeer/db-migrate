@@ -267,7 +267,7 @@ DROP TABLE users;
     function mockConnection({ rows = [], updateSpy = vi.fn().mockResolvedValue([{}]) } = {}) {
       return {
         execute: vi.fn((sql, params) => {
-          if (/^SELECT id, applied_at, checksum/.test(sql)) return Promise.resolve([rows]);
+          if (/^SELECT id, applied_at, (UNIX_TIMESTAMP\(applied_at\) AS applied_epoch, )?checksum/.test(sql)) return Promise.resolve([rows]);
           if (/^UPDATE/.test(sql)) return updateSpy(sql, params);
           return Promise.resolve([[]]);
         })
@@ -286,6 +286,21 @@ DROP TABLE users;
       expect(status.checksumMismatches).toEqual([]);
       expect(status.checksumBaselined).toEqual([]);
       expect(status.applied).toHaveLength(1);
+    });
+
+    it('reports applied_at from the server epoch, not the driver\'s local-time reading of it', async () => {
+      const content = '-- +migrate Up\nCREATE TABLE foo (id INT);\n-- +migrate Down\nDROP TABLE foo;\n';
+      await fsp.writeFile(path.join(tmpDir, '20260101000000-create-foo.sql'), content, 'utf-8');
+      // What mysql2 returns for a UTC server read in UTC+8: the wall-clock
+      // value taken as local time — 8 hours off. The epoch is authoritative.
+      const misread = new Date('2026-10-01T00:39:10+08:00');
+      ddlAdapter.connection = mockConnection({
+        rows: [{ id: '20260101000000-create-foo', applied_at: misread, applied_epoch: '1790815150', checksum: sha256(content) }]
+      });
+
+      const status = await ddlAdapter.status();
+
+      expect(status.applied[0].appliedAt.toISOString()).toBe('2026-10-01T00:39:10.000Z');
     });
 
     it('detects a checksum mismatch when an applied migration file was edited afterward', async () => {
@@ -338,7 +353,7 @@ DROP TABLE users;
     function mockConnection(rows) {
       return {
         execute: vi.fn((sql) => {
-          if (/^SELECT id, applied_at, checksum/.test(sql)) return Promise.resolve([rows]);
+          if (/^SELECT id, applied_at, (UNIX_TIMESTAMP\(applied_at\) AS applied_epoch, )?checksum/.test(sql)) return Promise.resolve([rows]);
           return Promise.resolve([[]]);
         })
       };
@@ -429,10 +444,11 @@ DROP TABLE users;
     // Shared mock connection whose execute() branches on the query text,
     // used for both the temp (no-database) connection and the real one —
     // connect() calls mysql.createConnection() twice when dbName is set.
-    function mockConnection(reportedDbName) {
+    function mockConnection(reportedDbName, { exists = true } = {}) {
       return {
         execute: vi.fn((sql) => {
           if (/^SELECT DATABASE\(\)/.test(sql)) return Promise.resolve([[{ db: reportedDbName }]]);
+          if (/information_schema\.SCHEMATA/.test(sql)) return Promise.resolve([exists ? [{ SCHEMA_NAME: reportedDbName }] : []]);
           return Promise.resolve([[]]);
         }),
         end: vi.fn().mockResolvedValue(undefined)
@@ -473,6 +489,54 @@ DROP TABLE users;
       await expect(testAdapter.connect()).rejects.toThrow(/wrong database/i);
       expect(conn.end).toHaveBeenCalled();
       expect(testAdapter.connection).toBeNull();
+    });
+  });
+
+  describe('connect() — credentials and missing database', () => {
+    function mockConnection({ exists }) {
+      return {
+        execute: vi.fn((sql) => {
+          if (/information_schema\.SCHEMATA/.test(sql)) return Promise.resolve([exists ? [{ SCHEMA_NAME: 'test' }] : []]);
+          if (/^SELECT DATABASE\(\)/.test(sql)) return Promise.resolve([[{ db: 'test' }]]);
+          return Promise.resolve([[]]);
+        }),
+        end: vi.fn().mockResolvedValue(undefined)
+      };
+    }
+
+    it('refuses to connect without a configured user — no root fallback', async () => {
+      const mysql = (await import('mysql2/promise')).default;
+      vi.mocked(mysql.createConnection).mockClear();
+      const testAdapter = new MariaDBAdapter({ ...mockConfig, mariadb: { ...mockConfig.mariadb, user: undefined } });
+      await expect(testAdapter.connect()).rejects.toThrow(/no user configured/);
+      expect(mysql.createConnection).not.toHaveBeenCalled();
+    });
+
+    it('refuses to connect without a configured password, but accepts an explicit empty one', async () => {
+      const mysql = (await import('mysql2/promise')).default;
+      await expect(new MariaDBAdapter({ ...mockConfig, mariadb: { ...mockConfig.mariadb, password: undefined } }).connect()).rejects.toThrow(/no password configured/);
+
+      vi.mocked(mysql.createConnection).mockResolvedValue(mockConnection({ exists: true }));
+      await expect(new MariaDBAdapter({ ...mockConfig, mariadb: { ...mockConfig.mariadb, password: '' }, mode: 'repeatable' }).connect()).resolves.toBeTruthy();
+    });
+
+    it('refuses a database that does not exist, without creating it', async () => {
+      const mysql = (await import('mysql2/promise')).default;
+      const conn = mockConnection({ exists: false });
+      vi.mocked(mysql.createConnection).mockResolvedValue(conn);
+
+      await expect(new MariaDBAdapter({ ...mockConfig, mode: 'repeatable' }).connect()).rejects.toThrow(/does not exist.*createDatabaseIfMissing/s);
+      expect(conn.execute.mock.calls.some(([sql]) => /CREATE DATABASE/.test(sql))).toBe(false);
+      expect(conn.end).toHaveBeenCalled();
+    });
+
+    it('creates a missing database only with createDatabaseIfMissing: true', async () => {
+      const mysql = (await import('mysql2/promise')).default;
+      const conn = mockConnection({ exists: false });
+      vi.mocked(mysql.createConnection).mockResolvedValue(conn);
+
+      await new MariaDBAdapter({ ...mockConfig, mode: 'repeatable', createDatabaseIfMissing: true }).connect();
+      expect(conn.execute.mock.calls.some(([sql]) => /CREATE DATABASE IF NOT EXISTS `test`/.test(sql))).toBe(true);
     });
   });
 

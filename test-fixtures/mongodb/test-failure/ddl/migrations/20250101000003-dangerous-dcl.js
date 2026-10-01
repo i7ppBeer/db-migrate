@@ -1,3 +1,4 @@
+// @expect-error: CREATE_USER_CMD,DROP_USER_CMD
 /**
  * FAILURE CASE: DCL operation without proper authorization
  * 

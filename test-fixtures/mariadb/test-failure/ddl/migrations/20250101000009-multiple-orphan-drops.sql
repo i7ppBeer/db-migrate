@@ -1,3 +1,4 @@
+-- @expect-error: ORPHAN_DROP_UP
 -- 測試：多個孤立 DROP TABLE 操作
 -- 預期驗證結果：失敗（drop 了未在此 migration 建立的表）
 

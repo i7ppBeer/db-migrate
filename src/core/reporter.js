@@ -220,6 +220,16 @@ export async function saveSyncReport(outputDir, report, format = 'all') {
 // Outlook's Word rendering engine, and color-scheme pinned to light so a
 // client's dark mode doesn't invert the event colors.
 
+// Monospace stack for passwords/usernames/errors: SF Mono (macOS/iOS, via
+// ui-monospace), Menlo (older macOS), Consolas (Windows), then Courier New,
+// which every client has. No webfonts — most mail clients ignore them.
+const MONO_FONT = "ui-monospace,Menlo,Consolas,'Courier New',monospace";
+
+// Outlook for Windows (Word rendering engine) doesn't walk a font stack: an
+// unknown first font (ui-monospace) falls back to Times New Roman. Only
+// Outlook reads this [if mso] block, so it pins those elements to Courier New.
+const OUTLOOK_MONO_FIX = "<!--[if mso]><style>.mono{font-family:'Courier New',monospace !important;}</style><![endif]-->";
+
 const DCL_EVENT_STYLE = {
   new:                 { label: 'NEW',                  bg: '#e4f2e8', chipBg: '#c9e6d3', border: '#2f7a4f', text: '#20553a', chipText: '#20553a' },
   password_changed:    { label: 'PASSWORD CHANGED',      bg: '#dff1f3', chipBg: '#bfe3e8', border: '#1f7a8c', text: '#134c56', chipText: '#125764' },
@@ -228,19 +238,37 @@ const DCL_EVENT_STYLE = {
   permissions_updated: { label: 'PERMISSIONS UPDATED',    bg: '#ecebfa', chipBg: '#d6d5f5', border: '#5b5fc7', text: '#33368f', chipText: '#33368f' }
 };
 
+/**
+ * What the database actually does with a generated password — stated per
+ * event, never assumed: MariaDB only forces a change when the statement had
+ * PASSWORD EXPIRE; MongoDB only records a deadline in customData.expiresAt.
+ */
+export function passwordExpiryNote(event) {
+  if (event.expiry?.onFirstLogin) {
+    return 'Temporary password - the database requires it to be changed on first login (PASSWORD EXPIRE).';
+  }
+  if (event.expiry?.at) {
+    return `Change this password before ${event.expiry.at.slice(0, 10)} (recorded in customData.expiresAt; MongoDB does not enforce it).`;
+  }
+  return 'Generated password - the database does not force a change. Rotate it according to your password policy.';
+}
+
 function dclEventRowHTML(event) {
   const style = DCL_EVENT_STYLE[event.type];
   if (!style) return '';
   const chip = `<span style="font-family:Arial,sans-serif;font-size:10px;font-weight:bold;color:${style.chipText};background:${style.chipBg};padding:2px 7px;">${escapeHtml(style.label)}</span>`;
-  const user = `<span style="font-family:'Courier New',monospace;font-size:14px;color:#1c211d;font-weight:bold;">${escapeHtml(event.username)}</span>`;
+  const user = `<span class="mono" style="font-family:${MONO_FONT};font-size:14px;color:#1c211d;font-weight:bold;">${escapeHtml(event.username)}</span>`;
 
   let detail;
   if (event.type === 'new' || event.type === 'password_changed') {
     const label = event.type === 'new' ? 'Password' : 'New password';
     detail = event.password
       ? `<span style="font-family:Arial,sans-serif;font-size:12px;color:${style.text};">${label}: </span>` +
-        `<span style="font-family:'Courier New',monospace;font-size:13px;color:#1c211d;font-weight:bold;background:#ffffff;padding:1px 6px;border:1px solid ${style.border};">${escapeHtml(event.password)}</span><br>` +
-        `<span style="font-family:Arial,sans-serif;font-size:11px;color:#5b6259;">Temporary password - expires on first login, must be changed immediately.</span>`
+        `<span class="mono" style="font-family:${MONO_FONT};font-size:13px;color:#1c211d;font-weight:bold;background:#ffffff;padding:1px 6px;border:1px solid ${style.border};">${escapeHtml(event.password)}</span><br>` +
+        `<span style="font-family:Arial,sans-serif;font-size:11px;color:#5b6259;">${escapeHtml(passwordExpiryNote(event))}</span>` +
+        (event.supersededPasswords
+          ? `<br><span style="font-family:Arial,sans-serif;font-size:11px;color:#5b6259;">Password was set ${event.supersededPasswords + 1} times in this run - only this final one is valid.</span>`
+          : '')
       : `<span style="font-family:Arial,sans-serif;font-size:12px;color:${style.text};">New account - credentials were not auto-generated for this one.</span>`;
   } else if (event.type === 'no_change') {
     detail = `<span style="font-family:Arial,sans-serif;font-size:12px;color:${style.text};">Account already existed - password unchanged.</span>`;
@@ -250,7 +278,7 @@ function dclEventRowHTML(event) {
     const added = (event.grantsAdded || []).map(g => `+ ${g}`);
     const removed = (event.grantsRemoved || []).map(g => `- ${g}`);
     const lines = [...removed, ...added].map(g => escapeHtml(g)).join('<br>');
-    detail = `<span style="font-family:'Courier New',monospace;font-size:12px;color:${style.text};">${lines}</span>`;
+    detail = `<span class="mono" style="font-family:${MONO_FONT};font-size:12px;color:${style.text};">${lines}</span>`;
   }
 
   return `<tr><td style="padding:0 28px 8px;">` +
@@ -260,9 +288,98 @@ function dclEventRowHTML(event) {
 }
 
 /**
+ * Merge RepeatableRunner's credential events (new/password_changed/no_change --
+ * only known from *running* the migration, DCLIdempotentChecker's before/after
+ * diff can't see a password) with the account/permission diff (removed
+ * accounts and permission-only changes -- only known from the diff, a
+ * migration run doesn't report those directly) into one ordered event list
+ * for the run's notification email — one row per account: repeated
+ * credential events for an account are collapsed to its final password, and
+ * diff entries for an account that already has a credential row are dropped.
+ *
+ * @param {Array} credentialEvents - runner.credentialEvents
+ * @param {Object} diff - DCLIdempotentChecker.diffStates() result
+ * @param {string} dbType - 'mariadb' | 'mongodb'
+ * @returns {Array} events shaped for reporter.js's notificationEmailToHTML()
+ */
+export function buildDCLNotificationEvents(credentialEvents, diff, dbType) {
+  // One row per account. A file that creates an account and a later file (or
+  // statement) that rotates it in the same run produce two credential events;
+  // only the last password is valid, so that is the only one shown — typed
+  // 'new' if the account was created in this run. A later no_change never
+  // hides an earlier password.
+  const merged = new Map();
+  for (const e of credentialEvents) {
+    const key = e.host ? `${e.username}@${e.host}` : e.username;
+    const rest = { ...e };
+    delete rest.host;
+    const prev = merged.get(key);
+    if (!prev) {
+      merged.set(key, { ...rest, username: key });
+    } else if (e.password) {
+      merged.set(key, {
+        ...rest,
+        username: key,
+        type: prev.type === 'new' ? 'new' : e.type,
+        supersededPasswords: (prev.supersededPasswords || 0) + (prev.password ? 1 : 0)
+      });
+    }
+  }
+
+  // The diff names accounts 'user@host' (MariaDB) / { user, db } (MongoDB);
+  // credential events from a MongoDB migration only know the bare user name.
+  const findCredential = (diffKey, bareName) => merged.get(diffKey) || merged.get(bareName);
+
+  const events = [];
+  const extra = [];
+
+  if (dbType === 'mariadb') {
+    for (const u of diff.removedUsers) extra.push({ type: 'removed', username: u });
+
+    const addedUsersSet = new Set(diff.addedUsers);
+    const removedUsersSet = new Set(diff.removedUsers);
+    const byUser = new Map();
+    const collect = (grants, key) => {
+      for (const g of grants) {
+        if (addedUsersSet.has(g.user) || removedUsersSet.has(g.user)) continue;
+        if (!byUser.has(g.user)) byUser.set(g.user, { grantsAdded: [], grantsRemoved: [] });
+        byUser.get(g.user)[key].push(g.grant);
+      }
+    };
+    collect(diff.addedGrants, 'grantsAdded');
+    collect(diff.removedGrants, 'grantsRemoved');
+    for (const [username, grants] of byUser) {
+      extra.push({ type: 'permissions_updated', username, ...grants });
+    }
+
+    // Accounts added without a CHANGE_ME_ON_FIRST_LOGIN placeholder have no
+    // password to show, but should still be reported as new.
+    for (const u of diff.addedUsers) {
+      if (!findCredential(u, u.split('@')[0])) extra.push({ type: 'new', username: u, password: null });
+    }
+  } else if (dbType === 'mongodb') {
+    for (const u of diff.removedUsers) extra.push({ type: 'removed', username: `${u.user}@${u.db}` });
+    for (const c of diff.changedUsers) {
+      extra.push({ type: 'permissions_updated', username: `${c.user}@${c.db}`, grantsAdded: c.addedRoles, grantsRemoved: c.removedRoles });
+    }
+    for (const u of diff.addedUsers) {
+      const key = `${u.user}@${u.db}`;
+      const credential = findCredential(key, u.user);
+      if (credential) credential.username = key; // show which db the account lives in
+      else extra.push({ type: 'new', username: key, password: null });
+    }
+  }
+
+  events.push(...merged.values(), ...extra);
+  return events;
+}
+
+/**
  * Build a structured notification-email report for one migration run.
  * @param {Object} data
  * @param {string} data.project - project/config name shown in the header
+ * @param {string} [data.target] - which server this ran against (host:port · database),
+ *   so two instances with the same database name can't be confused
  * @param {string} [data.environment] - e.g. 'production', 'staging'
  * @param {string} data.dbType - 'mariadb' | 'mongodb'
  * @param {'success'|'failed'|'skipped'} [data.status] - default 'success'. 'failed'
@@ -279,6 +396,7 @@ export function buildNotificationEmail(data) {
   return {
     generatedAt: new Date().toISOString(),
     project: data.project,
+    target: data.target ?? null,
     environment: data.environment ?? null,
     dbType: data.dbType,
     status: data.status ?? 'success',
@@ -305,12 +423,30 @@ function failureBlockHTML(heading, errors) {
   const lines = errors.map(e => escapeHtml(e)).join('<br>');
   return `<tr><td style="padding:18px 28px 6px;border-top:1px solid #d7ddd4;font-family:Arial,sans-serif;font-size:12px;color:#5b6259;text-transform:uppercase;">${escapeHtml(heading)}</td></tr>` +
     `<tr><td style="padding:0 28px 16px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>` +
-    `<td bgcolor="#fbe8ea" style="background:#fbe8ea;border-left:3px solid #b0303f;padding:10px 14px;font-family:'Courier New',monospace;font-size:12px;color:#6e232d;">${lines}</td>` +
+    `<td bgcolor="#fbe8ea" class="mono" style="background:#fbe8ea;border-left:3px solid #b0303f;padding:10px 14px;font-family:${MONO_FONT};font-size:12px;color:#6e232d;">${lines}</td>` +
     `</tr></table></td></tr>`;
 }
 
+/**
+ * Shown when a DDL migration failed while executing: neither database rolls a
+ * failed migration back on its own, so the failing file may have run partway.
+ */
+export function partialApplyNote(dbType) {
+  const why = dbType === 'mongodb'
+    ? 'MongoDB migrations are not transactional'
+    : 'MariaDB commits each DDL statement immediately';
+  return `The failed migration may have been partly applied — ${why}, so statements before the failing one are not undone. ` +
+    'It is not recorded as applied: check the database and remove or finish its partial changes before running again.';
+}
+
+function partialApplyNoteHTML(dbType) {
+  return `<tr><td style="padding:0 28px 16px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>` +
+    `<td bgcolor="#fdf3e3" style="background:#fdf3e3;border-left:3px solid #a8752a;padding:10px 14px;font-family:Arial,sans-serif;font-size:12px;color:#6e4d1c;">` +
+    `${escapeHtml(partialApplyNote(dbType))}</td></tr></table></td></tr>`;
+}
+
 export function notificationEmailToHTML(report) {
-  const metaParts = [report.environment, report.dbType].filter(Boolean);
+  const metaParts = [report.environment, report.dbType, report.target].filter(Boolean);
   const meta = escapeHtml([...metaParts, new Date(report.generatedAt).toISOString().replace('T', ' ').slice(0, 16) + ' UTC'].join(' | '));
 
   const status = STATUS_BANNER[report.status] || STATUS_BANNER.success;
@@ -323,6 +459,7 @@ export function notificationEmailToHTML(report) {
     report.ddl && report.ddl.errors
   );
   const dclFailureHTML = failureBlockHTML('Account changes — failed', report.dcl && report.dcl.errors);
+  const partialRiskHTML = report.ddl && report.ddl.partialRisk ? partialApplyNoteHTML(report.dbType) : '';
   const dclSkippedHTML = (report.dcl && report.dcl.skipped && report.dcl.skipped.length > 0)
     ? failureBlockHTML('Account changes — skipped by validation', report.dcl.skipped.map(s => `${s.fileName}: ${s.reason}`))
     : '';
@@ -342,7 +479,7 @@ export function notificationEmailToHTML(report) {
         for (const f of c.changedFields) lines.push(`~ ${c.name}.${f.name}: ${f.before.type ?? ''} -> ${f.after.type ?? ''}`);
       }
       diffRows = `<tr><td style="padding:0 28px 16px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">` +
-        lines.map((l, i) => `<tr><td bgcolor="#e4f2e8" style="background:#e4f2e8;border-left:3px solid #2f7a4f;padding:8px 12px;font-family:'Courier New',monospace;font-size:12px;color:#20553a;">${escapeHtml(l)}</td></tr>` +
+        lines.map((l, i) => `<tr><td bgcolor="#e4f2e8" class="mono" style="background:#e4f2e8;border-left:3px solid #2f7a4f;padding:8px 12px;font-family:${MONO_FONT};font-size:12px;color:#20553a;">${escapeHtml(l)}</td></tr>` +
           (i < lines.length - 1 ? `<tr><td style="height:6px;font-size:1px;line-height:6px;">&nbsp;</td></tr>` : '')).join('') +
         `</table></td></tr>`;
     }
@@ -350,7 +487,7 @@ export function notificationEmailToHTML(report) {
       ? `Schema changes - ${report.ddl.applied.length} migration${report.ddl.applied.length === 1 ? '' : 's'} applied before the failure`
       : `Schema changes - ${report.ddl.applied.length} migration${report.ddl.applied.length === 1 ? '' : 's'} applied`;
     ddlHTML = `<tr><td style="padding:18px 28px 6px;border-top:1px solid #d7ddd4;font-family:Arial,sans-serif;font-size:12px;color:#5b6259;text-transform:uppercase;">${escapeHtml(appliedLabel)}</td></tr>` +
-      `<tr><td style="padding:2px 28px 12px;font-family:'Courier New',monospace;font-size:13px;color:#1c211d;">${list}</td></tr>` +
+      `<tr><td class="mono" style="padding:2px 28px 12px;font-family:${MONO_FONT};font-size:13px;color:#1c211d;">${list}</td></tr>` +
       diffRows;
   }
 
@@ -360,7 +497,7 @@ export function notificationEmailToHTML(report) {
       report.dcl.events.map(dclEventRowHTML).join('');
   }
 
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light"><title>Migration Notification</title></head>` +
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light">${OUTLOOK_MONO_FIX}<title>Migration Notification</title></head>` +
     `<body style="margin:0;padding:0;background:#eef1ee;font-family:Arial,Helvetica,sans-serif;">` +
     `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#eef1ee" style="background:#eef1ee;"><tr><td align="center" style="padding:32px 16px;">` +
     `<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#ffffff;border:1px solid #d7ddd4;">` +
@@ -370,7 +507,7 @@ export function notificationEmailToHTML(report) {
     `</tr></table></td></tr>` +
     `<tr><td style="padding:20px 28px 4px;font-family:Arial,sans-serif;font-size:12px;color:#5b6259;">${meta}</td></tr>` +
     statusHTML +
-    ddlFailureHTML + dclFailureHTML + dclSkippedHTML +
+    ddlFailureHTML + partialRiskHTML + dclFailureHTML + dclSkippedHTML +
     ddlHTML + dclHTML +
     `<tr><td style="padding:18px 28px 22px;border-top:1px solid #d7ddd4;font-family:Arial,sans-serif;font-size:11px;color:#8a8f86;">This is an automated migration notification. Do not reply.</td></tr>` +
     `</table></td></tr></table></body></html>`;
@@ -391,6 +528,104 @@ export async function saveNotificationEmail(outputDir, html, fileName = 'notific
   const filePath = path.join(outputDir, fileName);
   await fs.writeFile(filePath, html, 'utf-8');
   return filePath;
+}
+
+/**
+ * Overview of one multi-instance run (`dcl-all`): which instance — by name
+ * AND host:port/database, since several instances often share a database
+ * name — got which account changes, and which file holds its details.
+ *
+ * Deliberately carries NO passwords: each instance's passwords stay in that
+ * instance's own notification file, so the overview can go to whoever runs
+ * the rollout while each instance's file goes only to that instance's owner.
+ *
+ * @param {Object} data
+ * @param {string} data.project - config label shown in the header
+ * @param {string} [data.environment]
+ * @param {Array<{name: string, target?: string, dbType: string,
+ *   status: 'success'|'failed'|'skipped', events?: Array, errors?: string[],
+ *   notificationFile?: string}>} data.instances
+ * @returns {Object} plain JSON-serializable report object
+ */
+export function buildMultiInstanceSummary(data) {
+  const instances = data.instances.map(inst => ({
+    name: inst.name,
+    target: inst.target ?? null,
+    dbType: inst.dbType,
+    status: inst.status,
+    // username + type only — the password field never makes it in here
+    events: (inst.events || []).map(e => ({ type: e.type, username: e.username, hasPassword: Boolean(e.password) })),
+    errors: inst.errors ?? [],
+    notificationFile: inst.notificationFile ?? null
+  }));
+  const failed = instances.filter(i => i.status === 'failed').length;
+  return {
+    generatedAt: new Date().toISOString(),
+    project: data.project,
+    environment: data.environment ?? null,
+    status: failed > 0 ? 'failed' : 'success',
+    totals: {
+      instances: instances.length,
+      failed,
+      events: instances.reduce((n, i) => n + i.events.length, 0)
+    },
+    instances
+  };
+}
+
+/**
+ * Render buildMultiInstanceSummary()'s report as a mail-client-safe HTML email,
+ * in the same style as notificationEmailToHTML().
+ * @param {Object} report
+ * @returns {string}
+ */
+export function multiInstanceSummaryToHTML(report) {
+  const meta = escapeHtml([report.environment, new Date(report.generatedAt).toISOString().replace('T', ' ').slice(0, 16) + ' UTC'].filter(Boolean).join(' | '));
+  const status = STATUS_BANNER[report.status] || STATUS_BANNER.success;
+  const t = report.totals;
+  const statusText = `${status.label} - ${t.instances} instance${t.instances === 1 ? '' : 's'}` +
+    (t.failed ? `, ${t.failed} failed` : '') + `, ${t.events} account change${t.events === 1 ? '' : 's'}`;
+
+  const instanceHTML = report.instances.map(inst => {
+    const instStatus = STATUS_BANNER[inst.status] || STATUS_BANNER.success;
+    const heading = `<tr><td style="padding:18px 28px 4px;border-top:1px solid #d7ddd4;">` +
+      `<span class="mono" style="font-family:${MONO_FONT};font-size:14px;font-weight:bold;color:#1c211d;">${escapeHtml(inst.name)}</span> ` +
+      `<span style="font-family:Arial,sans-serif;font-size:10px;font-weight:bold;color:${instStatus.text};background:${instStatus.bg};padding:2px 7px;">${escapeHtml(instStatus.label.toUpperCase())}</span><br>` +
+      `<span style="font-family:Arial,sans-serif;font-size:12px;color:#5b6259;">${escapeHtml([inst.dbType, inst.target].filter(Boolean).join(' | '))}</span></td></tr>`;
+
+    const rows = inst.events.map(e => {
+      const style = DCL_EVENT_STYLE[e.type] || DCL_EVENT_STYLE.no_change;
+      return `<tr><td class="mono" style="padding:2px 28px;font-family:${MONO_FONT};font-size:12px;color:#1c211d;">` +
+        `<span style="font-family:Arial,sans-serif;font-size:10px;font-weight:bold;color:${style.chipText};background:${style.chipBg};padding:1px 6px;">${escapeHtml(style.label)}</span> ` +
+        `${escapeHtml(e.username)}${e.hasPassword ? ' <span style="font-family:Arial,sans-serif;font-size:11px;color:#5b6259;">(password generated)</span>' : ''}</td></tr>`;
+    }).join('');
+    const none = inst.events.length === 0 && inst.errors.length === 0
+      ? `<tr><td style="padding:2px 28px;font-family:Arial,sans-serif;font-size:12px;color:#5b6259;">No account changes.</td></tr>`
+      : '';
+    const errors = inst.errors.length > 0
+      ? `<tr><td class="mono" style="padding:4px 28px;font-family:${MONO_FONT};font-size:12px;color:#6e232d;">${inst.errors.map(e => escapeHtml(e)).join('<br>')}</td></tr>`
+      : '';
+    const file = inst.notificationFile
+      ? `<tr><td style="padding:4px 28px 10px;font-family:Arial,sans-serif;font-size:11px;color:#5b6259;">Details${inst.events.some(e => e.hasPassword) ? ' and generated passwords' : ''}: ${escapeHtml(inst.notificationFile)}</td></tr>`
+      : '';
+    return heading + errors + rows + none + file;
+  }).join('');
+
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light">${OUTLOOK_MONO_FIX}<title>Migration Summary</title></head>` +
+    `<body style="margin:0;padding:0;background:#eef1ee;font-family:Arial,Helvetica,sans-serif;">` +
+    `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#eef1ee" style="background:#eef1ee;"><tr><td align="center" style="padding:32px 16px;">` +
+    `<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#ffffff;border:1px solid #d7ddd4;">` +
+    `<tr><td bgcolor="#171b21" style="background:#171b21;padding:18px 28px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>` +
+    `<td style="font-family:Arial,sans-serif;color:#ffffff;font-size:15px;font-weight:bold;">Migration Summary</td>` +
+    `<td align="right" style="font-family:Arial,sans-serif;color:#c9cdc6;font-size:12px;">${escapeHtml(report.project)}</td>` +
+    `</tr></table></td></tr>` +
+    `<tr><td style="padding:20px 28px 4px;font-family:Arial,sans-serif;font-size:12px;color:#5b6259;">${meta}</td></tr>` +
+    `<tr><td style="padding:4px 28px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>` +
+    `<td bgcolor="${status.bg}" style="background:${status.bg};border-left:3px solid ${status.border};padding:8px 14px;font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:${status.text};">${escapeHtml(statusText)}</td>` +
+    `</tr></table></td></tr>` +
+    instanceHTML +
+    `<tr><td style="padding:18px 28px 22px;border-top:1px solid #d7ddd4;font-family:Arial,sans-serif;font-size:11px;color:#8a8f86;">This summary contains no passwords - each instance's generated passwords are only in that instance's own notification file. This is an automated migration notification. Do not reply.</td></tr>` +
+    `</table></td></tr></table></body></html>`;
 }
 
 export class Reporter {

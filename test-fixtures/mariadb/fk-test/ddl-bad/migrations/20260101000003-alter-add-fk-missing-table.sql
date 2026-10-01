@@ -1,3 +1,4 @@
+-- @expect-error: FK_UNRESOLVED_REFERENCE
 -- Migration: BAD EXAMPLE — ALTER TABLE adds FK that references a never-created table
 -- FK Test (cross-file): FK_UNRESOLVED_REFERENCE expected
 --

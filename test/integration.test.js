@@ -17,7 +17,8 @@
  * Requires a real MariaDB reachable at MARIADB_HOST/PORT (defaults match
  * docker-compose.yml's `mariadb` service: localhost:3306, root/rootpass).
  * If nothing is listening, every test in this file is skipped (not failed)
- * so `npm run test:integration` degrades gracefully without Docker running.
+ * so `npm run test:integration` degrades gracefully without Docker running —
+ * unless INTEGRATION_REQUIRE_DB=1 (CI), which turns that into a failure.
  *
  * Run: npm run test:integration
  * (brings this up yourself first if needed: docker compose up -d mariadb)
@@ -74,6 +75,12 @@ async function isMariaDBReachable() {
 
 tryStartMariaDBContainer();
 const dbAvailable = await isMariaDBReachable();
+
+// In CI a missing database must fail the run, not quietly skip every test
+// and report green (set by the e2e job in .github/workflows/migrations.yml).
+if (!dbAvailable && process.env.INTEGRATION_REQUIRE_DB === '1') {
+  throw new Error(`INTEGRATION_REQUIRE_DB=1 but no MariaDB is reachable at ${HOST}:${PORT}`);
+}
 
 if (!dbAvailable) {
   // eslint-disable-next-line no-console

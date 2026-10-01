@@ -20,7 +20,7 @@ Most migration tools handle schema changes (DDL) and stop there. This one also t
 - **Multi-instance** — apply the same migration set to N database instances (primary/secondary/tertiary, sharded projects, …) with one config and the `*-all` command family.
 - **`sync`** — the "just make it match" command: `status` → `up` → a git-diff-style before/after schema diff → the real current schema, straight from the DB (not from the migration files). Refuses to silently no-op: it errors (non-zero exit) if nothing was pending, so a CI/CD pipeline can't mistake "nothing to do" for "it worked."
 - **`dcl` shows what actually changed** — after a DCL run, it diffs before/after account and permission state (both MariaDB and MongoDB) so a reviewer sees the real effect, not just "migration applied."
-- **Validation before execution** — forbidden ops (DCL statements inside DDL), dangerous ops (`TRUNCATE`, `DROP COLUMN`, `collection.drop()`, …), empty `down()`, orphaned drops, FK integrity (MariaDB), and a SQL syntax pre-check — each with an explicit, reviewable escape hatch (`--allow`, `@allow` file annotation) rather than a silent bypass.
+- **Validation before execution** — enforced by `up`, `sync` and `up-all` themselves (not just a separate `validate` step), against exactly the migrations about to run: forbidden ops (DCL statements inside DDL), dangerous ops (`TRUNCATE`, `DROP COLUMN`, `collection.drop()`, …), empty `down()`, orphaned drops, FK integrity (MariaDB), and a SQL syntax pre-check — each with an explicit, reviewable escape hatch (`--allow`, `@allow` file annotation) rather than a silent bypass.
 - **DDL checksum verification** — the changelog stores a checksum of every applied migration file's content, not just its filename. If an already-applied file gets edited afterward, `up`/`sync` refuse to proceed instead of silently trusting a file that may no longer match what actually ran — `--allow-checksum-drift` is the explicit override when the edit was intentional. See [docs/DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md).
 - **Lock Guard (MariaDB)** — every DDL statement runs under a bounded `lock_wait_timeout` with retry, so an `ALTER TABLE` stuck behind a long-running transaction's metadata lock fails fast instead of queuing indefinitely and jamming every later query on that table. See [docs/LOCK-GUARD.md](docs/LOCK-GUARD.md).
 - **Sanity Check** — optional Pre-Check / Post-Check assertions per migration, with auto-rollback if the post-condition doesn't hold.
@@ -80,7 +80,33 @@ Everything above also works via `docker compose run --rm migrate <command> ...` 
 
 ### Config Defaults & the Delta Pattern
 
-`loadConfig()` picks a built-in defaults file from `src/config-defaults/` based on `type` + `mode` (`mariadb-ddl.js`, `mariadb-dcl.js`, `mongodb-ddl.js`, `mongodb-dcl.js`), then deep-merges your config on top. **Your `config.js` only needs to export what differs from the defaults** — host/port/credentials, lock guard tuning, etc. all fall back sensibly.
+`loadConfig()` picks a built-in defaults file from `src/config-defaults/` based on `type` + `mode` (`mariadb-ddl.js`, `mariadb-dcl.js`, `mongodb-ddl.js`, `mongodb-dcl.js`), then deep-merges your config on top. **Your `config.js` only needs to export what differs from the defaults** — host/port, lock guard tuning, etc. all fall back sensibly.
+
+Two things deliberately have **no** fallback:
+
+- **MariaDB credentials.** `user`/`password` come from the config or `MARIADB_USER`/`MARIADB_PASSWORD`; if neither is set, the run stops with an error instead of trying `root` with a well-known password. (Use `password: ''` explicitly for an account without one.)
+- **Creating the database.** If the configured database doesn't exist, the run stops — a missing database almost always means the wrong host or a typo, and creating it would quietly apply every migration to a brand-new empty database. For a genuinely new environment (or local/test setups), set `createDatabaseIfMissing: true`. On MongoDB this is checked with `listDatabases`; an account without that right gets a warning instead of a refusal.
+
+### Upgrading from 2.1.0
+
+These used to be silent and now stop the run:
+
+| Before | Now |
+|---|---|
+| `up`/`sync`/`up-all` ran migrations without validating them | validated first; failures refuse the whole run (use `--allow …` / `@allow` for reviewed exceptions) |
+| MariaDB: a file without `-- +migrate Up` was skipped and stayed pending forever | rejected with `MISSING_UP_MARKER` |
+| MariaDB: `down` silently skipped a file without a Down section | error — the migration stays applied |
+| `R__` files in a DDL directory: run as versioned migrations on MongoDB, skipped on MariaDB | ignored on both (warning); old changelog entries for them are reported and left alone |
+| A missing database was created automatically | error unless `createDatabaseIfMissing: true` |
+| MariaDB connected as `root`/`rootpass` when nothing was configured | error |
+| MongoDB `--sanity-check` ran all pending migrations in one go, skipping later files' Pre/Post-Checks | each migration runs with its own checks; `--target`/`--only` are honored |
+| `--sanity-check`: after a failed check was auto-rolled back, MariaDB continued with the next migration | the run stops there (later migrations may depend on it) |
+| `--target`/`--only` picked the first file whose name *contained* the value | an exact file name wins over a substring match |
+| `down` ran immediately, no plan shown; `down --target` was ignored (always rolled back 1) | shows the plan, asks for `yes` (`--yes` outside a terminal), `--dry-run` available, `--target` works, refuses edited files |
+| Dangerous-op rules matched across the whole Up section (`UPDATE … WHERE` as last statement was flagged; `UPDATE` without WHERE was missed if another statement had one; `TRUNCATE t`, `DROP` without `COLUMN`, schema-qualified tables, Mongo `deleteMany()`/`dropCollection()` were missed) | matched per statement; those forms are caught — some migrations that used to pass now need an `@allow` |
+| MariaDB `DROP TABLE` of an existing table was reported as `ORPHAN_DROP_UP` | `DROP_TABLE` (data loss); `ORPHAN_DROP_UP` now means the table exists nowhere (likely a typo) |
+| MongoDB: `dropDatabase()` in `down()` was auto-allowed if `up()` created any collection | always needs explicit approval |
+| MongoDB: an apostrophe in a comment or a nested `{ … }` in `up()` cut the validated body short, hiding later calls | the whole body is validated — some migrations that used to pass now need an `@allow` |
 
 ### Multi-Instance
 
@@ -103,13 +129,13 @@ docker compose run --rm migrate <command> [options] -c /app/test-fixtures/<db-ty
 | Command | What it does |
 |---|---|
 | `status` | Show applied vs. pending migrations |
-| `up [--dry-run] [--sanity-check] [--no-auto-rollback] [--target <m>] [--only <m>] [--instance <n>] [--allow-checksum-drift]` | Apply pending migrations. **Refuses to run if an already-applied file's content no longer matches its recorded checksum** — see below |
-| `sync [--sanity-check] [--target <m>] [--only <m>] [-o <dir>] [--allow-checksum-drift]` | `status` → `up` → diff → real current schema, plus a run notification email (`reports/notification.html`). **Errors (non-zero exit) if nothing was pending**, same checksum refusal as `up` — see [docs/DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md) |
-| `down -n <N> [--target <m>] [--instance <n>]` | Rollback the last N migrations |
+| `up [--dry-run] [--sanity-check] [--no-auto-rollback] [--target <m>] [--only <m>] [--instance <n>] [--allow-checksum-drift] [--allow-*]` | Apply pending migrations. **Validates the migrations about to run first and refuses (nothing applied) if any fails** — same rules and `--allow-*` escape hatches as `validate`. Also refuses if an already-applied file's content no longer matches its recorded checksum — see below |
+| `sync [--sanity-check] [--target <m>] [--only <m>] [-o <dir>] [--allow-checksum-drift] [--allow-*]` | `status` → validate → `up` → diff → real current schema, plus a run notification email (`reports/notification.html`). **Errors (non-zero exit) if nothing was pending**, same validation and checksum refusals as `up` — see [docs/DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md) |
+| `down -n <N> [--target <m>] [--dry-run] [--yes] [--allow-checksum-drift] [--instance <n>]` | Rollback the last N migrations (or down to and including `--target`). Shows the plan and asks you to type `yes`; outside a terminal it needs `--yes`. Refuses if a file to roll back was edited after being applied |
 | `baseline [--all \| --up-to <m> \| --file <f>] [--dry-run]` | Mark existing migrations as already-applied, for onboarding an existing DB — see [docs/EXISTING-DATABASE-ONBOARDING.md](docs/EXISTING-DATABASE-ONBOARDING.md) |
 | `reset [--yes]` | Delete changelog/checksum records only — **never** runs `down()` or touches schema/data. Dry-run (count only) unless `--yes` |
 | `create <name>` | Scaffold a new DDL migration file |
-| `validate [--allow-dangerous] [--allow-forbidden] [--allow <codes>]` | Validate migration files (see [Validation](#🛡️-validation) below) |
+| `validate [--pending-only] [--allow-dangerous] [--allow-forbidden] [--allow <codes>]` | Validate migration files (see [Validation](#🛡️-validation) below). `--pending-only` connects and checks only not-yet-applied files — exactly what `up`/`sync` will check |
 | `test` | Up-Down-Up round-trip test |
 
 ### DDL — multi-instance
@@ -117,7 +143,7 @@ docker compose run --rm migrate <command> [options] -c /app/test-fixtures/<db-ty
 | Command | What it does |
 |---|---|
 | `status-all` | `status` across every instance in the config |
-| `up-all [--dry-run]` | `up` across every instance |
+| `up-all [--dry-run] [--allow-checksum-drift] [--allow-*]` | `up` across every instance, with the same validation / checksum / changelog-consistency gates per instance |
 | `test-instances [-o <dir>] [--validate-only] [--parallel]` | `test` (or just `validate`) across every instance, with a combined report |
 | `validate-all <dir> [--ddl-only \| --dcl-only] [--allow-*]` | Walk a whole project directory (DDL + DCL) and validate everything in it — e.g. `production-server/` |
 
@@ -134,7 +160,7 @@ docker compose run --rm migrate <command> [options] -c /app/test-fixtures/<db-ty
 
 | Command | What it does |
 |---|---|
-| `dcl-all [--dry-run] [--validate] [--allow-*] [-o <dir>]` | `dcl` across every instance — one `notification-<instance>.html` per instance |
+| `dcl-all [--dry-run] [--validate] [--allow-*] [-o <dir>]` | `dcl` across every instance, each with its own `migrationsDir` if set — one `notification-<instance>.html` per instance (with that instance's passwords) plus a password-free `notification-summary.html` |
 | `dcl:status-all` | `dcl:status` across every instance |
 | `dcl:verify-all` | `dcl:verify` across every instance |
 
@@ -253,7 +279,9 @@ db-migrate/
 
 ## 🛡️ Validation
 
-The `validate` command checks each migration file for:
+`up`, `sync` and `up-all` run these checks themselves, right before executing, on exactly the migrations about to run (pending, narrowed by `--target`/`--only`) — if any fails, nothing is applied and the run exits non-zero. Already-applied files are not re-judged: they ran under the rules of their day, and editing them to satisfy a newer rule would trip the checksum gate. `validate` runs the same checks without touching the database (`--pending-only` to check just what `up`/`sync` would).
+
+Each file is checked for:
 
 - **Forbidden operations**: `DROP DATABASE`, `CREATE USER`, `GRANT`, etc. showing up in a DDL file (they belong in DCL)
 - **Dangerous operations**: `TRUNCATE TABLE`, `DROP COLUMN`, `DROP INDEX`, `collection.drop()`, etc.
@@ -261,6 +289,9 @@ The `validate` command checks each migration file for:
 - **FK integrity** (MariaDB DDL): foreign keys pointing at tables that were dropped or never created
 - **Empty `down()`**: `up()` has operations but `down()` doesn't undo them
 - **Orphaned drops**: `down()` drops tables/collections that `up()` never created
+- **No `-- +migrate Up` section** (MariaDB): such a file would never run and stay pending forever, so it's rejected (`MISSING_UP_MARKER`)
+
+In a versioned (DDL) directory, `R__*` files are ignored by `status`/`up`/`down`/`validate` on both databases (with a warning) — repeatable scripts belong in a DCL project (`mode: 'repeatable'`).
 
 ### Allowance mechanisms
 
@@ -270,6 +301,19 @@ node src/cli.js validate --allow-dangerous -c <config>
 
 # Allow specific operation codes
 node src/cli.js validate --allow TRUNCATE_TABLE,DROP_INDEX -c <config>
+```
+
+The same flags work on `up`/`sync`/`up-all`. Every allowance actually used (flag or annotation) is printed in the run log, so the approval is visible there too.
+
+Some failures can't be allowed, only fixed in the file — e.g. a syntax error, a missing Up/Down section, or schema DDL inside a DCL file. The refusal message says which.
+
+Approvals and known tables can also live in the config — useful for files that are already applied, or tables that predate your migrations:
+
+```javascript
+validation: {
+  existingTables: ['legacy_users'],                          // MongoDB: existingCollections
+  allow: { '20260101000005-drop-legacy.sql': ['DROP_TABLE'] }
+}
 ```
 
 Per-file annotation (recommended — keeps the approval traceable in code review):
@@ -297,7 +341,7 @@ Full rules: [docs/VALIDATION-RULES-REFERENCE.md](docs/VALIDATION-RULES-REFERENCE
 
 ```bash
 npm test                 # Unit tests (vitest)
-npm run test:integration # Integration tests against real DBs (vitest.integration.config.js)
+npm run test:integration # Integration tests against real DBs (vitest.integration.config.js); skips without a DB unless INTEGRATION_REQUIRE_DB=1
 npm run docker:test      # Full e2e: builds the image, brings up MongoDB + MariaDB, runs test-all
 ```
 

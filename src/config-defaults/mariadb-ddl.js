@@ -3,9 +3,13 @@ export default {
 
   host: process.env.MARIADB_HOST || 'localhost',
   port: parseInt(process.env.MARIADB_PORT || '3306', 10),
-  user: process.env.MARIADB_USER || 'root',
-  password: process.env.MARIADB_PASSWORD || 'rootpass',
+  // No fallback credentials — connect() refuses to run without them, so a
+  // missing env var can't silently fall back to root / a well-known password.
+  user: process.env.MARIADB_USER,
+  password: process.env.MARIADB_PASSWORD,
   database: '',
+  // A missing database is an error unless this is set (see connect())
+  createDatabaseIfMissing: false,
 
   migrationsDir: './migrations',
   changelogTable: 'schema_migrations',

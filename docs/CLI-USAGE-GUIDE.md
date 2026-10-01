@@ -246,6 +246,25 @@ Validation checks for:
 - 🟠 **Dangerous operations**: TRUNCATE, DROP TABLE (with no matching CREATE)
 - 🟡 **Warnings**: operations that may affect performance
 
+### `up` / `sync` / `up-all` validate before running
+
+You don't have to remember to run `validate` first: `up`, `sync` and `up-all` run the same checks on the migrations they're about to execute, and refuse — nothing applied, exit 1 — if any fails. The refusal lists each file's problems and, for the ones that can be overridden, the exact `--allow` value. Already-applied files aren't re-checked.
+
+```bash
+# See what sync would check, without applying anything (connects to the DB)
+node src/cli.js validate --pending-only -c <config>
+
+# up --dry-run also reports whether the run would be refused
+node src/cli.js up --dry-run -c <config>
+
+# A reviewed exception: prefer an annotation in the file (visible in code review) …
+#   -- @allow: DROP_COLUMN
+# … or pass it for this run only
+node src/cli.js sync --allow DROP_COLUMN -c <config>
+```
+
+Every allowance used is printed in the run log (`⚠️ Allowed in <file> [CODE]: …`).
+
 ---
 
 ## 📊 CI/CD Test Flow
@@ -334,8 +353,20 @@ docker compose -f docker-compose.yml logs -f
    - If a migration has already run, you need to `down` before `up`
 
 3. **Multi-instance notes**:
-   - All instances share the same migration files
+   - All instances share the same migration files, unless an instance sets its own `migrationsDir`
    - Each instance has its own changelog table
+
+6. **`down` asks first**:
+   - It prints exactly which migrations it will roll back (most recent first) and waits for you to type `yes`
+   - `--dry-run` only prints the plan; `--target <m>` rolls back everything after `<m>` and `<m>` itself
+   - In scripts/CI (no terminal) it refuses unless you pass `--yes`
+   - If a file to roll back was edited after being applied, it refuses unless `--allow-checksum-drift`
+
+5. **Things that stop a run instead of guessing**:
+   - No MariaDB credentials configured (`MARIADB_USER`/`MARIADB_PASSWORD` or `user`/`password`) — there is no `root` fallback
+   - The configured database doesn't exist — set `createDatabaseIfMissing: true` only for a genuinely new environment
+   - A pending migration fails validation, or (MariaDB) has no `-- +migrate Up` section
+   - `R__*` files in a DDL `migrationsDir` don't stop anything — they're ignored with a warning; put them in a DCL project
 
 4. **`reset` only clears records, not data**:
    - Only deletes tracking records in changelog/checksum; does not run `down()` and does not touch the actual tables/collections

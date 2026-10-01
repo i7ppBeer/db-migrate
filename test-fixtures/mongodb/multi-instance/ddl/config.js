@@ -9,6 +9,8 @@
  */
 export default {
   type: 'mongodb',
+  // Test fixture: its database is created from scratch on each run
+  createDatabaseIfMissing: true,
   changelogCollection: '_migrations',
 
   // 多個 database instances

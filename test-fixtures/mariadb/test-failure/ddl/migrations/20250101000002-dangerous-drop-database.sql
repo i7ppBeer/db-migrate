@@ -1,3 +1,4 @@
+-- @expect-error: DROP_DATABASE
 -- FAILURE CASE: Dangerous DROP DATABASE operation
 -- This will fail validation because it destroys everything
 

@@ -1,3 +1,4 @@
+// @expect-error: CREATE_USER_CMD,DROP_USER_CMD,GRANT_ROLES_CMD,REVOKE_ROLES_CMD
 /**
  * 混合測試：多種管理員危險操作
  * 預期驗證結果：失敗（包含多種危險指令）

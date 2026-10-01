@@ -149,7 +149,7 @@ if [[ "$MARIA_OK" == "true" ]]; then
         $CLI up -c "$MARIA_PRODUCTION/ddl/ecommerce/config.js"
 
     run_cmd "MariaDB ecommerce down -n 3" \
-        $CLI down -n 3 -c "$MARIA_PRODUCTION/ddl/ecommerce/config.js"
+        $CLI down -n 3 --yes -c "$MARIA_PRODUCTION/ddl/ecommerce/config.js"
 
     run_cmd "MariaDB ecommerce up (re-apply)" \
         $CLI up -c "$MARIA_PRODUCTION/ddl/ecommerce/config.js"
@@ -169,7 +169,7 @@ if [[ "$MARIA_OK" == "true" ]]; then
         $CLI up -c "$MARIA_PRODUCTION/ddl/analytics/config.js"
 
     run_cmd "MariaDB analytics down -n 5" \
-        $CLI down -n 5 -c "$MARIA_PRODUCTION/ddl/analytics/config.js"
+        $CLI down -n 5 --yes -c "$MARIA_PRODUCTION/ddl/analytics/config.js"
 
     run_cmd "MariaDB analytics up (re-apply)" \
         $CLI up -c "$MARIA_PRODUCTION/ddl/analytics/config.js"
@@ -189,7 +189,7 @@ if [[ "$MARIA_OK" == "true" ]]; then
         $CLI up -c "$MARIA_PRODUCTION/ddl/logging/config.js"
 
     run_cmd "MariaDB logging down -n 3" \
-        $CLI down -n 3 -c "$MARIA_PRODUCTION/ddl/logging/config.js"
+        $CLI down -n 3 --yes -c "$MARIA_PRODUCTION/ddl/logging/config.js"
 
     run_cmd "MariaDB logging up (re-apply)" \
         $CLI up -c "$MARIA_PRODUCTION/ddl/logging/config.js"
@@ -242,7 +242,7 @@ if [[ "$MONGO_OK" == "true" ]]; then
         $CLI up -c "$MONGO_PRODUCTION/ddl/ecommerce/config.js"
 
     run_cmd "MongoDB ecommerce down -n 3" \
-        $CLI down -n 3 -c "$MONGO_PRODUCTION/ddl/ecommerce/config.js"
+        $CLI down -n 3 --yes -c "$MONGO_PRODUCTION/ddl/ecommerce/config.js"
 
     run_cmd "MongoDB ecommerce up (re-apply)" \
         $CLI up -c "$MONGO_PRODUCTION/ddl/ecommerce/config.js"

@@ -169,7 +169,7 @@ docker compose run --rm migrate dcl:verify-all  -c /app/test-fixtures/mariadb/mu
 docker compose run --rm migrate test-instances -o /app/reports -c /app/test-fixtures/mariadb/multi-instance/ddl/config.js
 ```
 
-`dcl-all` writes one notification email per instance (`reports/notification-<instance-name>.html`).
+`dcl-all` writes one notification email per instance (`reports/notification-<instance-name>.html`, holding only that instance's passwords) plus `reports/notification-summary.html`, an overview with no passwords. Instances can each manage different accounts via their own `migrationsDir` — see [docs/MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md).
 
 Config file format and full details: [docs/MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md).
 

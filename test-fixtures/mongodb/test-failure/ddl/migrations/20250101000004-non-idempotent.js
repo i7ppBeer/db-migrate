@@ -1,3 +1,4 @@
+// @expect-error: DELETE_ALL
 /**
  * FAILURE CASE: Non-idempotent deleteMany without filter
  * 

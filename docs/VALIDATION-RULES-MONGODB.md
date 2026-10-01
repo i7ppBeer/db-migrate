@@ -10,7 +10,7 @@ Same nine-step pipeline as MariaDB (annotation parse → syntax check → struct
 → forbidden → dangerous → warnings → suspicious names → performance), with two
 MongoDB-specific differences called out below: the syntax check method, and that
 **missing/empty `down()` is a hard error here, not a warning** (see
-[Unbypassable structural errors](#unbypassable-structural-errors)).
+[Structural errors](#structural-errors)).
 
 Annotation syntax is JS-comment style: `// @allow-dangerous: true`,
 `// @allow-forbidden: true`, `// @allow: CODE1,CODE2` — otherwise identical semantics
@@ -37,10 +37,20 @@ form** (`.dropDatabase()`) and, where relevant, a **command-object form**
 | `REPL_STEPDOWN` | `replSetStepDown:` | Force stepdown Primary is forbidden |
 | `SET_PARAMETER` | `setParameter:` | Change system parameters is forbidden |
 
-**Smart allowance for `DROP_DATABASE`/`DROP_DATABASE_CMD`:** allowed automatically in
-`down()` when `up()` initializes the database (`createCollection` or a
-`_db_metadata`-style marker) and `down()`'s drop isn't also duplicated in `up()`.
-A `dropDatabase` sitting in `up()` always requires `@allow-forbidden`.
+**No automatic allowance for `DROP_DATABASE`/`DROP_DATABASE_CMD`**, in `up()` or
+`down()` — it always needs `@allow-forbidden` / `--allow DROP_DATABASE`. It used to be
+auto-allowed in `down()` whenever `up()` created *any* collection, but MongoDB has no
+"this migration created the database": rolling back one new collection that way deletes
+every other collection in the database too. (MariaDB's allowance is narrower — only for
+a `CREATE DATABASE` in the same file's Up.)
+
+**How `up()`/`down()` are read:** the function body is found by matching braces, with
+comments and string literals skipped, and comments are stripped before string literals
+are — so an apostrophe in a comment or a nested object literal no longer cuts the
+scanned body short (both used to hide later calls such as `deleteMany({})` from every
+rule). Migrations must be ES modules (`export async function up…`); CommonJS
+`module.exports = {…}` files can't be loaded by `up` and are rejected with
+`MISSING_UP_EXPORT`.
 
 ### DDL project only (`mode !== 'repeatable'`)
 
@@ -82,10 +92,10 @@ point, so rollback code isn't flagged for containing destructive calls.
 
 | Category | Code | Message | Suggestion |
 |---|---|---|---|
-| dataLoss | `DROP_COLLECTION` | `.drop()` deletes entire collection | Confirm deletion + backup exists |
-| dataLoss | `DELETE_ALL` | `deleteMany({})` deletes all documents | Add a query condition |
-| dataLoss | `REMOVE_ALL` | `remove({})` (deprecated method) deletes all documents | Use `deleteMany` with a condition |
-| bulkOperation | `UPDATE_ALL` | `updateMany({}, ...)` updates all documents | Add a query condition |
+| dataLoss | `DROP_COLLECTION` | `.drop()` or `db.dropCollection(name)` deletes entire collection | Confirm deletion + backup exists |
+| dataLoss | `DELETE_ALL` | `deleteMany({})`, `deleteMany()` with **no filter at all** (the driver treats it as `{}` — verified: it deletes every document), `deleteMany({}, options)`, and `bulkWrite([{ deleteMany: { filter: {} } }])` | Add a query condition |
+| dataLoss | `REMOVE_ALL` | `remove({})` / `remove()` (deprecated method) deletes all documents | Use `deleteMany` with a condition |
+| bulkOperation | `UPDATE_ALL` | `updateMany({}, ...)` or `bulkWrite([{ updateMany: { filter: {} … } }])` updates all documents | Add a query condition |
 | bulkOperation | `REPLACE_ONE` | `replaceOne()` fully replaces the document | Consider `updateOne` + `$set` |
 | schemaChange | `DROP_INDEX` | May affect query performance | Confirm unused |
 | schemaChange | `DROP_INDEXES` | Deletes **all** indexes on the collection | Very dangerous — double check |
@@ -102,7 +112,18 @@ is auto-allowed when every collection it drops was created in this same file's `
 
 ---
 
-## Unbypassable structural errors
+**Dropping collections across files:** `validate`/`up`/`sync` see every file, so they
+know which collections exist before each one runs (created by earlier files, plus
+`validation.existingCollections`). Dropping one that exists is reported as
+`DROP_COLLECTION` only; dropping one that exists nowhere additionally gets
+`ORPHAN_DROP_UP` ("check the name"). Config-level per-file approvals work the same as
+on MariaDB: `validation: { allow: { '<file>.js': ['DELETE_ALL'] }, existingCollections: [...] }`.
+
+A filter passed as a variable (`deleteMany(filter)`) can't be checked statically.
+
+---
+
+## Structural errors
 
 | Code | Trigger |
 |---|---|
@@ -110,8 +131,8 @@ is auto-allowed when every collection it drops was created in this same file's `
 | `MISSING_UP_EXPORT` | No exported `up()` (any DDL or DCL mode) |
 | `MISSING_DOWN_EXPORT` | DDL mode only: no exported `down()` |
 | *(no code)* `missing-down` | **DDL mode only, and this is the sharpest difference from MariaDB:** if `up()` contains `createCollection`/`createIndex`/`insertMany`/`insertOne` and `down()` is empty (or has no method calls at all), this is pushed into `errors` — **it blocks validation.** MariaDB's equivalent check is a `warnings`-only entry and never blocks. See [discussion item #1](#discussion-items). |
-| *(no code)* `orphan-drop` | `down()` drops a collection `up()` never created |
-| *(no code)* `orphan-drop-in-up` | `up()` drops a collection not created earlier in the same file |
+| `ORPHAN_DROP_DOWN` | `down()` drops a collection `up()` never created — **bypassable** (`--allow ORPHAN_DROP_DOWN` / `@allow`) |
+| `ORPHAN_DROP_UP` | `up()` drops a collection that exists nowhere (see above); auto-allowed if `down()` recreates it — **bypassable** like `ORPHAN_DROP_DOWN` |
 
 Repeatable (`R__`) DCL files skip all of the above except `MISSING_UP_EXPORT` — `down()`
 is optional there (only a `⚠️ down() is optional in repeatable (DCL) mode` warning if absent).

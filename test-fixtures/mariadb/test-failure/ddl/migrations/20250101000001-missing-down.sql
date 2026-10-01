@@ -1,3 +1,4 @@
+-- @expect-error: MISSING_DOWN
 -- FAILURE CASE: Missing Down section
 -- This migration will fail validation because there's no rollback
 

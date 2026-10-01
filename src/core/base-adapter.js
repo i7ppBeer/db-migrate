@@ -3,10 +3,80 @@
  * All database adapters must implement this interface
  */
 
+import path from 'path';
+
+/**
+ * `R__*` files are repeatable (DCL) migrations. A versioned (DDL) project
+ * ignores them everywhere — status, up, down, validate — so both adapters
+ * agree on what a DDL migration is. They belong in a DCL project.
+ */
+export function isRepeatableMigrationFile(fileName) {
+  return /^R__/.test(path.basename(fileName));
+}
+
+/**
+ * The subset of pending migrations an `up` run will execute, given
+ * --target (up to and including) / --only (just that one). Shared by both
+ * adapters' up() and the CLI's pre-run validation gate, so the gate checks
+ * exactly what will run. Matches an exact file name first, then a substring.
+ *
+ * @param {string[]} pending - pending file names, in run order
+ * @param {{target?: string, only?: string}} [options]
+ * @returns {{ selected: string[], error: string|null }}
+ */
+export function selectPendingMigrations(pending, { target, only } = {}) {
+  const find = (list, needle) => {
+    const exact = list.findIndex(f => f === needle || f.replace(/\.(sql|js)$/, '') === needle);
+    return exact !== -1 ? exact : list.findIndex(f => f.includes(needle));
+  };
+  let selected = pending;
+  if (target) {
+    const i = find(selected, target);
+    if (i === -1) return { selected: [], error: `Target migration not found: ${target}` };
+    selected = selected.slice(0, i + 1);
+  }
+  if (only) {
+    const i = find(selected, only);
+    if (i === -1) return { selected: [], error: `Migration not found in pending: ${only}` };
+    selected = [selected[i]];
+  }
+  return { selected, error: null };
+}
+
 export class BaseAdapter {
   constructor(config) {
     this.config = config;
     this.dbType = 'unknown';
+  }
+
+  /**
+   * Config-level validation settings (both optional):
+   *   validation.allow:          { '<file name>': ['CODE', …] } — per-file
+   *                              allowances kept in config instead of in the
+   *                              file (e.g. for files already applied)
+   *   validation.existingTables (MariaDB) / validation.existingCollections
+   *   (MongoDB): ['name', …] — tables/collections that exist without a
+   *                              migration creating them (pre-existing or
+   *                              baselined), for the FK and drop checks
+   * @returns {{allow: Object<string,string[]>, existing: string[]}}
+   */
+  getValidationConfig() {
+    const v = this.config.validation || {};
+    const allow = {};
+    for (const [file, codes] of Object.entries(v.allow || {})) {
+      allow[file] = (Array.isArray(codes) ? codes : String(codes).split(',')).map(c => String(c).trim().toUpperCase()).filter(Boolean);
+    }
+    const existing = v.existingTables || v.existingCollections || [];
+    // MariaDB table names compare case-insensitively here; MongoDB's don't
+    return { allow, existing: existing.map(t => (this.dbType === 'mongodb' ? String(t) : String(t).toLowerCase())) };
+  }
+
+  /** Warnings about validation config that points at nothing (renamed/typo'd files). */
+  checkValidationConfig(migrationFiles) {
+    const files = new Set(migrationFiles);
+    return Object.keys(this.getValidationConfig().allow)
+      .filter(f => !files.has(f))
+      .map(f => `validation.allow lists '${f}', which is not a migration file in ${this.config.migrationsDir} — renamed or misspelled?`);
   }
 
   /**

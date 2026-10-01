@@ -1,3 +1,4 @@
+-- @expect-error: ALTER_USER,SET_PASSWORD
 -- 測試：ALTER USER 危險操作
 -- 預期驗證結果：失敗（修改使用者是危險操作）
 

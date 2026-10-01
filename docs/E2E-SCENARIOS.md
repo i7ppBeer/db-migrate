@@ -69,7 +69,7 @@ docker compose run --rm migrate dcl -c /app/test-fixtures/mariadb/my-project/dcl
 
 **Why the checksum check runs before anything else**: the placeholder gets replaced with a *different* random password every time the file is executed. If the runner re-ran unchanged files on every `dcl` invocation, every `dcl` call would silently rotate every password. The checksum is computed from the file's original, unresolved content (with the literal placeholder text still in it) specifically so that substituting a password doesn't itself look like a change.
 
-**Where the password actually shows up**: nowhere except `reports/notification.html` (or wherever `-o` points), as plaintext, labeled as a one-time credential that expires on first login. Not the console, not a file like the old `/tmp/secret` mechanism, not the migration file. See [DCL-PASSWORD.md](DCL-PASSWORD.md).
+**Where the password actually shows up**: nowhere except `reports/notification.html` (or wherever `-o` points), as plaintext, with a note on what the database actually enforces (a forced change on first login only if the statement has `PASSWORD EXPIRE`). Not the console, not a file like the old `/tmp/secret` mechanism, not the migration file. See [DCL-PASSWORD.md](DCL-PASSWORD.md).
 
 ---
 

@@ -15,6 +15,8 @@
 
 export default {
   type: 'mariadb',
+  // Test fixture: its database is created from scratch on each run
+  createDatabaseIfMissing: true,
   user: process.env.LOGGING_DDL_USER || 'logging_ddl_admin',
   password: process.env.LOGGING_DDL_PASSWORD || 'logging_ddl_secure_pass_333',
   database: 'logging',

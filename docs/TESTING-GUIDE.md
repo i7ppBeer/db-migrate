@@ -206,63 +206,61 @@ node src/cli.js test-all -o ./reports
 | Directory | Purpose |
 |---|---|
 | `test-fixtures/mariadb/test-success/` | MariaDB migrations that should pass |
-| `test-fixtures/mariadb/test-failure/` | MariaDB migrations that should fail validation |
+| `test-fixtures/mariadb/test-failure/` | MariaDB migrations that should fail validation — each with its exact expected codes |
+| `test-fixtures/mariadb/fk-test/ddl-bad/` | Foreign-key mistakes that should fail validation |
 | `test-fixtures/mongodb/test-success/` | MongoDB migrations that should pass |
-| `test-fixtures/mongodb/test-failure/` | MongoDB migrations that should fail validation |
+| `test-fixtures/mongodb/test-failure/` | MongoDB migrations that should fail validation — each with its exact expected codes |
+
+### Expected failures are declared per file
+
+A fixture migration that must be rejected says exactly how, as its first line:
+
+```sql
+-- @expect-error: TRUNCATE_TABLE
+```
+```javascript
+// @expect-error: DROP_DATABASE
+```
+
+`test-all` checks every DDL file individually: an annotated file must fail validation
+with **exactly** those codes (a missing or an extra code fails the check), and a file
+without the annotation must be valid. Each file is its own line in the report. A
+directory that contains annotated files is not Up-Down-Up tested — its migrations are
+meant to be refused, and `up`/`sync` would refuse them too.
+
+This replaced a directory-wide `expectFailure: true` flag that counted the whole
+directory as passing if *any* file failed. That flag was hiding real gaps when it was
+removed: a MongoDB `dropDatabase()` fixture that validation let through, a
+`deleteMany({})` fixture whose `up()` the validator only half-read (an apostrophe in a
+comment and a nested `{ … }` both cut it short), and four fixtures written as
+CommonJS that failed only because they couldn't be loaded at all.
+
+DCL fixtures use the existing per-file `@expect-fail` annotation for scripts that are
+meant to be non-idempotent.
 
 ---
 
-## Known test gaps (audited 2026-09-10)
+## What runs against real databases
 
-`npx vitest run` currently reports 504 `it()` blocks across 9 files — every single one
-runs against a **mocked** driver (`vi.mock('mysql2/promise', ...)` /
-`vi.mock('migrate-mongo', ...)`). There is exactly one file that talks to a real
-database — `test/integration.test.js`, added on `feat/mariadb-lock-guard` — and even
-that one has only been confirmed to *skip cleanly* when no database is reachable; its
-actual lock-contention assertions have not yet been observed passing against a live
-MariaDB (no Docker in the environment that wrote it — see that branch's PR notes).
+| Check | Where | Database |
+|---|---|---|
+| Unit tests (`npm test`) | CI `test` job | none — mocked drivers |
+| `validate-all` on the success fixtures | CI `test` job | MariaDB + MongoDB (DCL idempotency) |
+| `test-all`: per-file validation, Up-Down-Up, DCL idempotency, for every fixture | CI `e2e` job | MariaDB + MongoDB (docker compose) |
+| Lock Guard scenarios (`npm run test:integration`) | CI `e2e` job, with `INTEGRATION_REQUIRE_DB=1` so a missing database fails instead of skipping | MariaDB |
 
-Concretely, **nothing in this repo has ever executed a real up → down → up cycle, a
-real sanity-check rollback, or a real DCL idempotency run against an actual database.**
-The mocks return canned values (`[[]]`, `undefined`, etc.), so a test can pass while
-asserting on a code path the mock made trivially succeed rather than on what MariaDB
-or MongoDB actually does.
+Run the integration suite locally with `docker compose up -d mariadb` and
+`npm run test:integration`; without a database it skips (unless
+`INTEGRATION_REQUIRE_DB=1`).
 
-### Gap list, in priority order
+### Remaining gaps
 
-1. **Real `up → down → up` cycle** (`runUpDownUpTest()` in `base-adapter.js`) — never
-   run against a live DB. The `test` CLI command exercises this logic path but only
-   against `test-success` fixtures with mocked connections in CI.
-2. **Real sanity-check rollback** — `SanityChecker.runWithSanityCheck()`'s
-   `postCheck` failure → `down()` → verify state path has unit tests for the state
-   machine, but never against a database that could genuinely fail a post-check for a
-   real reason (e.g. a column that didn't get the expected type).
-3. **Real DCL idempotency** (`dcl:verify`) — `dcl-idempotent-checker.test.js` tests the
-   *comparison logic* against synthetic before/after state objects, never against a
-   database actually running the same DCL script three times.
-4. **Lock Guard e2e scenarios** (the 3 scenarios in `test/integration.test.js`) —
-   written, logic-reviewed, not yet observed passing.
-5. **Runtime Gate plan** (`docs/RUNTIME-GATE-PLAN.md`, R0–R4) — not implemented, so
-   nothing to test yet; listed here so it isn't forgotten once it is.
-6. **Two confirmed FK/orphan-drop logic bugs** (`docs/VALIDATION-RULES-MARIADB.md`,
-   "Confirmed logic bugs" section — traced by hand against the source, not inspection
-   guesses): (a) `FK_REFERENCES_DROPPED_TABLE` is order-blind within one file and
-   false-positives on a valid drop-then-recreate-then-reference sequence; (b)
-   `ORPHAN_DROP_UP` never looks at `Down`, so a `Up: DROP TABLE x` / `Down: CREATE
-   TABLE x` migration — a textbook-correct reverse migration — is unconditionally
-   blocked with no bypass. Both are pure static-analysis bugs, closeable with unit
-   tests alone, no database required. Highest-value items in this list precisely
-   because they block *valid* migrations rather than just missing invalid ones.
-7. **MongoDB `validateJSSyntax` multi-line `import` false-positive** — flagged in
-   `docs/VALIDATION-RULES-MONGODB.md` discussion item #3, from code inspection only.
-   Needs a `validateContent()` unit test with a multi-line import to confirm one way
-   or the other — this one doesn't need a real database, it's a pure regex/parsing
-   test and could be closed without any DB access.
-8. **Bracket-notation validation bypass** (`docs/VALIDATION-RULES-MONGODB.md`
-   discussion item #2) — worth a regression test asserting the *current* (bypassable)
-   behavior, so it's a documented, deliberate gap rather than a silent one, even if
-   nobody decides to close it right away. Also doesn't need a real database.
-
-Items 1–5 need a reachable MariaDB and/or MongoDB (`docker compose up -d mariadb
-mongodb`) that this environment doesn't have. Items 6–8 can be closed with unit tests
-alone, no database required — good candidates to pick up first.
+1. **Sanity-check rollback against a real database** — the success path (Pre-Check →
+   migrate → Post-Check) runs in `test-all`; a Post-Check that genuinely fails and
+   triggers a real `down()` does not.
+2. **Runtime gates R2–R4** (`docs/RUNTIME-GATE-PLAN.md`) — not implemented yet.
+3. **Bracket-notation validation bypass** (`docs/VALIDATION-RULES-MONGODB.md`
+   discussion item #2) — static checks can't see `db['drop' + 'Database']()`; worth a
+   test pinning the current behavior so it stays a documented gap.
+4. **No coverage threshold** — coverage is configured (`vitest.config.js`) but not
+   enforced.

@@ -7,7 +7,12 @@ from the code; see [Superseded doc](#superseded-doc) at the bottom).
 
 ## How a file gets checked
 
-`validate -c <config>` runs, per file, in this order:
+`validate -c <config>` — and `up`/`sync`/`up-all` right before they execute anything —
+run these checks. Which files: every `.sql` file in `migrationsDir` except `R__*`
+(repeatable/DCL scripts, ignored in a versioned project with a warning), in the same
+order `up` runs them. `up`/`sync`/`up-all` and `validate --pending-only` only report on
+the migrations that haven't been applied yet (all files are still read, so the
+cross-file FK check knows what earlier migrations created). Per file, in this order:
 
 1. **Annotation parse** — leading comment block only (stops at first non-comment,
    non-blank line). Recognizes `-- @allow-dangerous: true`, `-- @allow-forbidden: true`,
@@ -103,21 +108,28 @@ on privilege names like `GRANT CREATE TABLE ...`:
 
 ## Dangerous operations (🟠)
 
-Bypass: `--allow-dangerous` (all) or `--allow CODE` (per-code). Only checked against
+Bypass: `--allow-dangerous` (all), `--allow CODE` (per-code), the file's `-- @allow:`
+annotation, or the config's `validation.allow` entry for that file. Only checked against
 the **Up section** (or full file content for `R__` files with no `Up`/`Down` markers) —
 rollback code in `Down` is expected to contain destructive ops and is not scanned.
 
+Rules are matched **per statement** (the section is split on `;` after comments and
+string literals are removed), so "has no `WHERE`" means *that statement* has none — a
+`WHERE` in another statement can't hide it, and one in the same statement is always
+seen. Table names may be schema-qualified (`app.users`) or backticked.
+
 | Category | Code | Message | Suggestion |
 |---|---|---|---|
-| dataLoss | `TRUNCATE_TABLE` | Will clear all data | `DELETE FROM ... WHERE ...` instead |
+| dataLoss | `TRUNCATE_TABLE` | Will clear all data (`TABLE` keyword optional: `TRUNCATE logs`) | `DELETE FROM ... WHERE ...` instead |
+| dataLoss | `DROP_TABLE` | `DROP TABLE` in Up of a table that exists — created by an earlier migration or listed in `validation.existingTables` — when Down doesn't recreate it. Only `validate`/`up`/`sync` (which see every file) can tell; see [Dropping tables](#dropping-tables-cross-file) | Confirm unused + backup; approve with `@allow: DROP_TABLE` |
 | blocking | `LOCK_TABLE` | Will block all queries | Consider transaction isolation / row locks |
 | blocking | `ALTER_TABLE_MODIFY` | `MODIFY`/`CHANGE COLUMN` may rebuild table, long lock | Test in staging, consider `pt-online-schema-change` |
 | blocking | `ALTER_TABLE_REBUILD` | `ENGINE=`/`CONVERT TO CHARACTER SET` needs full rebuild | Use `pt-online-schema-change` for large tables |
 | blocking | `SELECT_FOR_UPDATE` | Exclusive row lock | Confirm lock is needed / optimistic locking |
 | blocking | `LOCK_IN_SHARE_MODE` | Shared row lock | Confirm shared lock is needed |
-| bulkOperation | `DELETE_ALL` | `DELETE FROM t` with no `WHERE` deletes all rows | Add `WHERE` |
-| bulkOperation | `UPDATE_ALL` | `UPDATE t SET ...` with no `WHERE` updates all rows | Add `WHERE` |
-| schemaChange | `DROP_COLUMN` | Permanently deletes column data | Confirm unused first |
+| bulkOperation | `DELETE_ALL` | A `DELETE` statement with no `WHERE` and no `LIMIT` — incl. `DELETE FROM app.t` and `DELETE t FROM t …` | Add `WHERE` |
+| bulkOperation | `UPDATE_ALL` | An `UPDATE` statement (incl. multi-table `UPDATE … JOIN`) with no `WHERE` and no `LIMIT`. `INSERT … ON DUPLICATE KEY UPDATE` is not an UPDATE statement and isn't flagged | Add `WHERE` |
+| schemaChange | `DROP_COLUMN` | Permanently deletes column data — `DROP COLUMN x` or bare `DROP x` (the `COLUMN` keyword is optional), in any clause of the `ALTER`. `DROP INDEX/KEY/FOREIGN KEY/PRIMARY KEY/CONSTRAINT…` are not columns | Confirm unused first |
 | schemaChange | `RENAME_TABLE` | May break applications | Confirm callers updated |
 | schemaChange | `ALTER_RENAME` | `ALTER TABLE ... RENAME TO` — same risk as above | Confirm callers updated |
 | schemaChange | `MODIFY_COLUMN` | May cause data conversion failure | Test in staging |
@@ -143,11 +155,12 @@ subqueries inside it don't trigger a second match):
 |---|---|---|
 | `SQL_SYNTAX_ERROR` / `SQL_SYNTAX_ERROR_DOWN` | `node-sql-parser` rejects the Up/Down SQL | No |
 | `SANITY_SQL_SYNTAX_ERROR` | Sanity `PreCheck`/`PostCheck` SQL fails to parse | No |
+| `MISSING_UP_MARKER` | The file has no `-- +migrate Up` marker at all. `up` used to skip such a file without running or recording it, so it stayed pending forever and a later `sync` reported "Applied 0" as success; now both `validate` and `up` reject it. (An Up marker with nothing under it is a deliberate no-op migration and is recorded as applied.) | No — fix the file |
 | `MISSING_DOWN` | `Down` is empty/missing and `Up` contains a real operation (`CREATE`/`ALTER`/`DROP TABLE`, `CREATE INDEX`, `INSERT INTO`) — see [Warnings](#warnings--never-block) for the non-blocking case where `Up` has no real operations. Mirrors the MongoDB adapter's equivalent check — both now block equally; this used to be warning-only here (resolved [discussion item #1](#discussion-items)). | No |
 | `ORPHAN_DROP_DOWN` | `Down` drops a table `Up` never created | **Yes** — `--allow-dangerous` / `--allow ORPHAN_DROP_DOWN` |
-| `ORPHAN_DROP_UP` | `Up` drops a table not created earlier in the same file. **Auto-allowed with no flag** if `Down` recreates that same table (a self-contained reverse migration for a table an earlier file created) — resolves [Bug B](#bug-b----orphan_drop_up-has-no-idea-down-exists-fixed) below. Otherwise bypassable the same way as `ORPHAN_DROP_DOWN`. | **Yes**, or auto-allowed |
+| `ORPHAN_DROP_UP` | `Up` drops a table that — as far as `validate`/`up`/`sync` can see across all files — **doesn't exist**: no earlier migration created it and it isn't in `validation.existingTables`. Usually a typo. (A table that *does* exist is `DROP_TABLE` instead.) When a file is checked on its own, without the other files, any table this file didn't create counts. **Auto-allowed with no flag** if `Down` recreates that same table (a self-contained reverse migration for a table an earlier file created) — resolves [Bug B](#bug-b----orphan_drop_up-has-no-idea-down-exists-fixed) below. Otherwise bypassable the same way as `ORPHAN_DROP_DOWN`. | **Yes**, or auto-allowed |
 | `FK_REFERENCES_DROPPED_TABLE` | A FK in `Up` references a table dropped in the same `Up` | No |
-| `FK_UNRESOLVED_REFERENCE` | (cross-file, `validate` only) FK references a table never created by any prior migration file, in filename order | No |
+| `FK_UNRESOLVED_REFERENCE` | (cross-file) FK references a table never created by any prior migration file, in run order — e.g. a table that predates this tool or was onboarded via `baseline` | **Yes** — `--allow-dangerous` / `--allow FK_UNRESOLVED_REFERENCE`, or the referencing file's `@allow` |
 
 **SQL syntax check is silently skipped** (with a `⚠️ syntax-check-skipped` warning,
 not an error) when the SQL contains:
@@ -159,6 +172,39 @@ not an error) when the SQL contains:
 
 This means a non-trivial fraction of real-world MariaDB SQL (anything with a stored
 procedure, any DCL, any `ENUM`/`SET` column) **never gets syntax-checked at all.**
+
+---
+
+### Dropping tables (cross-file)
+
+`validate`, `up` and `sync` read every migration file, so for each file they know which
+tables exist before it runs (created by earlier files and not dropped since, plus
+`validation.existingTables`). A `DROP TABLE` in Up is then one of:
+
+| The table… | Result |
+|---|---|
+| is recreated by this file's Down | auto-allowed (self-contained reverse migration) |
+| exists (earlier migration / `existingTables`) | 🟠 `DROP_TABLE` — real data loss, needs approval |
+| exists nowhere | 🔴 `ORPHAN_DROP_UP` — check the name |
+
+### Config-level allowances and existing tables
+
+```javascript
+// config.js
+validation: {
+  // Tables that exist without a migration creating them (pre-existing or onboarded
+  // via baseline) — used by FK_UNRESOLVED_REFERENCE and the DROP TABLE check
+  existingTables: ['legacy_users', 'audit_log'],
+  // Per-file approvals kept in config instead of in the file — e.g. for a file that
+  // is already applied (editing it would trip the checksum gate)
+  allow: {
+    '20260101000005-drop-legacy.sql': ['DROP_TABLE']
+  }
+}
+```
+
+An `allow` entry naming a file that doesn't exist (renamed, typo) is reported as a
+warning. Allowances from config are printed in the run log like any other.
 
 ---
 
@@ -211,6 +257,14 @@ Thresholds are overridable via `config.performance.thresholds`.
 | `COMPLEX_INSERT` | 20 columns | Column count in `INSERT INTO t (...)` |
 | `SELECT_STAR` | — (always warns) | `SELECT * FROM` present |
 | `ORDER_BY_NO_LIMIT` | — (always warns) | `SELECT ... ORDER BY` with no `LIMIT` |
+
+---
+
+### Known parser limitation
+
+`node-sql-parser` rejects some valid MariaDB syntax — e.g. `UPDATE … ORDER BY … LIMIT n`
+(batched updates) — as `SQL_SYNTAX_ERROR`. Add `-- @skip-syntax-check: true` to such a
+file; the rule checks above still run.
 
 ---
 

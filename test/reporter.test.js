@@ -9,7 +9,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { buildSyncReport, syncReportToHTML, saveSyncReport } from '../src/core/reporter.js';
+import {
+  buildSyncReport, syncReportToHTML, saveSyncReport,
+  buildDCLNotificationEvents, passwordExpiryNote, notificationEmailToHTML, buildNotificationEmail,
+  buildMultiInstanceSummary, multiInstanceSummaryToHTML, partialApplyNote
+} from '../src/core/reporter.js';
 import { diffSchemaSnapshots } from '../src/core/schema-diff.js';
 
 describe('buildSyncReport', () => {
@@ -175,5 +179,165 @@ describe('saveSyncReport', () => {
     expect(files[0]).toContain(nested);
     const stat = await fs.stat(nested);
     expect(stat.isDirectory()).toBe(true);
+  });
+});
+
+const emptyMariaDiff = { addedUsers: [], removedUsers: [], addedGrants: [], removedGrants: [] };
+
+describe('buildDCLNotificationEvents', () => {
+  it('MariaDB: a credential row and the diff row for the same account become one row', () => {
+    const events = buildDCLNotificationEvents(
+      [{ type: 'new', username: 'app_ro', host: '%', password: 'pw1' }],
+      { ...emptyMariaDiff, addedUsers: ['app_ro@%', 'static_api@%'] },
+      'mariadb'
+    );
+    expect(events).toEqual([
+      { type: 'new', username: 'app_ro@%', password: 'pw1' },
+      { type: 'new', username: 'static_api@%', password: null }
+    ]);
+  });
+
+  it('created then rotated in the same run → one "new" row with only the final password', () => {
+    const events = buildDCLNotificationEvents(
+      [
+        { type: 'new', username: 'svc', host: '%', password: 'first' },
+        { type: 'password_changed', username: 'svc', host: '%', password: 'final' }
+      ],
+      { ...emptyMariaDiff, addedUsers: ['svc@%'] },
+      'mariadb'
+    );
+    expect(events).toEqual([{ type: 'new', username: 'svc@%', password: 'final', supersededPasswords: 1 }]);
+  });
+
+  it('a later no_change never hides an earlier password', () => {
+    const events = buildDCLNotificationEvents(
+      [
+        { type: 'password_changed', username: 'svc', host: '%', password: 'pw' },
+        { type: 'no_change', username: 'svc', host: '%' }
+      ],
+      emptyMariaDiff,
+      'mariadb'
+    );
+    expect(events).toEqual([{ type: 'password_changed', username: 'svc@%', password: 'pw' }]);
+  });
+
+  it('same user name on two hosts stays two accounts', () => {
+    const events = buildDCLNotificationEvents(
+      [
+        { type: 'new', username: 'svc', host: '%', password: 'a' },
+        { type: 'new', username: 'svc', host: 'localhost', password: 'b' }
+      ],
+      { ...emptyMariaDiff, addedUsers: ['svc@%', 'svc@localhost'] },
+      'mariadb'
+    );
+    expect(events.map(e => [e.username, e.password])).toEqual([['svc@%', 'a'], ['svc@localhost', 'b']]);
+  });
+
+  it('MongoDB: matches the bare credential name to the diff\'s user@db and shows user@db once', () => {
+    const events = buildDCLNotificationEvents(
+      [{ type: 'new', username: 'mongo_ro', password: 'pw', expiry: { at: '2026-10-08T00:00:00.000Z' } }],
+      { addedUsers: [{ user: 'mongo_ro', db: 'admin', roles: [] }], removedUsers: [], changedUsers: [] },
+      'mongodb'
+    );
+    expect(events).toEqual([{ type: 'new', username: 'mongo_ro@admin', password: 'pw', expiry: { at: '2026-10-08T00:00:00.000Z' } }]);
+  });
+});
+
+describe('passwordExpiryNote', () => {
+  it('only claims "changed on first login" when PASSWORD EXPIRE was in the statement', () => {
+    expect(passwordExpiryNote({ expiry: { onFirstLogin: true } })).toMatch(/changed on first login/);
+    expect(passwordExpiryNote({})).toMatch(/does not force a change/);
+    expect(passwordExpiryNote({})).not.toMatch(/first login/);
+  });
+
+  it('MongoDB: states the customData deadline and that it is not enforced', () => {
+    const note = passwordExpiryNote({ expiry: { at: '2026-10-08T01:02:03.000Z' } });
+    expect(note).toContain('2026-10-08');
+    expect(note).toMatch(/does not enforce/);
+  });
+
+  it('renders into the email instead of the old unconditional claim', () => {
+    const html = notificationEmailToHTML(buildNotificationEmail({
+      project: 'app', target: '10.0.0.1:3306 · db app', dbType: 'mariadb',
+      dcl: { events: [{ type: 'new', username: 'u@%', password: 'pw' }] }
+    }));
+    expect(html).not.toContain('expires on first login');
+    expect(html).toContain('10.0.0.1:3306 · db app');
+  });
+});
+
+describe('notification email fonts', () => {
+  const html = notificationEmailToHTML(buildNotificationEmail({
+    project: 'app', dbType: 'mariadb',
+    dcl: { events: [{ type: 'new', username: 'u@%', password: 'pw-123' }] }
+  }));
+
+  it('uses a native monospace stack ending in Courier New, no webfonts', () => {
+    expect(html).toContain("font-family:ui-monospace,Menlo,Consolas,'Courier New',monospace");
+    expect(html).not.toMatch(/@font-face|fonts\.googleapis/);
+  });
+
+  it('pins monospace elements to Courier New for Outlook (Word engine)', () => {
+    expect(html).toContain("<!--[if mso]><style>.mono{font-family:'Courier New',monospace !important;}</style><![endif]-->");
+    expect(html).toMatch(/<span class="mono" style="[^"]*">pw-123<\/span>/);
+  });
+
+  it('applies to the multi-instance summary too', () => {
+    const summary = multiInstanceSummaryToHTML(buildMultiInstanceSummary({ project: 'p', instances: [{ name: 'prod-tw', dbType: 'mariadb', status: 'success' }] }));
+    expect(summary).toContain('<!--[if mso]>');
+    expect(summary).toContain('class="mono"');
+  });
+});
+
+describe('buildMultiInstanceSummary / multiInstanceSummaryToHTML', () => {
+  const instances = [
+    {
+      name: 'prod-tw', target: '10.0.0.1:3306 · db app', dbType: 'mariadb', status: 'success',
+      events: [{ type: 'new', username: 'tw_report@%', password: 'TW-SECRET-1' }],
+      notificationFile: 'reports/notification-prod-tw.html'
+    },
+    {
+      name: 'prod-jp', target: '10.0.0.2:3306 · db app', dbType: 'mariadb', status: 'failed',
+      events: [], errors: ['connect ETIMEDOUT']
+    }
+  ];
+
+  it('never carries a password', () => {
+    const report = buildMultiInstanceSummary({ project: 'dcl', instances });
+    expect(JSON.stringify(report)).not.toContain('TW-SECRET-1');
+    expect(report.instances[0].events[0]).toEqual({ type: 'new', username: 'tw_report@%', hasPassword: true });
+    expect(multiInstanceSummaryToHTML(report)).not.toContain('TW-SECRET-1');
+  });
+
+  it('tells same-named databases apart by instance name and host, and rolls up failures', () => {
+    const report = buildMultiInstanceSummary({ project: 'dcl', instances });
+    expect(report.status).toBe('failed');
+    expect(report.totals).toEqual({ instances: 2, failed: 1, events: 1 });
+    const html = multiInstanceSummaryToHTML(report);
+    for (const s of ['prod-tw', '10.0.0.1:3306 · db app', 'prod-jp', '10.0.0.2:3306 · db app', 'connect ETIMEDOUT', 'reports/notification-prod-tw.html']) {
+      expect(html).toContain(escapeForHtml(s));
+    }
+  });
+});
+
+function escapeForHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+describe('partial-apply note in DDL failure emails', () => {
+  it('is shown only when the migration failed while executing', () => {
+    const failedDuringRun = notificationEmailToHTML(buildNotificationEmail({
+      project: 'app', dbType: 'mariadb', status: 'failed',
+      ddl: { applied: [], errors: ['f.sql: boom'], partialRisk: true }
+    }));
+    expect(failedDuringRun).toContain(partialApplyNote('mariadb'));
+    expect(partialApplyNote('mariadb')).toMatch(/commits each DDL statement immediately/);
+    expect(partialApplyNote('mongodb')).toMatch(/not transactional/);
+
+    const refusedBeforeRun = notificationEmailToHTML(buildNotificationEmail({
+      project: 'app', dbType: 'mariadb', status: 'failed',
+      ddl: { applied: [], errors: ['Validation failed — nothing was applied'] }
+    }));
+    expect(refusedBeforeRun).not.toContain('may have been partly applied');
   });
 });

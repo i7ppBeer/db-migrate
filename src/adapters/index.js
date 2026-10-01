@@ -169,7 +169,13 @@ export async function loadConfig(configPath) {
 
     return userConfig;
   } catch (error) {
-    throw new Error(`Failed to load config from ${configPath}: ${error.message}`);
+    // Config files are ES modules (`export default {…}`). Outside a
+    // package.json with "type": "module", Node parses them as CommonJS and
+    // the raw error ("Unexpected token 'export'") doesn't say what to do.
+    const esmHint = /Unexpected token 'export'|Cannot use import statement outside a module/.test(error.message)
+      ? ` — Node is reading this config as CommonJS. Rename it to config.mjs, or add a package.json containing {"type": "module"} to its directory (or a parent directory).`
+      : '';
+    throw new Error(`Failed to load config from ${configPath}: ${error.message}${esmHint}`);
   }
 }
 

@@ -6,6 +6,9 @@ export default {
     databaseName: '',
   },
 
+  // A missing database is an error unless this is set (see connect())
+  createDatabaseIfMissing: false,
+
   migrationsDir: './migrations',
   changelogCollection: 'changelog',
   sanityCheck: { enabled: true, autoRollback: true, timeoutMs: 30000, verbose: true },

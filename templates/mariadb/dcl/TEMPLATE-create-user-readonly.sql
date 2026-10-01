@@ -4,8 +4,9 @@
 -- CHANGE_ME_ON_FIRST_LOGIN is replaced at runtime with an independently
 -- generated password — never written back to this file, never printed to
 -- the console. It shows up exactly once, in plaintext, in the run's
--- notification email (reports/notification.html), labeled as a temporary
--- credential that expires on first login. See docs/DCL-PASSWORD.md.
+-- notification email (reports/notification.html). It is NOT forced to
+-- change unless the statement adds PASSWORD EXPIRE — do that for accounts a
+-- person logs into, not for service accounts. See docs/DCL-PASSWORD.md.
 
 CREATE USER IF NOT EXISTS 'app_readonly'@'%'
   IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';

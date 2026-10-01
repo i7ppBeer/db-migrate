@@ -15,6 +15,8 @@
 
 export default {
   type: 'mariadb',
+  // Test fixture: its database is created from scratch on each run
+  createDatabaseIfMissing: true,
   user: process.env.ANALYTICS_DDL_USER || 'analytics_ddl_admin',
   password: process.env.ANALYTICS_DDL_PASSWORD || 'analytics_ddl_secure_pass_222',
   database: 'analytics',

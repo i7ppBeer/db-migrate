@@ -3,7 +3,7 @@
  * Implements SQL migrations using sql-migrate pattern
  */
 
-import { BaseAdapter } from '../core/base-adapter.js';
+import { BaseAdapter, isRepeatableMigrationFile, selectPendingMigrations } from '../core/base-adapter.js';
 import { SanityChecker, SQLChecks } from '../core/sanity-checker.js';
 import mysql from 'mysql2/promise';
 import fs from 'fs/promises';
@@ -43,6 +43,9 @@ export class MariaDBAdapter extends BaseAdapter {
    */
   getValidationRules(mode = 'versioned') {
     const isRepeatable = mode === 'repeatable';
+    // [schema.]table, each part bare or `quoted`
+    const TBL = String.raw`(?:(?:\`[^\`]+\`|\w+)\.)?(?:\`[^\`]+\`|\w+)`;
+    const re = (src, flags = 'i') => new RegExp(src, flags);
     return {
       // ========================================
       // 🔴 絕對禁止 - 預設無法放行 (需 --allow-forbidden)
@@ -113,23 +116,33 @@ export class MariaDBAdapter extends BaseAdapter {
       // ========================================
       dangerous: {
         dataLoss: [
-          { pattern: /TRUNCATE\s+TABLE/i, code: 'TRUNCATE_TABLE', message: '🟠 DATA LOSS: TRUNCATE TABLE will clear all data / 會清空全表資料', suggestion: 'Use DELETE FROM table WHERE condition instead / 建議改用 DELETE FROM table WHERE condition' }
+          // TABLE keyword is optional in MariaDB (TRUNCATE logs;)
+          { pattern: /^TRUNCATE\s+(?:TABLE\s+)?[`\w]/i, code: 'TRUNCATE_TABLE', message: '🟠 DATA LOSS: TRUNCATE TABLE will clear all data / 會清空全表資料', suggestion: 'Use DELETE FROM table WHERE condition instead / 建議改用 DELETE FROM table WHERE condition' }
         ],
         blocking: [
           { pattern: /LOCK\s+TABLE/i, code: 'LOCK_TABLE', message: '🟠 BLOCKING: LOCK TABLE will block all queries / 會阻塞所有查詢', suggestion: 'Consider using transaction isolation level or row locks / 考慮使用交易隔離等級或行鎖' },
-          { pattern: /ALTER\s+TABLE\s+(?:`[^`]+`|\w+)\s+(?:MODIFY|CHANGE)\s+(?:COLUMN\s+)?\w+\s+\w+/i, code: 'ALTER_TABLE_MODIFY', message: '🟠 BLOCKING: MODIFY/CHANGE COLUMN may rebuild table and cause long lock / 修改欄位型別可能重建表並長時間鎖表', suggestion: 'Test in staging, consider pt-online-schema-change / 先在測試環境驗證，考慮 pt-online-schema-change' },
-          { pattern: /ALTER\s+TABLE\s+(?:`[^`]+`|\w+)\s+(?:CONVERT\s+TO\s+CHARACTER\s+SET|ENGINE\s*=)/i, code: 'ALTER_TABLE_REBUILD', message: '🟠 BLOCKING: This ALTER requires full table rebuild / 此 ALTER 需要完整重建表', suggestion: 'Use pt-online-schema-change for large tables / 大表建議用 pt-online-schema-change' },
+          { pattern: re(String.raw`ALTER\s+TABLE\s+${TBL}\s+(?:MODIFY|CHANGE)\s+(?:COLUMN\s+)?\w+\s+\w+`), code: 'ALTER_TABLE_MODIFY', message: '🟠 BLOCKING: MODIFY/CHANGE COLUMN may rebuild table and cause long lock / 修改欄位型別可能重建表並長時間鎖表', suggestion: 'Test in staging, consider pt-online-schema-change / 先在測試環境驗證，考慮 pt-online-schema-change' },
+          { pattern: re(String.raw`ALTER\s+TABLE\s+${TBL}\s+(?:CONVERT\s+TO\s+CHARACTER\s+SET|ENGINE\s*=)`), code: 'ALTER_TABLE_REBUILD', message: '🟠 BLOCKING: This ALTER requires full table rebuild / 此 ALTER 需要完整重建表', suggestion: 'Use pt-online-schema-change for large tables / 大表建議用 pt-online-schema-change' },
           { pattern: /SELECT\s+[\s\S]*?\s+FOR\s+UPDATE/i, code: 'SELECT_FOR_UPDATE', message: '🟠 BLOCKING: SELECT FOR UPDATE causes exclusive row lock / 會造成排他行鎖', suggestion: 'Confirm if lock is needed, consider optimistic locking / 確認是否真的需要鎖定，考慮使用樂觀鎖' },
           { pattern: /SELECT\s+[\s\S]*?\s+LOCK\s+IN\s+SHARE\s+MODE/i, code: 'LOCK_IN_SHARE_MODE', message: '🟠 BLOCKING: LOCK IN SHARE MODE causes shared row lock / 會造成共享行鎖', suggestion: 'Confirm if shared lock is needed / 確認是否真的需要共享鎖' }
         ],
         bulkOperation: [
-          { pattern: /DELETE\s+FROM\s+(?:`[^`]+`|\w+)\s*(?:;|$)/i, code: 'DELETE_ALL', message: '🟠 DATA RISK: DELETE without WHERE will delete all rows / 缺少 WHERE 條件會刪除全表資料', suggestion: 'Add WHERE condition / 請加上 WHERE 條件' },
-          { pattern: /UPDATE\s+(?:`[^`]+`|\w+)\s+SET\s+[^;]*(?:;|$)(?![\s\S]*WHERE)/i, code: 'UPDATE_ALL', message: '🟠 DATA RISK: UPDATE without WHERE will update all rows / 缺少 WHERE 條件會更新全表資料', suggestion: 'Add WHERE condition / 請加上 WHERE 條件' }
+          // Evaluated per statement: a DELETE with no WHERE (and no LIMIT)
+          // anywhere in that statement — incl. schema-qualified tables and
+          // the multi-table `DELETE t FROM t …` form.
+          { pattern: /^DELETE\s+(?:(?:LOW_PRIORITY|QUICK|IGNORE)\s+)*(?:[`\w.]+(?:\s*,\s*[`\w.]+)*\s+)?FROM\s+(?![\s\S]*\bWHERE\b)(?![\s\S]*\bLIMIT\b)/i, code: 'DELETE_ALL', message: '🟠 DATA RISK: DELETE without WHERE will delete all rows / 缺少 WHERE 條件會刪除全表資料', suggestion: 'Add WHERE condition / 請加上 WHERE 條件' },
+          // Evaluated per statement: an UPDATE statement with no WHERE (and
+          // no LIMIT) of its own. A WHERE in some other statement of the same
+          // file no longer hides it, and one in this statement is no longer
+          // missed when it's the file's last statement.
+          { pattern: /^UPDATE\s+(?:(?:LOW_PRIORITY|IGNORE)\s+)*[\s\S]*?\bSET\b(?![\s\S]*\bWHERE\b)(?![\s\S]*\bLIMIT\b)/i, code: 'UPDATE_ALL', message: '🟠 DATA RISK: UPDATE without WHERE will update all rows / 缺少 WHERE 條件會更新全表資料', suggestion: 'Add WHERE condition / 請加上 WHERE 條件' }
         ],
         schemaChange: [
-          { pattern: /ALTER\s+TABLE\s+(?:`[^`]+`|\w+)\s+DROP\s+COLUMN/i, code: 'DROP_COLUMN', message: '🟠 DATA LOSS: DROP COLUMN will permanently delete column data / 會永久刪除欄位資料', suggestion: 'Confirm column is no longer used / 先確認該欄位已無使用' },
+          // COLUMN keyword is optional (ALTER TABLE t DROP nickname), may be one
+          // clause of several; DROP INDEX/KEY/FOREIGN KEY/… are separate rules.
+          { pattern: re(String.raw`ALTER\s+(?:(?:ONLINE|IGNORE)\s+)*TABLE\s+${TBL}\s+(?:[\s\S]*?,\s*)?DROP\s+(?:COLUMN\s+)?(?:IF\s+EXISTS\s+)?(?!(?:INDEX|KEY|PRIMARY|FOREIGN|CONSTRAINT|CHECK|PARTITION|SYSTEM|PERIOD)\b)[\`\w]+`), code: 'DROP_COLUMN', message: '🟠 DATA LOSS: DROP COLUMN will permanently delete column data / 會永久刪除欄位資料', suggestion: 'Confirm column is no longer used / 先確認該欄位已無使用' },
           { pattern: /RENAME\s+TABLE/i, code: 'RENAME_TABLE', message: '🟠 BREAKING: RENAME TABLE may break applications / 可能破壞應用程式', suggestion: 'Confirm all apps have updated table references / 確認所有應用程式都已更新表名引用' },
-          { pattern: /ALTER\s+TABLE\s+(?:`[^`]+`|\w+)\s+RENAME\s+TO/i, code: 'ALTER_RENAME', message: '🟠 BREAKING: RENAME TABLE may break applications / 可能破壞應用程式', suggestion: 'Confirm all apps have updated table references / 確認所有應用程式都已更新表名引用' },
+          { pattern: re(String.raw`ALTER\s+TABLE\s+${TBL}\s+RENAME\s+(?:TO|AS)\b`), code: 'ALTER_RENAME', message: '🟠 BREAKING: RENAME TABLE may break applications / 可能破壞應用程式', suggestion: 'Confirm all apps have updated table references / 確認所有應用程式都已更新表名引用' },
           { pattern: /MODIFY\s+COLUMN\s+\w+\s+\w+/i, code: 'MODIFY_COLUMN', message: '🟠 DATA RISK: MODIFY COLUMN may cause data conversion failure / 可能造成資料轉換失敗', suggestion: 'Test in staging environment first / 先在測試環境驗證' },
           { pattern: /CHANGE\s+COLUMN/i, code: 'CHANGE_COLUMN', message: '🟠 DATA RISK: CHANGE COLUMN may cause data conversion failure / 可能造成資料轉換失敗', suggestion: 'Test in staging environment first / 先在測試環境驗證' },
           { pattern: /DROP\s+INDEX/i, code: 'DROP_INDEX', message: '🟠 PERFORMANCE: DROP INDEX may affect query performance / 可能影響查詢效能', suggestion: 'Confirm index is no longer used / 確認該索引已無查詢使用' },
@@ -143,13 +156,15 @@ export class MariaDBAdapter extends BaseAdapter {
       // ========================================
       warnings: {
         operations: [
-          { pattern: /ALTER\s+TABLE\s+(?:`[^`]+`|\w+)\s+ADD\s+COLUMN/i, message: '⚠️ ALTER TABLE ADD COLUMN may take long on large tables / 在大表上可能需要較長時間' },
-          { pattern: /ADD\s+(?:CONSTRAINT\s+)?\w*\s*NOT\s+NULL(?!\s+DEFAULT)/i, message: '⚠️ Adding NOT NULL column should have DEFAULT value / 新增 NOT NULL 欄位建議搭配 DEFAULT 值' },
+          { pattern: re(String.raw`ALTER\s+TABLE\s+${TBL}\s+ADD\s+COLUMN`), message: '⚠️ ALTER TABLE ADD COLUMN may take long on large tables / 在大表上可能需要較長時間' },
+          // An added column declared NOT NULL with no DEFAULT anywhere in its
+          // definition (DEFAULT may come before or after NOT NULL)
+          { pattern: /\bADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?!(?:INDEX|KEY|CONSTRAINT|PRIMARY|UNIQUE|FOREIGN|FULLTEXT|SPATIAL|CHECK|PARTITION)\b)[`\w]+\s+(?:(?!\bDEFAULT\b)[^,;])*?\bNOT\s+NULL\b(?:(?!\bDEFAULT\b)[^,;])*(?:,|;|$)/i, message: '⚠️ Adding NOT NULL column should have DEFAULT value / 新增 NOT NULL 欄位建議搭配 DEFAULT 值' },
           { pattern: /AUTO_INCREMENT\s*=/i, message: '⚠️ Manual AUTO_INCREMENT may cause ID conflicts / 手動設定 AUTO_INCREMENT 可能造成 ID 衝突' },
           { pattern: /ENGINE\s*=\s*MyISAM/i, message: '⚠️ MyISAM does not support transactions, use InnoDB / MyISAM 引擎不支援交易，建議使用 InnoDB' },
           { pattern: /CHARSET\s*=\s*(?:latin1|utf8[^m])/i, message: '⚠️ Recommend using utf8mb4 charset / 建議使用 utf8mb4 字元集' },
           { pattern: /\b(?:FLOAT|DOUBLE)\b/i, message: '⚠️ FLOAT/DOUBLE has precision issues, use DECIMAL for money / 有精度問題，金額建議用 DECIMAL' },
-          { pattern: /DATETIME(?!\s*\(\d+\))/i, message: '⚠️ DATETIME without precision truncates microseconds / 沒有指定精度，微秒會被截斷' },
+          { pattern: /\bDATETIME\b(?!\s*\(\d+\))/i, message: '⚠️ DATETIME without precision truncates microseconds / 沒有指定精度，微秒會被截斷' },
           { pattern: /ON\s+DELETE\s+CASCADE/i, message: '⚠️ ON DELETE CASCADE may cause cascading deletes / 可能造成連鎖刪除' },
           { pattern: /ON\s+UPDATE\s+CASCADE/i, message: '⚠️ ON UPDATE CASCADE may cause cascading updates / 可能造成連鎖更新' },
           { pattern: /CREATE\s+(?:UNIQUE\s+)?INDEX\s+\w+\s+ON\s+/i, message: '⚠️ CREATE INDEX may take long on large tables (online DDL in MariaDB 10.4+) / 大表上建索引可能較久（MariaDB 10.4+ 為線上操作）' }
@@ -286,35 +301,55 @@ export class MariaDBAdapter extends BaseAdapter {
       // very long. Applies to every connection attempt below, temp or real.
       const connectTimeout = dbConfig.connectTimeoutMs ?? 10000;
 
-      // 🔧 First connect without specifying database to avoid "unknown database" error
-      const tempConnection = await mysql.createConnection({
+      // No built-in credentials: a missing env var must fail loudly, not
+      // silently connect as root with a well-known password.
+      if (!dbConfig.user) {
+        throw new Error('no user configured — set MARIADB_USER (or `user` in the config).');
+      }
+      if (dbConfig.password === undefined || dbConfig.password === null) {
+        throw new Error(`no password configured for user '${dbConfig.user}' — set MARIADB_PASSWORD (or \`password\` in the config; use '' explicitly for an account without one).`);
+      }
+      const connectionOptions = {
         host: dbConfig.host || 'localhost',
         port: dbConfig.port || 3306,
-        user: dbConfig.user || 'root',
-        password: dbConfig.password || '',
+        user: dbConfig.user,
+        password: dbConfig.password,
         multipleStatements: true,
         connectTimeout
-      });
+      };
 
-      // 🛡️ Auto-create database if it doesn't exist (for development convenience)
+      // 🔧 First connect without specifying database to avoid "unknown database" error
+      const tempConnection = await mysql.createConnection(connectionOptions);
+
       if (dbName) {
-        await tempConnection.execute(
-          `CREATE DATABASE IF NOT EXISTS \`${dbName}\`
-           DEFAULT CHARACTER SET utf8mb4
-           DEFAULT COLLATE utf8mb4_unicode_ci`
+        // Gate R0: a database that doesn't exist almost always means the
+        // config/env points at the wrong server or has a typo. Creating it
+        // would quietly apply every migration to a brand-new empty database,
+        // so that only happens when explicitly enabled (new environments,
+        // local/test setups).
+        const [existing] = await tempConnection.execute(
+          'SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?', [dbName]
         );
+        if (existing.length === 0) {
+          if (!this.config.createDatabaseIfMissing) {
+            await tempConnection.end();
+            throw new Error(
+              `database '${dbName}' does not exist on ${connectionOptions.host}:${connectionOptions.port}. ` +
+              'Check the host and database name. If this is a new environment and it should be created, ' +
+              'set createDatabaseIfMissing: true in the config.'
+            );
+          }
+          await tempConnection.execute(
+            `CREATE DATABASE IF NOT EXISTS \`${dbName}\`
+             DEFAULT CHARACTER SET utf8mb4
+             DEFAULT COLLATE utf8mb4_unicode_ci`
+          );
+          console.log(`  🆕 Created database '${dbName}' (createDatabaseIfMissing: true)`);
+        }
         await tempConnection.end();
 
         // Now connect to the specified database
-        this.connection = await mysql.createConnection({
-          host: dbConfig.host || 'localhost',
-          port: dbConfig.port || 3306,
-          user: dbConfig.user || 'root',
-          password: dbConfig.password || '',
-          database: dbName,
-          multipleStatements: true,
-          connectTimeout
-        });
+        this.connection = await mysql.createConnection({ ...connectionOptions, database: dbName });
       } else {
         this.connection = tempConnection;
       }
@@ -425,15 +460,21 @@ export class MariaDBAdapter extends BaseAdapter {
       await this.ensureChangelogTable();
 
       // Get applied migrations from changelog
-      const [rows] = await this.connection.execute(
-        `SELECT id, applied_at, checksum FROM ${this.changelogTable} ORDER BY applied_at`
+      // applied_at read as a Unix epoch: the driver would otherwise
+      // interpret the server-session-time-zone value as *local* time and be
+      // off by the zone difference (e.g. 8h for a UTC server read in UTC+8).
+      const [rawRows] = await this.connection.execute(
+        `SELECT id, applied_at, UNIX_TIMESTAMP(applied_at) AS applied_epoch, checksum FROM ${this.changelogTable} ORDER BY applied_at`
       );
+      const rows = rawRows.map(r => ({
+        ...r,
+        applied_at: r.applied_epoch != null ? new Date(Number(r.applied_epoch) * 1000) : r.applied_at
+      }));
       const appliedById = new Map(rows.map(r => [r.id, r]));
 
-      // Get all migration files
+      // Get all migration files (R__ files excluded — see isRepeatableMigrationFile())
       const migrationsDir = this.config.migrationsDir;
-      const files = await fs.readdir(migrationsDir);
-      const migrationFiles = files.filter(f => f.endsWith('.sql')).sort();
+      const migrationFiles = await this.getMigrationFiles();
 
       // Gate R1 (remaining checks): a changelog row with no file on disk to
       // back it means the file was deleted/renamed after being applied
@@ -443,8 +484,11 @@ export class MariaDBAdapter extends BaseAdapter {
       // orphaned entry, not as a false "modified" anything.
       const fileIds = new Set(migrationFiles.map(f => f.replace('.sql', '')));
       const orphanedChangelogEntries = rows
-        .filter(r => !fileIds.has(r.id))
+        .filter(r => !fileIds.has(r.id) && !isRepeatableMigrationFile(r.id))
         .map(r => ({ id: r.id, appliedAt: r.applied_at }));
+      // R__ rows: an R__ file with an Up section in a DDL directory used to be
+      // run as a versioned migration. Reported, not treated as orphaned.
+      const ignoredRepeatableEntries = rows.filter(r => !fileIds.has(r.id) && isRepeatableMigrationFile(r.id)).map(r => r.id);
 
       const pending = [];
       const applied = [];
@@ -513,7 +557,9 @@ export class MariaDBAdapter extends BaseAdapter {
         checksumMismatches,
         checksumBaselined,
         orphanedChangelogEntries,
-        outOfOrderApplied
+        outOfOrderApplied,
+        ignoredRepeatableEntries,
+        ignoredRepeatableFiles: await this.getIgnoredRepeatableFiles()
       };
     } catch (error) {
       throw new Error(`Failed to get status: ${error.message}`);
@@ -524,9 +570,29 @@ export class MariaDBAdapter extends BaseAdapter {
    * Get list of migration files
    */
   async getMigrationFiles() {
-    const migrationsDir = this.config.migrationsDir;
-    const files = await fs.readdir(migrationsDir);
-    return files.filter(f => f.endsWith('.sql')).sort();
+    const files = await fs.readdir(this.config.migrationsDir);
+    return files.filter(f => f.endsWith('.sql') && !isRepeatableMigrationFile(f)).sort();
+  }
+
+  /** R__ files sitting in this versioned directory, which status/up/validate ignore. */
+  async getIgnoredRepeatableFiles() {
+    if (this.config.mode === 'repeatable') return [];
+    const files = await fs.readdir(this.config.migrationsDir);
+    return files.filter(f => f.endsWith('.sql') && isRepeatableMigrationFile(f)).sort();
+  }
+
+  /**
+   * True when the file has a `-- +migrate <section>` marker at all — unlike
+   * extractSection(), which can't tell "no marker" from "empty section".
+   */
+  hasSection(content, section) {
+    return new RegExp(`--\\s*\\+migrate\\s+${section}\\b`, 'i').test(content);
+  }
+
+  /** Why a versioned file without an Up marker is rejected — it would never run. */
+  missingUpMarkerMessage() {
+    return 'no "-- +migrate Up" section. Nothing in this file would run and it would stay pending forever — ' +
+      'put the migration SQL under "-- +migrate Up" (and its rollback under "-- +migrate Down").';
   }
 
   /**
@@ -663,30 +729,10 @@ export class MariaDBAdapter extends BaseAdapter {
 
     try {
       const status = await this.status();
-      let pendingMigrations = status.pending;
-      
-      // Filter by target (up to and including)
-      if (options.target) {
-        const targetIndex = pendingMigrations.findIndex(f => 
-          f === options.target || f.includes(options.target)
-        );
-        if (targetIndex === -1) {
-          result.errors.push(`Target migration not found: ${options.target}`);
-          return result;
-        }
-        pendingMigrations = pendingMigrations.slice(0, targetIndex + 1);
-      }
-      
-      // Filter by only (specific migration)
-      if (options.only) {
-        const onlyFile = pendingMigrations.find(f => 
-          f === options.only || f.includes(options.only)
-        );
-        if (!onlyFile) {
-          result.errors.push(`Migration not found in pending: ${options.only}`);
-          return result;
-        }
-        pendingMigrations = [onlyFile];
+      const { selected: pendingMigrations, error: selectError } = selectPendingMigrations(status.pending, options);
+      if (selectError) {
+        result.errors.push(selectError);
+        return result;
       }
       
       const dbConfig = this.config.mariadb || this.config;
@@ -697,6 +743,9 @@ export class MariaDBAdapter extends BaseAdapter {
           const filePath = path.join(this.config.migrationsDir, file);
           const content = await fs.readFile(filePath, 'utf-8');
           
+          if (!this.hasSection(content, 'Up')) {
+            throw new Error(this.missingUpMarkerMessage());
+          }
           // Extract UP section
           const upSQL = this.extractSection(content, 'Up');
           
@@ -708,16 +757,17 @@ export class MariaDBAdapter extends BaseAdapter {
 
             // Use query() for multi-statement support, guarded against MDL queue jams
             await this.executeWithLockGuard(wrappedUpSQL);
-
-            // Record in changelog
-            const id = file.replace('.sql', '');
-            await this.connection.execute(
-              `INSERT INTO ${this.changelogTable} (id, checksum) VALUES (?, ?)`,
-              [id, this.calculateChecksum(content)]
-            );
-
-            result.applied.push(file);
           }
+
+          // Record in changelog — an Up section with no statements is a
+          // deliberate no-op migration and is recorded as applied too.
+          const id = file.replace('.sql', '');
+          await this.connection.execute(
+            `INSERT INTO ${this.changelogTable} (id, checksum) VALUES (?, ?)`,
+            [id, this.calculateChecksum(content)]
+          );
+
+          result.applied.push(file);
         } catch (error) {
           result.errors.push(`${file}: ${error.message}`);
           break; // Stop on first error
@@ -760,11 +810,19 @@ export class MariaDBAdapter extends BaseAdapter {
 
     try {
       const status = await this.status();
+      const { selected, error: selectError } = selectPendingMigrations(status.pending, options);
+      if (selectError) {
+        result.errors.push(selectError);
+        return result;
+      }
       
-      for (const file of status.pending) {
+      for (const file of selected) {
         try {
           const filePath = path.join(this.config.migrationsDir, file);
           const content = await fs.readFile(filePath, 'utf-8');
+          if (!this.hasSection(content, 'Up')) {
+            throw new Error(this.missingUpMarkerMessage());
+          }
           
           // Extract sections
           const upSQL = this.extractSection(content, 'Up');
@@ -795,12 +853,12 @@ export class MariaDBAdapter extends BaseAdapter {
                   const dbName = (this.config.mariadb || this.config).database;
                   const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
                   await this.executeWithLockGuard(wrappedUpSQL);
-                  const id = file.replace('.sql', '');
-                  await this.connection.execute(
-                    `INSERT INTO ${this.changelogTable} (id, checksum) VALUES (?, ?)`,
-                    [id, this.calculateChecksum(content)]
-                  );
                 }
+                const id = file.replace('.sql', '');
+                await this.connection.execute(
+                  `INSERT INTO ${this.changelogTable} (id, checksum) VALUES (?, ?)`,
+                  [id, this.calculateChecksum(content)]
+                );
               },
               down: async () => {
                 if (downSQL) {
@@ -831,19 +889,21 @@ export class MariaDBAdapter extends BaseAdapter {
             if (sanityResult.success) {
               result.applied.push(file);
             } else {
+              // Stop either way: even when auto-rollback undid this one,
+              // later migrations may depend on it (same rule as up()).
               result.errors.push(`${file}: ${sanityResult.error}`);
-              if (!sanityResult.rolledBack) {
-                break;
-              }
+              break;
             }
           } else {
             // No sanity checks, run normally (same behaviour as up())
-            if (upSQL) {
+            {
               console.log(`\n🔍 Running ${file} (no sanity checks)...`);
               const startTime = Date.now();
-              const dbName = (this.config.mariadb || this.config).database;
-              const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
-              await this.executeWithLockGuard(wrappedUpSQL);
+              if (upSQL) {
+                const dbName = (this.config.mariadb || this.config).database;
+                const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
+                await this.executeWithLockGuard(wrappedUpSQL);
+              }
               const id = file.replace('.sql', '');
               await this.connection.execute(
                 `INSERT INTO ${this.changelogTable} (id, checksum) VALUES (?, ?)`,
@@ -1121,25 +1181,55 @@ export class MariaDBAdapter extends BaseAdapter {
     }
   }
 
-  async down(count = 1) {
+  /**
+   * What `down` would roll back, most recent first: the last `count` applied
+   * migrations, or — with `target` — everything applied after it and the
+   * target itself. Also returns which of those files were edited since being
+   * applied (their Down section may not be the one that was reviewed).
+   * @returns {Promise<{files: string[], error: string|null, checksumMismatches: string[]}>}
+   */
+  async rollbackPlan({ count = 1, target } = {}) {
+    const status = await this.status();
+    const newestFirst = status.applied.map(a => a.fileName).reverse();
+    const { selected, error } = target
+      ? selectPendingMigrations(newestFirst, { target })
+      : { selected: newestFirst.slice(0, count), error: null };
+    const planned = new Set(selected);
+    return {
+      files: selected,
+      error,
+      checksumMismatches: (status.checksumMismatches || []).map(m => m.fileName).filter(f => planned.has(f))
+    };
+  }
+
+  /**
+   * @param {number|string[]} countOrFiles - how many to roll back, or the
+   *   exact files from rollbackPlan() (most recent first)
+   */
+  async down(countOrFiles = 1) {
     const result = {
       rolledBack: [],
       errors: []
     };
 
     try {
-      const status = await this.status();
-      const toRollback = status.applied.slice(-count).reverse();
+      const files = Array.isArray(countOrFiles)
+        ? countOrFiles
+        : (await this.rollbackPlan({ count: countOrFiles })).files;
       
-      for (const migration of toRollback) {
+      for (const fileName of files) {
+        const migration = { fileName };
         try {
           const filePath = path.join(this.config.migrationsDir, migration.fileName);
           const content = await fs.readFile(filePath, 'utf-8');
           
           // Extract DOWN section
           const downSQL = this.extractSection(content, 'Down');
+          if (!downSQL) {
+            throw new Error('no "-- +migrate Down" section (or it is empty) — nothing to roll back with, so it was left applied');
+          }
           
-          if (downSQL) {
+          {
             // Remove from changelog BEFORE executing DOWN SQL.
             // This prevents "table/database doesn't exist" errors when
             // the DOWN migration drops the very database that contains
@@ -1265,20 +1355,36 @@ export class MariaDBAdapter extends BaseAdapter {
 
     try {
       const migrationsDir = this.config.migrationsDir;
-      const files = await fs.readdir(migrationsDir);
-      // Sort with numeric collation so V2__ < V10__ (not lexicographic V10 < V2)
-      const migrationFiles = files
-        .filter(f => f.endsWith('.sql'))
-        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+      // Same file set and order status()/up() use, so the cross-file FK
+      // check below sees files in the order they actually run. In a
+      // versioned project R__ (DCL) files are ignored and reported.
+      const migrationFiles = this.config.mode === 'repeatable'
+        ? (await fs.readdir(migrationsDir)).filter(f => f.endsWith('.sql')).sort()
+        : await this.getMigrationFiles();
+      results.ignoredRepeatableFiles = await this.getIgnoredRepeatableFiles();
+      // options.files: report only these (e.g. the pending ones). Every file
+      // is still read, so the cross-file FK check knows what earlier
+      // migrations created.
+      const wanted = options.files ? new Set(options.files) : null;
+      if (wanted) results.skippedFiles = migrationFiles.filter(f => !wanted.has(f));
 
       const filesData = [];
-
       for (const file of migrationFiles) {
-        const filePath = path.join(migrationsDir, file);
-        const content = await fs.readFile(filePath, 'utf-8');
-        const fileResult = this.validateContent(content, file, options);
+        filesData.push({ fileName: file, content: await fs.readFile(path.join(migrationsDir, file), 'utf-8') });
+      }
+      results.configWarnings = this.checkValidationConfig(migrationFiles);
 
-        filesData.push({ fileName: file, content });
+      // Tables that exist before each file runs (earlier files + config),
+      // so a DROP TABLE can be told apart from a typo (DDL mode only).
+      const knownTablesBefore = this.config.mode === 'repeatable' ? null : this.tablesBeforeEachFile(filesData);
+
+      for (const [i, { fileName: file, content }] of filesData.entries()) {
+        if (wanted && !wanted.has(file)) continue;
+
+        const fileResult = this.validateContent(content, file, {
+          ...options,
+          ...(knownTablesBefore ? { knownTables: knownTablesBefore[i] } : {})
+        });
 
         results.results.push({
           file,
@@ -1552,7 +1658,11 @@ export class MariaDBAdapter extends BaseAdapter {
       ...options,
       allowDangerous: options.allowDangerous || fileAnnotations.allowDangerous,
       allowForbidden: options.allowForbidden || fileAnnotations.allowForbidden,
-      allowedCodes: [...(options.allowedCodes || []), ...(fileAnnotations.allowedCodes || [])]
+      allowedCodes: [
+        ...(options.allowedCodes || []),
+        ...(fileAnnotations.allowedCodes || []),
+        ...(this.getValidationConfig().allow[fileName] || [])
+      ]
     };
     options = effectiveOptions;
 
@@ -1631,6 +1741,19 @@ export class MariaDBAdapter extends BaseAdapter {
               code: 'ORPHAN_DROP_UP',
               message: `✅ [ALLOWED] Orphan drop in UP: '${dropped}' is dropped but not created in this migration — allowed because DOWN recreates it`
             });
+          } else if (options.knownTables && options.knownTables.has(droppedLower)) {
+            // validate() knows every earlier file: this table really exists
+            // (an earlier migration created it, or validation.existingTables
+            // says so), so this drops real data — a dangerous op needing
+            // explicit approval, not a likely typo.
+            const source = options.knownTables.get(droppedLower);
+            const message = `🟠 DATA LOSS: DROP TABLE '${dropped}' (${source}) permanently deletes its data, and DOWN doesn't recreate it / 會永久刪除資料表與資料`;
+            const suggestion = 'Confirm nothing reads this table any more and a backup exists; approve with -- @allow: DROP_TABLE';
+            if (options.allowDangerous || options.allowedCodes?.includes('DROP_TABLE')) {
+              warnings.push({ type: 'dangerous-allowed', code: 'DROP_TABLE', message: `✅ [ALLOWED] ${message}`, suggestion });
+            } else {
+              dangerousOps.push({ type: 'dangerous-dataLoss', code: 'DROP_TABLE', message, suggestion });
+            }
           } else if (isOrphanDropAllowed('ORPHAN_DROP_UP')) {
             warnings.push({
               type: 'orphan-drop-in-up-allowed',
@@ -1641,7 +1764,9 @@ export class MariaDBAdapter extends BaseAdapter {
             errors.push({
               type: 'orphan-drop-in-up',
               code: 'ORPHAN_DROP_UP',
-              message: `Orphan drop in UP: '${dropped}' is dropped but not created in this migration`
+              message: options.knownTables
+                ? `Orphan drop in UP: '${dropped}' was not created by any earlier migration and is not listed in validation.existingTables — check the name (or declare the table there if it predates these migrations)`
+                : `Orphan drop in UP: '${dropped}' is dropped but not created in this migration`
             });
           }
         }
@@ -1750,10 +1875,14 @@ export class MariaDBAdapter extends BaseAdapter {
     }
 
     // === 4. Check DANGEROUS operations (UP section only; DOWN rollback ops are expected) ===
+    // Per statement, not against the whole section: "has no WHERE" has to
+    // mean *this* statement has none. normalizeSQL() already replaced string
+    // literals and stripped comments, so splitting on ';' is safe here.
+    const checkStatements = normalizedCheckTarget.split(';').map(st => st.trim()).filter(Boolean);
     for (const category of Object.keys(rules.dangerous)) {
       for (const rule of rules.dangerous[category]) {
         // Only check UP section (or full content for files without UP/DOWN markers)
-        if (rule.pattern.test(normalizedCheckTarget)) {
+        if (checkStatements.some(st => rule.pattern.test(st))) {
           const isAllowed = options.allowDangerous || 
             (options.allowedCodes && options.allowedCodes.includes(rule.code));
           
@@ -1835,6 +1964,15 @@ export class MariaDBAdapter extends BaseAdapter {
     const performanceResult = this.checkPerformanceIssues(content, fileName);
     const performanceWarnings = performanceResult.warnings;
     warnings.push(...performanceWarnings);
+
+    // === 8b. DDL only: a file with no Up marker would never run (up() rejects it) ===
+    if (this.config.mode !== 'repeatable' && !this.hasSection(content, 'Up')) {
+      errors.push({
+        type: 'missing-up-marker',
+        code: 'MISSING_UP_MARKER',
+        message: `🔴 ${this.missingUpMarkerMessage()}`
+      });
+    }
 
     // === 9. DDL only: Check if DOWN section exists (R__ repeatable files have no DOWN) ===
     // Mirrors the MongoDB adapter's equivalent check: an empty/missing DOWN
@@ -2004,6 +2142,32 @@ export class MariaDBAdapter extends BaseAdapter {
   }
 
   /**
+   * For each file (in run order), the tables that exist before it runs:
+   * validation.existingTables plus everything earlier files created and
+   * didn't drop (RENAME counts as drop old + create new).
+   * @returns {Array<Map<string, string>>} lowercase table → where it came from
+   */
+  tablesBeforeEachFile(filesData) {
+    const known = new Map(this.getValidationConfig().existing.map(t => [t, 'listed in validation.existingTables']));
+    const out = [];
+    for (const { fileName, content } of filesData) {
+      out.push(new Map(known));
+      const upSQL = this.extractSection(content, 'Up') || content;
+      const renamedFrom = [];
+      const cleanUpSQL = upSQL.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      for (const m of cleanUpSQL.matchAll(/RENAME\s+TABLE\s+(.+?)(?:;|$)/gi)) {
+        for (const part of m[1].split(',')) {
+          const from = part.match(/(?:[`"]?[\w$]+[`"]?\.)?[`"]?([\w$]+)[`"]?\s+TO\s+/i);
+          if (from) renamedFrom.push(from[1].toLowerCase());
+        }
+      }
+      for (const t of [...this.extractDroppedTables(upSQL), ...renamedFrom]) known.delete(t.toLowerCase());
+      for (const t of this.extractCreatedTables(upSQL)) known.set(t.toLowerCase(), `created by ${fileName}`);
+    }
+    return out;
+  }
+
+  /**
    * Validate FK dependencies across multiple migration files (DDL mode only).
    * Files must be provided in execution order (sorted lexicographically by caller).
    *
@@ -2027,7 +2191,8 @@ export class MariaDBAdapter extends BaseAdapter {
     if (!filesData || filesData.length === 0) return [];
     if (this.config.mode === 'repeatable') return [];
 
-    const allCreatedTables = new Set(); // lowercase table names created in prior files
+    // lowercase table names created in prior files, plus validation.existingTables
+    const allCreatedTables = new Set(this.getValidationConfig().existing);
     const crossErrors = [];
 
     for (const { fileName, content } of filesData) {
@@ -2060,7 +2225,11 @@ export class MariaDBAdapter extends BaseAdapter {
       // own checks do; CLI-wide --allow-dangerous/--allow applies to every file.
       const fileAnnotations = this.parseFileAnnotations(content, fileName);
       const isAllowed = options.allowDangerous || fileAnnotations.allowDangerous ||
-        [...(options.allowedCodes || []), ...(fileAnnotations.allowedCodes || [])].includes('FK_UNRESOLVED_REFERENCE');
+        [
+          ...(options.allowedCodes || []),
+          ...(fileAnnotations.allowedCodes || []),
+          ...(this.getValidationConfig().allow[fileName] || [])
+        ].includes('FK_UNRESOLVED_REFERENCE');
 
       const fileErrors = [];
       const fileWarnings = [];
@@ -2068,7 +2237,7 @@ export class MariaDBAdapter extends BaseAdapter {
         const ref = fk.referencedTable; // already lowercased
         if (!availableNow.has(ref)) {
           const nameLabel = fk.constraintName ? ` '${fk.constraintName}'` : '';
-          const message = `FOREIGN KEY${nameLabel} references '${fk.referencedTable}' which has not been created in any preceding migration`;
+          const message = `FOREIGN KEY${nameLabel} references '${fk.referencedTable}' which has not been created in any preceding migration (if it predates these migrations, list it in validation.existingTables)`;
           if (isAllowed) {
             fileWarnings.push({ type: 'fk-unresolved-reference-allowed', code: 'FK_UNRESOLVED_REFERENCE', message: `⚠️ [ALLOWED] ${message} — assumed to exist via baseline or an externally-managed table` });
           } else {

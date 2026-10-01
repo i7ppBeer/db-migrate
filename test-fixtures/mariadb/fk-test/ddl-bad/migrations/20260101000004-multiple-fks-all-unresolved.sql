@@ -1,3 +1,4 @@
+-- @expect-error: FK_UNRESOLVED_REFERENCE
 -- Migration: BAD EXAMPLE — CREATE TABLE with multiple FKs, all pointing to non-existent tables
 -- FK Test (cross-file): two FK_UNRESOLVED_REFERENCE errors expected
 --

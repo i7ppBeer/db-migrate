@@ -676,8 +676,8 @@ export default {
     host: process.env.MARIADB_HOST || 'mariadb',
     port: parseInt(process.env.MARIADB_PORT || '3306', 10),
     database: process.env.MARIADB_DB || 'your_database',
-    user: process.env.MARIADB_USER || 'root',
-    password: process.env.MARIADB_PASSWORD || 'password'
+    user: process.env.MARIADB_USER,          // required — no built-in default
+    password: process.env.MARIADB_PASSWORD   // required — no built-in default
   },
   migrationsDir: './migrations',
   changelogTable: '_migrations'  // for DDL

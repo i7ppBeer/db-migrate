@@ -1,3 +1,4 @@
+-- @expect-error: CREATE_USER,DROP_USER,GRANT
 -- FAILURE CASE: DCL operations (User/Grant management)
 -- These should NOT be in regular migrations
 

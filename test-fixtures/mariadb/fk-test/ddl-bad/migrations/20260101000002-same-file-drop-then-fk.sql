@@ -1,3 +1,4 @@
+-- @expect-error: ORPHAN_DROP_UP,FK_REFERENCES_DROPPED_TABLE,FK_UNRESOLVED_REFERENCE
 -- Migration: BAD EXAMPLE — same-file DROP then FK to dropped table
 -- FK Test (single-file): FK_REFERENCES_DROPPED_TABLE expected
 

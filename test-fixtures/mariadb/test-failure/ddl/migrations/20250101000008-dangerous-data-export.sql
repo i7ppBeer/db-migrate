@@ -1,3 +1,4 @@
+-- @expect-error: INTO_OUTFILE,LOAD_DATA,SQL_SYNTAX_ERROR
 -- 測試：危險的資料匯出操作
 -- 預期驗證結果：失敗（資料匯出是潛在危險操作）
 

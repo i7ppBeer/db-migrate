@@ -3,6 +3,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { RepeatableRunner } from '../src/core/repeatable-runner.js';
 
 describe('RepeatableRunner', () => {
@@ -182,7 +185,8 @@ describe('recordCredentialEvents — multi-line SQL template format', () => {
 
     runner.recordCredentialEvents(sql, ['testpassword123X'], false);
 
-    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'app_default', password: 'testpassword123X' });
+    // PASSWORD EXPIRE in the statement → the database really does force a change on first login
+    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'app_default', host: '%', password: 'testpassword123X', expiry: { onFirstLogin: true } });
   });
 
   it('should extract username from single-line CREATE USER (legacy format)', () => {
@@ -190,7 +194,7 @@ describe('recordCredentialEvents — multi-line SQL template format', () => {
 
     runner.recordCredentialEvents(sql, ['testpassword456Y'], false);
 
-    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'svc_user', password: 'testpassword456Y' });
+    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'svc_user', host: '%', password: 'testpassword456Y' });
   });
 
   it('should record a no_change event (not a password) when alreadyExists=true (CREATE USER)', () => {
@@ -198,7 +202,7 @@ describe('recordCredentialEvents — multi-line SQL template format', () => {
 
     runner.recordCredentialEvents(sql, ['somepassword'], true);
 
-    expect(runner.credentialEvents).toEqual([{ type: 'no_change', username: 'app_user' }]);
+    expect(runner.credentialEvents).toEqual([{ type: 'no_change', username: 'app_user', host: '%' }]);
   });
 
   it('should extract multiple usernames from multi-line statements', () => {
@@ -211,8 +215,8 @@ describe('recordCredentialEvents — multi-line SQL template format', () => {
 
     runner.recordCredentialEvents(sql, ['pw1', 'pw2'], false);
 
-    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'readonly_svc', password: 'pw1' });
-    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'readwrite_svc', password: 'pw2' });
+    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'readonly_svc', host: '%', password: 'pw1' });
+    expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'readwrite_svc', host: '%', password: 'pw2' });
   });
 
   // ─── Scenario 1: New user → password generated ────────────────────────────
@@ -314,6 +318,88 @@ describe('Repeatable Migration File Naming', () => {
   });
 });
 
+describe('resolvePlaceholderPasswords — placeholder mentioned in a comment', () => {
+  let runner;
+  beforeEach(() => {
+    runner = new RepeatableRunner({ checksumTable: 'test_dcl' });
+  });
+
+  // The password recorded for an account must be the one actually substituted
+  // into its CREATE USER / createUser — not one generated for a comment.
+  const executedPassword = (resolved, pattern) => resolved.match(pattern)[1];
+
+  it('SQL: ignores a placeholder in a -- comment and pairs the account with the executed password', () => {
+    const sql = [
+      `-- CHANGE_ME_ON_FIRST_LOGIN is replaced at runtime (official template header)`,
+      `CREATE USER IF NOT EXISTS 'app_readonly'@'%'`,
+      `  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`,
+      `FLUSH PRIVILEGES;`,
+    ].join('\n');
+
+    const { resolved, generated, passwords } = runner.resolvePlaceholderPasswords(sql, 'R__010_readonly.sql');
+    expect(generated).toBe(true);
+    expect(passwords).toHaveLength(1);
+    expect(resolved).toContain('-- CHANGE_ME_ON_FIRST_LOGIN is replaced at runtime');
+
+    runner.recordCredentialEvents(sql, passwords, false);
+    expect(runner.credentialEvents).toEqual([
+      { type: 'new', username: 'app_readonly', host: '%', password: executedPassword(resolved, /IDENTIFIED BY '([^']+)'/) }
+    ]);
+  });
+
+  it('SQL: ignores # and /* */ comments too', () => {
+    const sql = [
+      `# CHANGE_ME_ON_FIRST_LOGIN`,
+      `/* CHANGE_ME_ON_FIRST_LOGIN`,
+      `   CREATE USER 'ghost'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'; */`,
+      `CREATE USER IF NOT EXISTS 'real_user'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`,
+    ].join('\n');
+
+    const { resolved, passwords } = runner.resolvePlaceholderPasswords(sql, 'R__01.sql');
+    expect(passwords).toHaveLength(1);
+
+    runner.recordCredentialEvents(sql, passwords, false);
+    expect(runner.credentialEvents).toEqual([
+      { type: 'new', username: 'real_user', host: '%', password: executedPassword(resolved, /'real_user'@'%' IDENTIFIED BY '([^']+)'/) }
+    ]);
+  });
+
+  it('SQL: "--" inside a string literal is not a comment', () => {
+    const sql = `CREATE USER 'a--b'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`;
+    const { passwords } = runner.resolvePlaceholderPasswords(sql, 'R__01.sql');
+    expect(passwords).toHaveLength(1);
+  });
+
+  it('only a comment mentions the placeholder → nothing generated', () => {
+    const sql = `-- No CHANGE_ME_ON_FIRST_LOGIN here — grants only\nGRANT SELECT ON db.* TO 'u'@'%';`;
+    const { resolved, generated } = runner.resolvePlaceholderPasswords(sql, 'R__01.sql');
+    expect(generated).toBe(false);
+    expect(resolved).toBe(sql);
+  });
+
+  it('JS: ignores a placeholder in a /** */ header and pairs each user with its own executed password', () => {
+    const js = [
+      `/**`,
+      ` * CHANGE_ME_ON_FIRST_LOGIN will be replaced at runtime with a secure password.`,
+      ` */`,
+      `export async function up(db, client) {`,
+      `  // user: 'commented_out', pwd: 'CHANGE_ME_ON_FIRST_LOGIN'`,
+      `  await createOrUpdateUser(adminDb, { user: 'svc_ro', pwd: 'CHANGE_ME_ON_FIRST_LOGIN' });`,
+      `  await createOrUpdateUser(adminDb, { user: 'svc_rw', pwd: 'CHANGE_ME_ON_FIRST_LOGIN' });`,
+      `}`,
+    ].join('\n');
+
+    const { resolved, passwords } = runner.resolvePlaceholderPasswords(js, 'R__003_secret_users.js');
+    expect(passwords).toHaveLength(2);
+
+    runner.recordCredentialEvents(js, passwords, false);
+    expect(runner.credentialEvents).toEqual([
+      { type: 'new', username: 'svc_ro', password: executedPassword(resolved, /user: 'svc_ro', pwd: '([^']+)'/) },
+      { type: 'new', username: 'svc_rw', password: executedPassword(resolved, /user: 'svc_rw', pwd: '([^']+)'/) },
+    ]);
+  });
+});
+
 describe('recordCredentialEvents — JS object property style (user: "xxx")', () => {
   let runner;
   beforeEach(() => {
@@ -351,5 +437,48 @@ describe('recordCredentialEvents — JS object property style (user: "xxx")', ()
     runner.recordCredentialEvents(js, ['pw_legacy'], false);
 
     expect(runner.credentialEvents).toContainEqual({ type: 'new', username: 'legacy_user', password: 'pw_legacy' });
+  });
+});
+
+describe('recordCredentialEvents — host and PASSWORD EXPIRE', () => {
+  let runner;
+  beforeEach(() => { runner = new RepeatableRunner({ checksumTable: 'test_dcl' }); });
+
+  it('records the host, and no expiry when the statement has none', () => {
+    runner.recordCredentialEvents(`CREATE USER IF NOT EXISTS 'local_svc'@'localhost' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`, ['pw'], false);
+    expect(runner.credentialEvents).toEqual([{ type: 'new', username: 'local_svc', host: 'localhost', password: 'pw' }]);
+  });
+
+  it('PASSWORD EXPIRE NEVER / INTERVAL is not "expires on first login"', () => {
+    runner.recordCredentialEvents([
+      `CREATE USER IF NOT EXISTS 'a'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN' PASSWORD EXPIRE NEVER;`,
+      `CREATE USER IF NOT EXISTS 'b'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN' PASSWORD EXPIRE INTERVAL 90 DAY;`,
+      `CREATE USER IF NOT EXISTS 'c'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN' PASSWORD EXPIRE;`
+    ].join('\n'), ['p1', 'p2', 'p3'], false);
+    expect(runner.credentialEvents.map(e => [e.username, e.expiry])).toEqual([
+      ['a', undefined], ['b', undefined], ['c', { onFirstLogin: true }]
+    ]);
+  });
+});
+
+describe('importResolvedModule', () => {
+  it('writes the resolved source privately (dir 0700, file 0600) and removes it after import', async () => {
+    const runner = new RepeatableRunner({ checksumTable: 'test_dcl' });
+    const source = [
+      `import fs from 'fs';`,
+      `export const file = new URL(import.meta.url).pathname;`,
+      `export const fileMode = fs.statSync(file).mode & 0o777;`,
+      `export const dirMode = fs.statSync(new URL('.', import.meta.url)).mode & 0o777;`,
+      `export async function up() {}`
+    ].join('\n');
+
+    const mod = await runner.importResolvedModule(source, 'R__001_secret_users.js');
+
+    expect(typeof mod.up).toBe('function');
+    if (process.platform !== 'win32') {
+      expect(mod.fileMode).toBe(0o600);
+      expect(mod.dirMode).toBe(0o700);
+    }
+    await expect(fs.access(path.dirname(fileURLToPath(`file://${mod.file}`)))).rejects.toThrow();
   });
 });

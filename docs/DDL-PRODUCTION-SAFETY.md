@@ -64,11 +64,11 @@ The `reset` command (`node src/cli.js reset --yes -c <config>`) **only clears tr
 
 | Protection | Addresses | Status | Detailed doc |
 |---|---|---|---|
-| Tiered static validation (🔴 forbidden / 🟠 dangerous / 🟡 warning) + annotations | 1.5 (mixing DDL/DCL), unintentional dangerous operations | ✅ Live | [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md), [VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) |
+| Tiered static validation (🔴 forbidden / 🟠 dangerous / 🟡 warning) + annotations | 1.5 (mixing DDL/DCL), unintentional dangerous operations | ✅ Live — **enforced by `up`/`sync`/`up-all` before anything runs**, on the migrations about to run (until this was added, only the separate `validate` command applied the rules, so a pipeline that just ran `sync` executed anything) | [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md), [VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) |
 | Lock Guard (session `lock_wait_timeout` + bounded retries) | 1.1, 1.2 (doesn't change execution time, only changes lock-wait time) | ✅ Live (`feat/mariadb-lock-guard`) | [LOCK-GUARD.md](./LOCK-GUARD.md) |
 | Sanity Check Pre/PostCheck + Auto-Rollback | Validates the result after execution against expectations, auto-rolls back if it doesn't match | ✅ Live (existing mechanism) | `src/core/sanity-checker.js` |
 | `reset` command | One remediation option for 1.7 (paired with a full environment reset) | ✅ Live | See Section 2 |
-| `validate` command's `[FORCE ALLOWED]`/`[ALLOWED]` audit trail | Every dangerous operation that gets allowed through leaves an audit record instead of passing silently | ✅ Live | Same validation rule docs as above |
+| `[FORCE ALLOWED]`/`[ALLOWED]` audit trail | Every dangerous operation that gets allowed through (CLI `--allow*` or a file's `@allow`) is printed in the `validate` **and** `up`/`sync` run log instead of passing silently | ✅ Live | Same validation rule docs as above |
 | DDL checksum verification | 1.7 variant: an already-applied migration file edited after the fact, previously undetectable | ✅ Live | [RUNTIME-GATE-PLAN.md](./RUNTIME-GATE-PLAN.md) Gate R1 |
 
 **This audit also found two existing logic bugs** (which misclassify legitimate migrations as errors) — related to this handbook's theme but the opposite problem: not "a dangerous operation slipping through" but "a safe operation being wrongly blocked." Details in [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md#confirmed-logic-bugs-traced-by-hand-not-inspection-guesses).
@@ -83,7 +83,7 @@ design only:
 
 | Gate | Checks | Addresses | Status | `--force`-able? |
 |---|---|---|---|---|
-| R0 Connection identity | Does the connection actually point at the database the config says it should? | 1.6 | ✅ Live | ❌ No |
+| R0 Connection identity | Does the connection actually point at the database the config says it should — and does that database exist (instead of being silently created)? | 1.6 | ✅ Live | ❌ No (`createDatabaseIfMissing: true` is a config decision for new environments, not a per-run override) |
 | R1 changelog consistency (DDL) | Does the changelog/checksum match the files on disk? | 1.7 | ✅ Live (checksum, orphaned entries, out-of-order all implemented) | Checksum content → ✅ `--allow-checksum-drift`; orphaned/out-of-order → ❌ No |
 | R1 changelog consistency (DCL) | Same, for the DCL checksum table/collection | 1.7 | ⬜ Not yet built | — |
 | R2 Long transactions / lock waits | Are there already stuck transactions or MDL waits before execution? | 1.1 | ⬜ Not yet built | ✅ Yes (planned) |
@@ -151,6 +151,13 @@ When `up --sanity-check` runs, if the migration file has a `PostCheck` defined, 
 
 - Rollback succeeds → reports the failure reason; the database returns to its pre-execution state.
 - **Rollback also fails** → marked as `critical`; the tool explicitly prints that "manual intervention is required." In this case, **do not** rerun any command against the same connection — manually confirm the database's actual state first.
+
+- A migration that **fails partway** (no sanity check involved) is not undone by either database — MariaDB commits each DDL statement immediately, and MongoDB migrations aren't transactional. It's not recorded as applied, and both the console and the failure notification email now say so explicitly. Check what it already did before running again.
+- When the stop was refused *before* execution (validation, checksum, changelog consistency, missing database), nothing ran — the email says "nothing was applied" and has no partial-apply warning.
+
+### Rolling back with `down`
+
+`down` prints exactly which migrations it will roll back (most recent first) and asks you to type `yes`; in a pipeline (no terminal) it refuses unless `--yes` is passed. Use `down --dry-run` (with `-n` or `--target`) to see the plan without touching anything. It also refuses if any file in the plan was edited after being applied — the Down section that would run isn't the one that was applied with — unless `--allow-checksum-drift`.
 
 ### 7.2 Manually aborting a stuck migration
 

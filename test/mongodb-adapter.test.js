@@ -542,9 +542,8 @@ describe('MongoDBAdapter', () => {
     });
 
     it('should NOT return early when mode is not repeatable (DDL mode)', async () => {
-      // Default mockConfig has no mode field → DDL path → calls migrate-mongo status
+      // Default mockConfig has no mode field → DDL path → reads files + changelog itself
       const { default: migrateMongo } = await import('migrate-mongo');
-      migrateMongo.status.mockResolvedValueOnce([]);
 
       // status() now also reads migrationsDir directly (Gate R1's orphan/
       // order checks) and queries the changelog collection for orphan
@@ -555,7 +554,8 @@ describe('MongoDBAdapter', () => {
       const result = await ddlAdapter.status();
       await fs.rm(emptyDir, { recursive: true, force: true });
 
-      expect(migrateMongo.status).toHaveBeenCalled();
+      // migrate-mongo's status() can't exclude R__ files, so it isn't used
+      expect(migrateMongo.status).not.toHaveBeenCalled();
       expect(result.pending).toEqual([]);
       expect(result.applied).toEqual([]);
     });
@@ -576,13 +576,11 @@ describe('MongoDBAdapter', () => {
   describe('status() — DDL checksum verification', () => {
     let tmpDir;
     let ddlAdapter;
-    let migrateMongoMock;
     const sha256 = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 
     beforeEach(async () => {
       tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'db-migrate-checksum-'));
       ddlAdapter = new MongoDBAdapter({ ...mockConfig, migrationsDir: tmpDir });
-      migrateMongoMock = (await import('migrate-mongo')).default;
     });
 
     afterEach(async () => {
@@ -603,9 +601,6 @@ describe('MongoDBAdapter', () => {
     it('reports no mismatch when the stored checksum matches the current file content', async () => {
       const content = `export async function up(db, client) { await db.createCollection('foo'); }\nexport async function down(db, client) { await db.collection('foo').drop(); }\n`;
       await fs.writeFile(path.join(tmpDir, '20260101000000-create-foo.js'), content, 'utf-8');
-      migrateMongoMock.status.mockResolvedValueOnce([
-        { fileName: '20260101000000-create-foo.js', appliedAt: new Date() }
-      ]);
       ddlAdapter.db = mockDb({ docs: [{ fileName: '20260101000000-create-foo.js', checksum: sha256(content) }] });
 
       const status = await ddlAdapter.status();
@@ -618,9 +613,6 @@ describe('MongoDBAdapter', () => {
       const editedContent = `export async function up(db, client) { await db.createCollection('foo'); await db.collection('foo').createIndex({ x: 1 }); }\nexport async function down(db, client) { await db.collection('foo').drop(); }\n`;
       const originalChecksum = sha256(`export async function up(db, client) { await db.createCollection('foo'); }\n`);
       await fs.writeFile(path.join(tmpDir, '20260101000000-create-foo.js'), editedContent, 'utf-8');
-      migrateMongoMock.status.mockResolvedValueOnce([
-        { fileName: '20260101000000-create-foo.js', appliedAt: new Date() }
-      ]);
       ddlAdapter.db = mockDb({ docs: [{ fileName: '20260101000000-create-foo.js', checksum: originalChecksum }] });
 
       const status = await ddlAdapter.status();
@@ -632,9 +624,6 @@ describe('MongoDBAdapter', () => {
     it('adopts the current file content as the baseline when no checksum is stored yet, without flagging a mismatch', async () => {
       const content = `export async function up(db, client) { await db.createCollection('foo'); }\n`;
       await fs.writeFile(path.join(tmpDir, '20260101000000-create-foo.js'), content, 'utf-8');
-      migrateMongoMock.status.mockResolvedValueOnce([
-        { fileName: '20260101000000-create-foo.js', appliedAt: new Date() }
-      ]);
       const updateSpy = vi.fn().mockResolvedValue({});
       ddlAdapter.db = mockDb({ docs: [{ fileName: '20260101000000-create-foo.js' /* no checksum field */ }], updateSpy });
 
@@ -652,12 +641,10 @@ describe('MongoDBAdapter', () => {
   describe('status() — Gate R1 orphaned-entry and out-of-order checks', () => {
     let tmpDir;
     let ddlAdapter;
-    let migrateMongoMock;
 
     beforeEach(async () => {
       tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'db-migrate-r1-'));
       ddlAdapter = new MongoDBAdapter({ ...mockConfig, migrationsDir: tmpDir });
-      migrateMongoMock = (await import('migrate-mongo')).default;
     });
 
     afterEach(async () => {
@@ -673,10 +660,7 @@ describe('MongoDBAdapter', () => {
     }
 
     it('flags a changelog doc whose file no longer exists on disk as orphaned', async () => {
-      // No files written to tmpDir — migrate-mongo's own status() would never
-      // surface this (it only lists migrations backed by a file), so it
-      // reports nothing pending/applied even though the changelog doc exists.
-      migrateMongoMock.status.mockResolvedValueOnce([]);
+      // No files written to tmpDir — the changelog doc has no file behind it.
       ddlAdapter.db = mockDb([{ fileName: '20260101000000-deleted-file.js', appliedAt: new Date() }]);
 
       const status = await ddlAdapter.status();
@@ -688,9 +672,6 @@ describe('MongoDBAdapter', () => {
 
     it('does not flag a doc as orphaned when its file is present', async () => {
       await fs.writeFile(path.join(tmpDir, '20260101000000-create-foo.js'), 'export async function up(db) {}\n', 'utf-8');
-      migrateMongoMock.status.mockResolvedValueOnce([
-        { fileName: '20260101000000-create-foo.js', appliedAt: new Date() }
-      ]);
       ddlAdapter.db = mockDb([{ fileName: '20260101000000-create-foo.js', appliedAt: new Date(), checksum: 'x' }]);
 
       const status = await ddlAdapter.status();
@@ -701,10 +682,6 @@ describe('MongoDBAdapter', () => {
     it('flags a later-sorted file as out-of-order when an earlier-sorted file is still pending', async () => {
       await fs.writeFile(path.join(tmpDir, '20260101000000-a.js'), 'export async function up(db) {}\n', 'utf-8');
       await fs.writeFile(path.join(tmpDir, '20260101000001-b.js'), 'export async function up(db) {}\n', 'utf-8');
-      migrateMongoMock.status.mockResolvedValueOnce([
-        { fileName: '20260101000000-a.js', appliedAt: 'PENDING' },
-        { fileName: '20260101000001-b.js', appliedAt: new Date() }
-      ]);
       ddlAdapter.db = mockDb([{ fileName: '20260101000001-b.js', checksum: 'x' }]);
 
       const status = await ddlAdapter.status();
@@ -716,10 +693,6 @@ describe('MongoDBAdapter', () => {
     it('does not flag anything out-of-order when applied migrations form a contiguous prefix', async () => {
       await fs.writeFile(path.join(tmpDir, '20260101000000-a.js'), 'export async function up(db) {}\n', 'utf-8');
       await fs.writeFile(path.join(tmpDir, '20260101000001-b.js'), 'export async function up(db) {}\n', 'utf-8');
-      migrateMongoMock.status.mockResolvedValueOnce([
-        { fileName: '20260101000000-a.js', appliedAt: new Date() },
-        { fileName: '20260101000001-b.js', appliedAt: 'PENDING' }
-      ]);
       ddlAdapter.db = mockDb([{ fileName: '20260101000000-a.js', checksum: 'x' }]);
 
       const status = await ddlAdapter.status();
@@ -729,7 +702,7 @@ describe('MongoDBAdapter', () => {
     });
   });
 
-  describe('repairChecksum() / backfillChecksums()', () => {
+  describe('repairChecksum()', () => {
     it('repairChecksum() reads the current file content and writes its checksum', async () => {
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'db-migrate-repair-'));
       try {
