@@ -4,6 +4,7 @@
 > - The **Kubernetes Deployment** section has been changed to point at the real, working [`k8s/`](../k8s/README.md) setup (kubectl + ConfigMap/Secret/Job) — the `./charts/db-migrate` Helm chart it originally taught was never actually created.
 > - The `azure-pipelines-migrations.yml` referenced in the **Azure DevOps Pipeline** section still **does not exist** (`Dockerfile.azure` does exist, though — it's the image used for the Azure DevOps agent) — that section is unverified; treat it as a draft. If you want to use it, you'll need to write the actual pipeline YAML yourself.
 > - `.github/workflows/migrations.yml` has been corrected to match (its build/deploy job also used to reference a nonexistent `Dockerfile.migrations` and Helm chart).
+> - `scripts/build-migration-image.sh` was fixed 2026-10-01: it used to build from the same nonexistent `Dockerfile.migrations` / `--target runner` and always failed. It now builds the runner image from `Dockerfile` and bakes migrations in with a generated Dockerfile — the **Local Build** section below reflects that.
 
 This guide explains how to deploy DDL migration files to a Kubernetes production environment using the Build Image approach.
 
@@ -54,19 +55,22 @@ This guide explains how to deploy DDL migration files to a Kubernetes production
 
 ```
 your-project/
-├── migrations/                    # ✅ Migration files directory (bundled into the Image)
+├── migrations/                    # ✅ Migration files (baked into the image)
 │   ├── 20250101000001-create-users.js
-│   ├── 20250101000002-seed-users.js
 │   └── 20250120000001-add-new-column.js  ← Newly added DDL
-├── src/                           # Migration tool source code
-├── charts/db-migrate/             # Helm Chart
-├── Dockerfile                     # Base image
-├── Dockerfile.migrations          # Migration image (includes migration files)
-├── scripts/
-│   └── build-migration-image.sh   # Build script
-├── azure-pipelines-migrations.yml # Azure DevOps Pipeline
-└── .github/workflows/migrations.yml # GitHub Actions
+├── config.js                      # Optional: baked in with -c (credentials stay in env vars)
+src/ … Dockerfile …                # db-migrate itself — the runner (base) image
+scripts/build-migration-image.sh   # Builds runner image + your migrations
 ```
+
+Two ways to get migrations to a cluster — pick one:
+
+| | Migrations baked into an image (this guide) | ConfigMap ([`k8s/README.md`](../k8s/README.md)) |
+|---|---|---|
+| Unit of deployment | One immutable image per migration set | Runner image + a content-hashed ConfigMap |
+| Good for | Non-Kubernetes runs, registries as the audit trail | Many projects sharing one runner image |
+
+Both use the same layout inside the container — `/app/migrations/` and `/app/config/config.js` — so commands are identical.
 
 ---
 
@@ -78,12 +82,26 @@ your-project/
 # 1. Add a migration file
 vim migrations/20250120000001-add-user-status.js
 
-# 2. Build the image
-./scripts/build-migration-image.sh -t v1.0.0
+# 2. Build the image (builds the db-migrate runner image first if it isn't there)
+./scripts/build-migration-image.sh -t v1.0.0 -m ./migrations -c ./config.js
 
-# 3. Verify the image
-docker run --rm db-migrate:v1.0.0 --help
+# 3. Check what's in it — no database needed
+docker run --rm db-migrate:v1.0.0 validate -c /app/config/config.js
+
+# 4. Run it (credentials from env vars — never baked in)
+docker run --rm -e MARIADB_HOST=db.internal -e MARIADB_USER=migrator -e MARIADB_PASSWORD=… \
+  db-migrate:v1.0.0 sync -c /app/config/config.js
 ```
+
+The script refuses to build an image with no migration files in it, and checks after
+the build that the image contains exactly the files it found. Inside the image,
+`/app/config/migrations` links to `/app/migrations`, so a config using the default
+`migrationsDir: './migrations'` works as well as one using `'/app/migrations'`.
+
+Before running a command, the container waits for the database(s) in the given config
+to answer (up to ~60s) — using the config's own type, host, port and credentials, every
+instance of a multi-instance config — and on timeout prints the last connection error
+(e.g. `Access denied …`).
 
 ### Build script parameters
 
@@ -94,7 +112,10 @@ Options:
   -t, --tag          Image tag (default: latest)
   -r, --registry     Registry URL
   -m, --migrations   Migrations directory (default: ./migrations)
-  -b, --base         Base image (default: db-migrate:2.0.0)
+  -c, --config       config.js to bake in at /app/config/config.js (optional —
+                     otherwise mount one at run time)
+  -b, --base         Runner base image (default: db-migrate:<package.json version>,
+                     built from ./Dockerfile if it doesn't exist locally)
   -p, --push         Push to registry after build
   -h, --help         Show help
 ```
@@ -103,23 +124,12 @@ Options:
 
 ```bash
 # Build and push to Azure Container Registry
-./scripts/build-migration-image.sh \
-  -t v1.2.3 \
-  -r myregistry.azurecr.io \
-  -p
+./scripts/build-migration-image.sh -t v1.2.3 -m ./migrations -c ./config.js \
+  -r myregistry.azurecr.io -p
 
-# Build and push to GitHub Container Registry
-./scripts/build-migration-image.sh \
-  -t v1.2.3 \
-  -r ghcr.io/myorg \
-  -p
-
-# Use a specific migrations directory
-./scripts/build-migration-image.sh \
-  -t v1.2.3 \
-  -m ./test-fixtures/mongodb/production/migrations \
-  -r myregistry.azurecr.io \
-  -p
+# Build and push to GitHub Container Registry, config mounted at run time instead
+./scripts/build-migration-image.sh -t v1.2.3 -m ./migrations -r ghcr.io/myorg -p
+docker run --rm -v "$(pwd)/config.js:/app/config/config.js:ro" ghcr.io/myorg/db-migrate:v1.2.3 status -c /app/config/config.js
 ```
 
 ---
@@ -232,22 +242,24 @@ jobs:
 
 ### Rollback strategy
 
-```bash
-# If the migration fails, redeploy the previous version
-helm upgrade --install db-migrate-production ./charts/db-migrate \
-  --namespace production \
-  --set image.tag=v1.2.2 \  # Last known-good version
-  --set migration.command=status  # Check status first
-  -f values-production.yaml
+Redeploying an older image does **not** undo a migration — the database keeps whatever
+already ran. Roll back with `down`, using the image that contains the migration (its
+Down section is in there):
 
-# Or run a down rollback
-helm upgrade --install db-migrate-rollback ./charts/db-migrate \
-  --namespace production \
-  --set image.tag=v1.2.3 \
-  --set migration.command=down \
-  --set migration.downCount=1 \
-  -f values-production.yaml
+```bash
+# 1. See exactly what would be rolled back — nothing changes
+docker run --rm -e MARIADB_HOST=… -e MARIADB_USER=… -e MARIADB_PASSWORD=… \
+  db-migrate:v1.2.3 down -n 1 --dry-run -c /app/config/config.js
+
+# 2. Roll back. Outside a terminal (CI, a Kubernetes Job) down refuses to run
+#    without --yes, so the confirmation is an explicit, reviewable flag.
+docker run --rm -e MARIADB_HOST=… -e MARIADB_USER=… -e MARIADB_PASSWORD=… \
+  db-migrate:v1.2.3 down -n 1 --yes -c /app/config/config.js
 ```
+
+If a migration failed partway, read the failure notification first: it isn't recorded
+as applied, so `down` won't touch it — clean up its partial changes by hand
+(see [DDL-PRODUCTION-SAFETY.md](DDL-PRODUCTION-SAFETY.md) §7).
 
 ---
 
@@ -297,8 +309,8 @@ git push origin main
 
 ## Related Files
 
-- [Dockerfile.migrations](../Dockerfile.migrations) - Migration image build file
-- [build-migration-image.sh](../scripts/build-migration-image.sh) - Local build script
-- [azure-pipelines-migrations.yml](../azure-pipelines-migrations.yml) - Azure DevOps Pipeline
+- [Dockerfile](../Dockerfile) - Runner (base) image
+- [build-migration-image.sh](../scripts/build-migration-image.sh) - Builds runner image + baked-in migrations
+- [docker/entrypoint.sh](../docker/entrypoint.sh) / [src/check-db.js](../src/check-db.js) - Container entrypoint and the wait-for-database check
 - [.github/workflows/migrations.yml](../.github/workflows/migrations.yml) - GitHub Actions
-- [charts/db-migrate/values.yaml](../charts/db-migrate/values.yaml) - Helm Chart values
+- [k8s/](../k8s/README.md) - Kubernetes Job manifests (ConfigMap approach)

@@ -42,7 +42,7 @@
     "commander": "^14.0.0",
     "migrate-mongo": "^14.0.7",
     "mongodb": "^6.10.0",
-    "mysql2": "^3.16.1",
+    "mysql2": "^3.24.5",
     "node-sql-parser": "^5.4.0"
   },
   "devDependencies": {

@@ -13,32 +13,38 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}  Database Migration Runner v2.0                        ${NC}"
+echo -e "${BLUE}  Database Migration Runner (db-migrate)                ${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
 
-# Default values
+# Legacy env-based settings, used only when no -c config is given (`wait`)
 : ${DB_TYPE:=mongodb}
 : ${DB_HOST:=localhost}
 : ${DB_PORT:=$([ "$DB_TYPE" = "mongodb" ] && echo "27017" || echo "3306")}
-: ${DB_NAME:=migrations}
-: ${DB_USER:=}
-: ${DB_PASSWORD:=}
+export DB_TYPE DB_HOST DB_PORT
 
-echo -e "\n${YELLOW}Configuration:${NC}"
-echo "  Database Type: $DB_TYPE"
-echo "  Database Host: $DB_HOST:$DB_PORT"
-echo "  Database Name: $DB_NAME"
+# Config path from the -c argument (set by find_config_arg)
+CONFIG_PATH=""
 
 # Wait for database to be ready
+# check-db.js reads the same config the command uses (type, host, port,
+# credentials — every instance of a multi-instance config), so the wait
+# checks the server the command will actually talk to. It used to guess
+# the type from the config's *path* (/mariadb/ or /mongodb/ in it), and a
+# config at e.g. /app/config/config.js — the k8s Job layout — was waited
+# for as MongoDB on localhost until it timed out.
 wait_for_database() {
-    echo -e "\n${BLUE}[WAIT] Waiting for database...${NC}"
+    if [ -n "$CONFIG_PATH" ]; then
+        echo -e "\n${BLUE}[WAIT] Waiting for the database(s) in $CONFIG_PATH...${NC}"
+    else
+        echo -e "\n${BLUE}[WAIT] Waiting for $DB_TYPE at $DB_HOST:$DB_PORT...${NC}"
+    fi
     
     local max_attempts=30
     local attempt=1
+    local last_error=""
     
     while [ $attempt -le $max_attempts ]; do
-        # Test connection using check-db.js
-        if node /app/src/check-db.js 2>/dev/null; then
+        if last_error=$(node /app/src/check-db.js $CONFIG_PATH 2>&1); then
             echo -e "${GREEN}[OK] Database is ready!${NC}"
             return 0
         fi
@@ -48,28 +54,16 @@ wait_for_database() {
         attempt=$((attempt + 1))
     done
     
-    echo -e "${RED}[ERROR] Database connection timeout!${NC}"
+    echo -e "${RED}[ERROR] Database connection timeout! Last error: ${last_error}${NC}"
     exit 1
 }
 
-# Detect DB type and host from -c config path argument
-# Sets DB_TYPE / DB_HOST / DB_PORT / DB_USER / DB_PASSWORD
-setup_db_from_args() {
+# Remember the -c config path, for wait_for_database
+find_config_arg() {
     local args=("$@")
     for ((i=0; i<${#args[@]}; i++)); do
         if [[ "${args[i]}" == "-c" && $((i+1)) -lt ${#args[@]} ]]; then
-            local config_path="${args[$((i+1))]}"
-            if [[ "$config_path" == *"/mariadb/"* ]]; then
-                export DB_TYPE="mariadb"
-                export DB_HOST="${MARIADB_HOST:-mariadb}"
-                export DB_PORT="${MARIADB_PORT:-3306}"
-                export DB_USER="${MARIADB_USER:-root}"
-                export DB_PASSWORD="${MARIADB_PASSWORD:-}"
-            elif [[ "$config_path" == *"/mongodb/"* ]]; then
-                export DB_TYPE="mongodb"
-                export DB_HOST="${MONGODB_HOST:-mongodb}"
-                export DB_PORT="${MONGODB_PORT:-27017}"
-            fi
+            CONFIG_PATH="${args[$((i+1))]}"
             break
         fi
     done
@@ -130,7 +124,7 @@ main() {
             run_command "$command" "$@"
             ;;
         up|down|status|sync|reset|test|baseline|dcl|dcl:status|dcl:verify|status-all|up-all|dcl-all|dcl:status-all|dcl:verify-all|test-instances)
-            setup_db_from_args "$@"
+            find_config_arg "$@"
             wait_for_database
             run_command "$command" "$@"
             ;;
