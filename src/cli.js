@@ -16,6 +16,7 @@ import { RepeatableRunner, mongodbHelpers } from './core/repeatable-runner.js';
 import { DCLIdempotentChecker } from './core/dcl-idempotent-checker.js';
 import { checkMigrationsToRun, describeValidationFailures, allowHintForFailures } from './core/validation-gate.js';
 import { parseExpectedErrors, checkFileExpectation, parseExpectedSanity, checkSanityExpectation } from './core/fixture-expectations.js';
+import { buildDCLPlan } from './core/dcl-plan.js';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -382,6 +383,58 @@ async function enforceRuntimeGates(adapter, options, { locks = true, disk = true
         'Let them finish (or end them), or rerun with --allow-open-transactions if you know they are safe.');
     }
   }
+}
+
+/** Print a `dcl --plan` (see src/core/dcl-plan.js). */
+function printDCLPlan(plan, label) {
+  console.log(chalk.blue(`\n[DCL PLAN] ${label} — nothing is executed`));
+  if (plan.files.length === 0) {
+    console.log(chalk.gray(`   All ${plan.upToDate} DCL script(s) are up to date — a run would change nothing.`));
+  }
+  for (const f of plan.files) {
+    console.log(chalk.cyan(`\n   📄 ${f.fileName} (${f.reason})`));
+    if (f.diffNote) console.log(chalk.gray(`      ${f.diffNote}`));
+    if (f.diff) {
+      for (const d of f.diff) {
+        const text = `      ${d.op} ${d.line}`;
+        console.log(d.op === '+' ? chalk.green(text) : d.op === '-' ? chalk.red(text) : chalk.gray(text));
+      }
+    }
+    if (f.accounts.length === 0) {
+      console.log(chalk.gray('      (no account names found in the script — it may build them at runtime)'));
+    }
+    for (const a of f.accounts) {
+      const state = a.exists === null ? `could not check (${a.error})` : a.exists ? 'exists' : 'does not exist';
+      console.log(`      👤 ${a.account}${a.statement ? ` [${a.statement}]` : ''}: ${state}`);
+      if (a.exists && a.grants.length) for (const g of a.grants) console.log(chalk.gray(`         now: ${g}`));
+      if (a.password) console.log(chalk.yellow(`         🔑 ${a.password}`));
+    }
+  }
+  printOrphanedDCL(plan.orphaned);
+}
+
+/** R1 (DCL): checksum records whose script is gone. */
+function printOrphanedDCL(orphaned) {
+  if (!orphaned || orphaned.length === 0) return;
+  console.log(chalk.red(`\n🔴 ${orphaned.length} DCL script(s) were applied but are no longer on disk — whatever they created (accounts, grants) is still in the database:`));
+  for (const o of orphaned) console.log(chalk.red(`   ${o.fileName} (applied ${o.appliedAt})`));
+}
+
+/**
+ * R1 (DCL) gate: refuse while applied scripts are missing from disk, unless
+ * --accept-removed-dcl confirms the removal was intended — which then drops
+ * their checksum records (bookkeeping only; accounts are untouched).
+ */
+async function enforceRemovedDCLGate(runner, context, options) {
+  const { orphaned } = await runner.status(context);
+  if (!orphaned || orphaned.length === 0) return;
+  printOrphanedDCL(orphaned);
+  if (!options.acceptRemovedDcl) {
+    throw new Error('Applied DCL script(s) missing from disk — deleted or renamed after being applied? Restore them, or if removing them was intended ' +
+      '(and the accounts/grants they created are handled), rerun with --accept-removed-dcl to forget them.');
+  }
+  await runner.forgetChecksums(context, orphaned.map(o => o.fileName));
+  console.log(chalk.yellow(`   ⚠️  [${new Date().toISOString()}] --accept-removed-dcl: forgot ${orphaned.length} removed script(s) — accounts and grants were not touched`));
 }
 
 /** The --allow* options shared by validate and the commands it gates. */
@@ -2475,6 +2528,8 @@ program
   .option('--allow-dangerous', 'Allow dangerous operations when validating')
   .option('--allow-forbidden', 'Allow forbidden operations when validating (requires approval)')
   .option('-o, --output <dir>', 'Directory to write the run notification email to', 'reports')
+  .option('--plan', 'Show what a run would change — script diffs, affected accounts and their current grants, passwords to be generated — without executing')
+  .option('--accept-removed-dcl', 'Forget applied DCL scripts that were deleted from disk (their accounts/grants are left as they are)')
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     let adapter;
@@ -2494,6 +2549,11 @@ program
       const context = buildDCLContext(adapter, migrationsDir, {
         validator: options.validate ? adapter : null
       });
+
+      if (options.plan) {
+        printDCLPlan(await buildDCLPlan(runner, adapter, context), resolveTargetLabel(adapter));
+        return;
+      }
 
       if (options.dryRun) {
         const status = await runner.status(context);
@@ -2521,6 +2581,7 @@ program
       const dclChecker = new DCLIdempotentChecker({ verbose: false });
       // R3 only: account changes don't wait on table locks, but must not go to a read-only node
       await enforceRuntimeGates(adapter, options, { locks: false, disk: false });
+      await enforceRemovedDCLGate(runner, context, options);
       const beforeDCLState = await captureDCLState(dclChecker, adapter, config);
 
       const result = await runner.run(context);
@@ -2649,6 +2710,7 @@ program
         console.log(`   ${u.fileName}`);
         console.log(chalk.gray(`      Applied: ${u.appliedAt}`));
       }
+      printOrphanedDCL(status.orphaned);
       
       console.log('');
     } catch (error) {
@@ -2737,6 +2799,8 @@ program
   .option('--allow-dangerous', 'Allow dangerous operations when validating')
   .option('--allow-forbidden', 'Allow forbidden operations when validating')
   .option('-o, --output <dir>', 'Directory for the per-instance notification emails and the run summary', 'reports')
+  .option('--plan', 'Show what a run would change on each instance, without executing')
+  .option('--accept-removed-dcl', 'Forget applied DCL scripts that were deleted from disk (their accounts/grants are left as they are)')
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     
@@ -2774,7 +2838,9 @@ program
           validator: options.validate ? adapter : null
         });
 
-        if (options.dryRun) {
+        if (options.plan) {
+          printDCLPlan(await buildDCLPlan(runner, adapter, context), `[${name}] ${target}`);
+        } else if (options.dryRun) {
           const status = await runner.status(context);
           console.log(chalk.blue(`\n[${name}] ${target} — would apply ${status.pending.length} DCL migration(s) from ${migrationsDir}`));
           for (const p of status.pending) {
@@ -2783,6 +2849,7 @@ program
         } else {
           console.log(chalk.blue(`\n[${name}] ${target} — running DCL migrations from ${migrationsDir}...`));
           await enforceRuntimeGates(adapter, options, { locks: false, disk: false });
+          await enforceRemovedDCLGate(runner, context, options);
           const beforeDCLState = await captureDCLState(dclChecker, adapter, instanceConfig);
           const result = await runner.run(context);
 
@@ -2847,7 +2914,7 @@ program
       summaryInstances.push(summary);
     }
 
-    if (!options.dryRun) {
+    if (!options.dryRun && !options.plan) {
       try {
         const summaryReport = buildMultiInstanceSummary({
           project: path.basename(path.dirname(path.resolve(options.config))),
@@ -2901,6 +2968,7 @@ program
         console.log(chalk.gray('─'.repeat(40)));
         console.log(chalk.yellow(`  ⏳ Pending: ${status.pending.length}`));
         console.log(chalk.green(`  ✅ Up-to-date: ${status.upToDate.length}`));
+        printOrphanedDCL(status.orphaned);
         
         if (status.pending.length > 0) {
           for (const p of status.pending) {

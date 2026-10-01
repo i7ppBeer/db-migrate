@@ -1,6 +1,8 @@
 # MariaDB/MySQL DDL/DCL Writing Guide
 
 > ⚠️ **Not fully verified (audited 2026-09-11)**: This document was written in the same batch as `MIGRATION-MANAGEMENT-GUIDE.md`, which has already been confirmed outdated. Spot-checking keywords turned up no broken flags/code, but it has not been checked line-by-line against the source — this counts as "no obvious errors found," not "verified correct." For rule details, defer to [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md).
+>
+> **Current behavior that affects how you write files (2026-10-01):** `up`/`sync` validate pending files before running them and refuse on failure; a file needs a `-- +migrate Up` section or it's rejected (`MISSING_UP_MARKER`); `R__` files in a DDL directory are ignored. Rules can be tuned per project — see [VALIDATION-RULES-REFERENCE.md](./VALIDATION-RULES-REFERENCE.md#project-policy-turning-rules-off-down-or-up-and-adding-your-own).
 
 > This guide explains how to write DDL (Data Definition Language) and DCL (Data Control Language) migration files for MariaDB/MySQL.
 
@@ -1019,4 +1021,4 @@ FLUSH PRIVILEGES;
 
 - [CLI Usage Guide](CLI-USAGE-GUIDE.md)
 - [Docker Compose User Guide](DOCKER-COMPOSE-USER-GUIDE.md)
-- [Migration Management Guide](MIGRATION-MANAGEMENT-GUIDE.md)
+- [Migration Management Guide](archive/MIGRATION-MANAGEMENT-GUIDE.md)

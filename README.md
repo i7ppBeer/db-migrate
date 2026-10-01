@@ -105,6 +105,7 @@ These used to be silent and now stop the run:
 | `--target`/`--only` picked the first file whose name *contained* the value | an exact file name wins over a substring match |
 | Nothing checked the database's state before executing | refuses on long-open transactions / metadata-lock waits (`--allow-open-transactions`) and on a read-only target; checks without the needed privilege are reported as skipped |
 | MariaDB: every connect ran `CREATE DATABASE IF NOT EXISTS`, which waits on an exclusive schema lock — `sync` could hang behind a long transaction | only run when the database is really missing; the tool's own session waits at most the Lock Guard timeout |
+| A deleted/renamed DCL script was silently ignored (its accounts stayed, untracked) | `dcl` refuses until restored or confirmed with `--accept-removed-dcl`; `dcl:status` lists it |
 | Notification email always written to `notification.html` — the next run overwrote it (and any passwords in it); world-readable | each run also gets its own `notification-<runId>.html` that nothing overwrites; `notification.html` remains as the latest copy; both `0600` |
 | `down` ran immediately, no plan shown; `down --target` was ignored (always rolled back 1) | shows the plan, asks for `yes` (`--yes` outside a terminal), `--dry-run` available, `--target` works, refuses edited files |
 | Dangerous-op rules matched across the whole Up section (`UPDATE … WHERE` as last statement was flagged; `UPDATE` without WHERE was missed if another statement had one; `TRUNCATE t`, `DROP` without `COLUMN`, schema-qualified tables, Mongo `deleteMany()`/`dropCollection()` were missed) | matched per statement; those forms are caught — some migrations that used to pass now need an `@allow` |
@@ -155,7 +156,7 @@ docker compose run --rm migrate <command> [options] -c /app/test-fixtures/<db-ty
 
 | Command | What it does |
 |---|---|
-| `dcl [--dry-run] [--validate] [--allow-dangerous] [--allow-forbidden] [-o <dir>]` | Run pending/changed repeatable scripts, then print an account/permission before/after diff and write the run notification email (`<dir>/notification.html`, default `reports/`) |
+| `dcl [--plan] [--dry-run] [--validate] [--allow-dangerous] [--allow-forbidden] [--accept-removed-dcl] [-o <dir>]` | Run pending/changed repeatable scripts, then print an account/permission before/after diff and write the run notification email (`<dir>/notification.html`, default `reports/`). `--plan` previews the run (script diffs, affected accounts and their grants, passwords to be generated) without executing |
 | `dcl:status` | Show which `R__*` scripts are applied and whether their checksum still matches |
 | `dcl:verify` | Run each script twice and diff state to confirm idempotency, without leaving changes applied for real use |
 | `create-dcl <name> [-n <seq>]` | Scaffold a new `R__` DCL migration file |
@@ -164,7 +165,7 @@ docker compose run --rm migrate <command> [options] -c /app/test-fixtures/<db-ty
 
 | Command | What it does |
 |---|---|
-| `dcl-all [--dry-run] [--validate] [--allow-*] [-o <dir>]` | `dcl` across every instance, each with its own `migrationsDir` if set — one `notification-<instance>.html` per instance (with that instance's passwords) plus a password-free `notification-summary.html` |
+| `dcl-all [--dry-run] [--validate] [--allow-*] [-o <dir>] [--plan] [--accept-removed-dcl]` | `dcl` across every instance, each with its own `migrationsDir` if set — one `notification-<instance>.html` per instance (with that instance's passwords) plus a password-free `notification-summary.html` |
 | `dcl:status-all` | `dcl:status` across every instance |
 | `dcl:verify-all` | `dcl:verify` across every instance |
 
@@ -355,26 +356,17 @@ npm run docker:test      # Full e2e: builds the image, brings up MongoDB + Maria
 
 ## 📚 Documentation Index
 
+The full index, grouped by task, is **[docs/README.md](docs/README.md)**. The ones you'll want first:
+
 | Document | Description |
 |---|---|
-| [DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md) | **Start here for prod DDL risk** — what causes lock-ups, pre-flight checklist, abort/rollback runbook |
-| [LOCK-GUARD.md](docs/LOCK-GUARD.md) | MariaDB lock-wait guard: config, error behavior, and its limits |
-| [RUNTIME-GATE-PLAN.md](docs/RUNTIME-GATE-PLAN.md) | Pre-flight readiness gates (design, not yet all implemented) |
-| [VALIDATION-RULES-REFERENCE.md](docs/VALIDATION-RULES-REFERENCE.md) | Full validation rules reference |
-| [VALIDATION-RULES-MARIADB.md](docs/VALIDATION-RULES-MARIADB.md) | MariaDB validation rule tables, FK integrity checks |
-| [VALIDATION-RULES-MONGODB.md](docs/VALIDATION-RULES-MONGODB.md) | MongoDB validation rule tables |
-| [DCL-PASSWORD.md](docs/DCL-PASSWORD.md) | DCL auto-generated password mechanism |
-| [MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md) | Multi-instance configuration guide |
-| [EXISTING-DATABASE-ONBOARDING.md](docs/EXISTING-DATABASE-ONBOARDING.md) | Onboarding an existing database with `baseline` |
-| [E2E-SCENARIOS.md](docs/E2E-SCENARIOS.md) | Q&A walkthrough (with flowcharts) of common scenarios — create/remove an account, alter a schema, baseline, MongoDB vs. MariaDB, sanity checks |
-| [CLI-USAGE-GUIDE.md](docs/CLI-USAGE-GUIDE.md) | Detailed CLI usage guide |
-| [USER-GUIDE-MARIADB.md](docs/USER-GUIDE-MARIADB.md) / [USER-GUIDE-MONGODB.md](docs/USER-GUIDE-MONGODB.md) | Per-database user guides |
-| [TESTING-GUIDE.md](docs/TESTING-GUIDE.md) | `test-all`, `validate-all`, CI/CD integration |
-| [CI-MIGRATION-TEST-GUIDE.md](docs/CI-MIGRATION-TEST-GUIDE.md) | Wiring migration tests into CI |
-| [DOCKER-COMPOSE-USER-GUIDE.md](docs/DOCKER-COMPOSE-USER-GUIDE.md) | Docker Compose command reference |
-| [BUILD-IMAGE-GUIDE.md](docs/BUILD-IMAGE-GUIDE.md) | Building the migration image |
-| [LOCAL-TEST-GUIDE.md](docs/LOCAL-TEST-GUIDE.md) | Running the test suite locally without Docker |
-| [MIGRATION-MANAGEMENT-GUIDE-AWS-STYLE.md](docs/MIGRATION-MANAGEMENT-GUIDE-AWS-STYLE.md) | Ops-runbook-style migration management guide |
+| [DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md) | **Start here for production** — what causes lock-ups, the protections, pre-flight checklist, abort/rollback runbook |
+| [CLI-USAGE-GUIDE.md](docs/CLI-USAGE-GUIDE.md) | Every command, in `node` and `docker compose run` form |
+| [USER-GUIDE-MARIADB.md](docs/USER-GUIDE-MARIADB.md) / [USER-GUIDE-MONGODB.md](docs/USER-GUIDE-MONGODB.md) | Writing migration files |
+| [VALIDATION-RULES-REFERENCE.md](docs/VALIDATION-RULES-REFERENCE.md) | Validation, allowances, per-project rule policy and custom rules |
+| [DCL-PASSWORD.md](docs/DCL-PASSWORD.md) | Generated passwords, notification emails, `dcl --plan` |
+| [RUNTIME-GATE-PLAN.md](docs/RUNTIME-GATE-PLAN.md) | Checks made before anything executes |
+| [TESTING-GUIDE.md](docs/TESTING-GUIDE.md) | Testing locally and in CI |
 | [`k8s/README.md`](k8s/README.md) | Running `sync` as a Kubernetes Job |
 
 ---

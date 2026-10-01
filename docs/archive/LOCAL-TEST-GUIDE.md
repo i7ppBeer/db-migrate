@@ -1,3 +1,5 @@
+> 📦 **Archived 2026-10-01** — merged into [TESTING-GUIDE.md § Running tests locally](../TESTING-GUIDE.md#running-tests-locally). Kept for history; don't follow it as current guidance.
+
 # Local Migration Testing Guide
 
 This guide explains how to test migrations locally against a real database:
@@ -157,7 +159,7 @@ authenticated MongoDB locally.
 | `down` | Roll back the last migration |
 | `validate` | Validate migration files |
 | `test` | Up → Down → Up round trip for one config |
-| `sync` | status → up → diff → real schema (see [CLI-USAGE-GUIDE.md](./CLI-USAGE-GUIDE.md)) |
+| `sync` | status → up → diff → real schema (see [CLI-USAGE-GUIDE.md](../CLI-USAGE-GUIDE.md)) |
 
 ### Docker Compose commands
 

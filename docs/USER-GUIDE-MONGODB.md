@@ -1,6 +1,8 @@
 # MongoDB DDL/DCL Migration Guide
 
 > ⚠️ **Not fully verified (2026-09-11 audit)**: This document was written in the same batch as `MIGRATION-MANAGEMENT-GUIDE.md`, which has already been confirmed outdated. A keyword spot-check found no broken flags/code, but there was no line-by-line comparison against the source code — this is not "verified correct," only "no obvious errors found in the sample." For rule details, treat [VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) as authoritative.
+>
+> **Current behavior that affects how you write files (2026-10-01):** `up`/`sync` validate pending files before running them and refuse on failure; migrations must be ES modules (`export async function up…` — CommonJS `module.exports` can't be loaded); `R__` files in a DDL directory are ignored; `dropDatabase()` always needs explicit approval, also in `down()`. Rules can be tuned per project — see [VALIDATION-RULES-REFERENCE.md](./VALIDATION-RULES-REFERENCE.md#project-policy-turning-rules-off-down-or-up-and-adding-your-own).
 
 > This guide explains how to write DDL (Data Definition Language) and DCL (Data Control Language) migration files for MongoDB.
 
@@ -1698,4 +1700,4 @@ export async function down(db, client) {
 
 - [CLI Usage Guide](CLI-USAGE-GUIDE.md)
 - [Docker Compose User Guide](DOCKER-COMPOSE-USER-GUIDE.md)
-- [Migration Management Guide](MIGRATION-MANAGEMENT-GUIDE.md)
+- [Migration Management Guide](archive/MIGRATION-MANAGEMENT-GUIDE.md)

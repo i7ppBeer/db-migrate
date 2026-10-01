@@ -144,7 +144,7 @@ echo ""
 # Step 4: Run DOWN
 # ============================================================
 echo -e "${CYAN}[STEP 4/6] Running migrations DOWN...${NC}"
-run_migrate down
+run_migrate down --yes
 echo -e "${GREEN}[OK] DOWN completed successfully!${NC}"
 echo ""
 

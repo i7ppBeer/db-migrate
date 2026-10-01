@@ -1085,9 +1085,9 @@ $ npm run up -c test-fixtures/users/config.js --sanity-check
 
 | 檔案 | 說明 |
 |------|------|
-| [src/core/sanity-checker.js](../src/core/sanity-checker.js) | Sanity Check 核心框架 |
-| [src/adapters/mongodb-adapter.js](../src/adapters/mongodb-adapter.js) | MongoDB `upWithSanityCheck()` |
-| [src/adapters/mariadb-adapter.js](../src/adapters/mariadb-adapter.js) | MariaDB `upWithSanityCheck()` |
+| [src/core/sanity-checker.js](../../src/core/sanity-checker.js) | Sanity Check 核心框架 |
+| [src/adapters/mongodb-adapter.js](../../src/adapters/mongodb-adapter.js) | MongoDB `upWithSanityCheck()` |
+| [src/adapters/mariadb-adapter.js](../../src/adapters/mariadb-adapter.js) | MariaDB `upWithSanityCheck()` |
 
 ### 5.9 常見 Sanity Check 項目
 

@@ -2,6 +2,31 @@
 
 ---
 
+## Running tests locally
+
+```bash
+npm test                               # unit tests — no database needed
+docker compose up -d mariadb mongodb   # local test databases (root/rootpass, see docker-compose.yml)
+npm run test:integration               # Lock Guard + runtime-gate scenarios against the real MariaDB
+docker compose run --rm test-all       # everything CI's e2e job runs: every fixture, per-file
+                                       # validation, Up-Down-Up, sanity checks, DCL idempotency
+./scripts/local-test.sh [-d mariadb]   # quick status → up → down → up → status on one fixture
+./scripts/local-test.sh --clean        # stop and remove the test containers/volumes
+```
+
+Troubleshooting:
+
+- **Database not healthy / connection timeout** — `docker ps`, then `docker compose logs mariadb` (or `mongodb`); on Windows, check Docker Desktop's WSL2 backend is running.
+- **`docker compose run` fails building the image** — the `migrate`/`test-all` services build from this repo's `Dockerfile`; `docker compose build migrate` reproduces just the build step.
+- **`reports/` not writable after a Docker run** — containers write there as root; `docker run --rm -v "$PWD/reports:/r" alpine chown -R "$(id -u):$(id -g)" /r` hands it back.
+- **`node src/cli.js …` with a fixture config outside Docker** — fixtures carry the local test credentials themselves; your own configs need `MARIADB_USER` / `MARIADB_PASSWORD` set (there is no built-in default).
+
+`scripts/ci-migration-test.sh` is an alternative CI driver for pipelines other than this
+repo's GitHub Actions workflow (which uses `test-all`) — see
+[CI-MIGRATION-TEST-GUIDE.md](CI-MIGRATION-TEST-GUIDE.md).
+
+---
+
 ## Up-Down-Up Test
 
 Verifies that migrations can be applied, rolled back, and re-applied correctly.

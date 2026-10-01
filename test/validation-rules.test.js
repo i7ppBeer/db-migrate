@@ -145,3 +145,83 @@ describe('drops of tables/collections created by earlier files (validate())', ()
     expect(fileResult(result, '20260101000003-typo.js').errors.map(e => e.code).sort()).toEqual(['DROP_COLLECTION', 'ORPHAN_DROP_UP']);
   });
 });
+
+describe('project rule policy (validation.rules / validation.customRules)', () => {
+  const up = (sql) => `-- +migrate Up\n${sql}\n-- +migrate Down\nSELECT 1;\n`;
+  const codesOf = (r) => r.errors.map(e => e.code);
+
+  it("'off' removes a rule, 'warn' turns it into a warning", () => {
+    const off = new MariaDBAdapter({ type: 'mariadb', validation: { rules: { DROP_INDEX: 'off', TRUNCATE_TABLE: 'warn' } } });
+    const r = off.validateContent(up('ALTER TABLE t DROP INDEX i;\nTRUNCATE TABLE logs;'), 'f.sql');
+    expect(r.valid).toBe(true);
+    expect(r.warnings.filter(w => w.type === 'downgraded').map(w => w.code)).toEqual(['TRUNCATE_TABLE']);
+    expect(r.warnings.some(w => w.code === 'DROP_INDEX')).toBe(false);
+  });
+
+  it('custom rules at each level, with the usual allowances', () => {
+    const adapter = new MariaDBAdapter({
+      type: 'mariadb',
+      validation: { customRules: [
+        { code: 'NO_ENUM', level: 'dangerous', pattern: '\\bENUM\\s*\\(', message: 'Use a lookup table instead of ENUM' },
+        { code: 'NO_CASCADE', level: 'forbidden', pattern: 'ON DELETE CASCADE', message: 'No cascading deletes here' },
+        { code: 'PREFER_BIGINT', level: 'warning', pattern: '\\bINT\\s+PRIMARY KEY', message: 'Prefer BIGINT ids' }
+      ] }
+    });
+    const sql = up("CREATE TABLE t (id INT PRIMARY KEY, s ENUM('a','b'), p INT, FOREIGN KEY (p) REFERENCES t(id) ON DELETE CASCADE);");
+    const r = adapter.validateContent(sql, 'f.sql');
+    expect(codesOf(r).sort()).toEqual(['NO_CASCADE', 'NO_ENUM']);
+    expect(r.warnings.some(w => w.code === 'PREFER_BIGINT')).toBe(true);
+
+    const allowed = adapter.validateContent('-- @allow: NO_ENUM,NO_CASCADE\n' + sql, 'f.sql');
+    expect(allowed.valid).toBe(true);
+    expect(allowed.warnings.filter(w => /-allowed$/.test(w.type)).map(w => w.code).sort()).toEqual(['NO_CASCADE', 'NO_ENUM']);
+  });
+
+  it("'error' makes a warning-level rule block (as an overridable dangerous op)", () => {
+    const adapter = new MariaDBAdapter({
+      type: 'mariadb',
+      validation: {
+        customRules: [{ code: 'PREFER_BIGINT', level: 'warning', pattern: '\\bINT\\s+PRIMARY KEY', message: 'Prefer BIGINT ids' }],
+        rules: { PREFER_BIGINT: 'error' }
+      }
+    });
+    const r = adapter.validateContent(up('CREATE TABLE t (id INT PRIMARY KEY);'), 'f.sql');
+    expect(r.dangerousOps.map(d => d.code)).toEqual(['PREFER_BIGINT']);
+    expect(r.valid).toBe(false);
+  });
+
+  it('protected codes, unknown codes, bad levels and bad patterns are reported, not applied', () => {
+    const adapter = new MariaDBAdapter({
+      type: 'mariadb',
+      validation: {
+        rules: { MISSING_UP_MARKER: 'off', TRUNCATE_TABEL: 'off', DROP_INDEX: 'sometimes' },
+        customRules: [{ code: 'BROKEN', level: 'dangerous', pattern: '(', message: 'x' }, { code: 'X', level: 'severe', pattern: 'a', message: 'x' }]
+      }
+    });
+    const problems = adapter.getValidationPolicy().problems.join('\n');
+    expect(problems).toMatch(/MISSING_UP_MARKER: can't be changed/);
+    expect(problems).toMatch(/TRUNCATE_TABEL: no such rule code/);
+    expect(problems).toMatch(/DROP_INDEX: must be 'off', 'warn' or 'error'/);
+    expect(problems).toMatch(/customRules\[0\] \(BROKEN\): invalid pattern/);
+    expect(problems).toMatch(/customRules\[1\] \(X\): level must be/);
+    expect(codesOf(adapter.validateContent('CREATE TABLE z (id INT);', 'z.sql'))).toContain('MISSING_UP_MARKER');
+  });
+
+  it('DDL inside a DCL project stays blocked whatever the config says', () => {
+    const dcl = new MariaDBAdapter({ type: 'mariadb', mode: 'repeatable', validation: { rules: { CREATE_TABLE_IN_DCL: 'off' } } });
+    expect(dcl.getValidationPolicy().problems[0]).toMatch(/CREATE_TABLE_IN_DCL: can't be changed/);
+    expect(codesOf(dcl.validateContent('CREATE TABLE t (id INT);', 'R__1.sql'))).toContain('CREATE_TABLE_IN_DCL');
+  });
+
+  it('MongoDB: rules and custom rules apply to up()', () => {
+    const adapter = new MongoDBAdapter({
+      type: 'mongodb', mongodb: {},
+      validation: {
+        rules: { DROP_INDEX: 'off' },
+        customRules: [{ code: 'NO_REPLACE_COLLECTION', level: 'dangerous', pattern: '\\$out\\s*:', message: 'Aggregation $out replaces a collection' }]
+      }
+    });
+    const js = "export async function up(db) { await db.collection('a').dropIndex('x'); await db.collection('a').aggregate([{ $out: 'b' }]).toArray(); }\nexport async function down(db) { await db.collection('a').createIndex({ x: 1 }); }\n";
+    expect(codesOf(adapter.validateContent(js, 'f.js'))).toEqual(['NO_REPLACE_COLLECTION']);
+  });
+});

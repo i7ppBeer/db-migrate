@@ -58,6 +58,9 @@ export const RUNTIME_GATE_DEFAULTS = {
   diskUsageWarnPercent: 90
 };
 
+/** Never relaxable via validation.rules: the file couldn't run at all. */
+export const PROTECTED_RULE_CODES = ['MISSING_UP_MARKER', 'MISSING_UP_EXPORT', 'JS_SYNTAX_ERROR'];
+
 export class BaseAdapter {
   constructor(config) {
     this.config = config;
@@ -86,12 +89,141 @@ export class BaseAdapter {
     return { allow, existing: existing.map(t => (this.dbType === 'mongodb' ? String(t) : String(t).toLowerCase())) };
   }
 
+  /**
+   * Project policy for validation rules, from config:
+   *
+   *   validation.rules:       { CODE: 'off' | 'warn' | 'error' }
+   *     off   — the rule doesn't apply in this project
+   *     warn  — reported, never blocks
+   *     error — a warning-level rule (e.g. a custom one) blocks like a
+   *             dangerous op (still releasable with @allow / --allow)
+   *   validation.customRules: [{ code, pattern, level, message, suggestion?, flags? }]
+   *     level: 'forbidden' | 'dangerous' | 'warning'; pattern is a regex
+   *     string matched (case-insensitive by default) against each Up
+   *     statement (MariaDB) / up() body (MongoDB), comments and string
+   *     literals removed
+   *
+   * Codes in PROTECTED_RULE_CODES can't be relaxed: the file couldn't run at
+   * all, or DDL would end up inside a DCL project.
+   * @returns {{ rules: Object<string,string>, customRules: Array, problems: string[] }}
+   */
+  getValidationPolicy() {
+    if (this._validationPolicy) return this._validationPolicy;
+    const v = this.config.validation || {};
+    const problems = [];
+    const known = this.knownValidationCodes();
+    const protectedCodes = new Set([...PROTECTED_RULE_CODES, ...this.protectedValidationCodes()]);
+
+    const customRules = [];
+    for (const [i, r] of (v.customRules || []).entries()) {
+      const where = `validation.customRules[${i}]`;
+      const code = String(r?.code || '').trim().toUpperCase();
+      if (!/^[A-Z][A-Z0-9_]*$/.test(code)) { problems.push(`${where}: needs a code like MY_RULE`); continue; }
+      if (!['forbidden', 'dangerous', 'warning'].includes(r.level)) { problems.push(`${where} (${code}): level must be 'forbidden', 'dangerous' or 'warning'`); continue; }
+      if (!r.message) { problems.push(`${where} (${code}): needs a message`); continue; }
+      let pattern;
+      try {
+        pattern = r.pattern instanceof RegExp ? r.pattern : new RegExp(String(r.pattern), r.flags ?? 'i');
+      } catch (error) {
+        problems.push(`${where} (${code}): invalid pattern — ${error.message}`);
+        continue;
+      }
+      customRules.push({ code, level: r.level, pattern, message: r.message, suggestion: r.suggestion });
+      known.add(code);
+    }
+
+    const rules = {};
+    for (const [rawCode, setting] of Object.entries(v.rules || {})) {
+      const code = rawCode.toUpperCase();
+      if (!['off', 'warn', 'error'].includes(setting)) { problems.push(`validation.rules.${rawCode}: must be 'off', 'warn' or 'error'`); continue; }
+      if (protectedCodes.has(code)) { problems.push(`validation.rules.${rawCode}: can't be changed — the file couldn't run or would mix DDL into DCL`); continue; }
+      if (!known.has(code)) { problems.push(`validation.rules.${rawCode}: no such rule code for ${this.dbType} — misspelled?`); continue; }
+      rules[code] = setting;
+    }
+
+    this._validationPolicy = { rules, customRules, problems };
+    return this._validationPolicy;
+  }
+
+  /** Every rule code this adapter can report (overridden per adapter). */
+  knownValidationCodes() {
+    return new Set();
+  }
+
+  /** Codes on top of PROTECTED_RULE_CODES that this adapter won't let config relax. */
+  protectedValidationCodes() {
+    return [];
+  }
+
+  /**
+   * Apply validation.rules to one file's findings (in place) and return them.
+   * off: dropped everywhere; warn: errors become warnings; error: coded
+   * warnings become dangerous ops.
+   */
+  applyRulePolicy({ errors, forbiddenOps, dangerousOps, warnings }) {
+    const { rules } = this.getValidationPolicy();
+    if (Object.keys(rules).length === 0) return { errors, forbiddenOps, dangerousOps, warnings };
+    const setting = (item) => (item && item.code ? rules[item.code] : undefined);
+    const downgraded = [];
+    const relax = (list) => list.filter(item => {
+      const s = setting(item);
+      if (s === 'off') return false;
+      if (s === 'warn') {
+        downgraded.push({ type: 'downgraded', code: item.code, message: `⚠️ [warn via validation.rules] ${item.message}`, suggestion: item.suggestion });
+        return false;
+      }
+      return true;
+    });
+    const out = {
+      errors: relax(errors),
+      forbiddenOps: relax(forbiddenOps),
+      dangerousOps: relax(dangerousOps),
+      warnings: []
+    };
+    for (const w of warnings) {
+      const s = setting(w);
+      if (s === 'off') continue;
+      if (s === 'error') {
+        out.dangerousOps.push({ type: 'dangerous-upgraded', code: w.code, message: `🟠 [error via validation.rules] ${w.message.replace(/^⚠️\s*/, '')}`, suggestion: w.suggestion });
+        continue;
+      }
+      out.warnings.push(w);
+    }
+    out.warnings.push(...downgraded);
+    return out;
+  }
+
+  /**
+   * Evaluate validation.customRules against the given texts (statements or
+   * function bodies, already normalized). Allowances work as for built-ins.
+   */
+  evaluateCustomRules(texts, options, { forbiddenOps, dangerousOps, warnings }) {
+    for (const rule of this.getValidationPolicy().customRules) {
+      if (!texts.some(t => { rule.pattern.lastIndex = 0; return rule.pattern.test(t); })) continue;
+      const message = `${rule.level === 'forbidden' ? '🔴' : rule.level === 'dangerous' ? '🟠' : '⚠️'} ${rule.message}`;
+      if (rule.level === 'warning') {
+        warnings.push({ type: 'warning', code: rule.code, message, suggestion: rule.suggestion });
+        continue;
+      }
+      const allowed = (rule.level === 'forbidden' ? options.allowForbidden : options.allowDangerous) ||
+        (options.allowedCodes || []).includes(rule.code);
+      if (allowed) {
+        warnings.push({ type: rule.level === 'forbidden' ? 'forbidden-allowed' : 'dangerous-allowed', code: rule.code, message: `✅ [ALLOWED] ${message}`, suggestion: rule.suggestion });
+      } else {
+        (rule.level === 'forbidden' ? forbiddenOps : dangerousOps).push({ type: `${rule.level}-custom`, code: rule.code, message, suggestion: rule.suggestion });
+      }
+    }
+  }
+
   /** Warnings about validation config that points at nothing (renamed/typo'd files). */
   checkValidationConfig(migrationFiles) {
     const files = new Set(migrationFiles);
-    return Object.keys(this.getValidationConfig().allow)
-      .filter(f => !files.has(f))
-      .map(f => `validation.allow lists '${f}', which is not a migration file in ${this.config.migrationsDir} — renamed or misspelled?`);
+    return [
+      ...Object.keys(this.getValidationConfig().allow)
+        .filter(f => !files.has(f))
+        .map(f => `validation.allow lists '${f}', which is not a migration file in ${this.config.migrationsDir} — renamed or misspelled?`),
+      ...this.getValidationPolicy().problems
+    ];
   }
 
   /** runtimeGates thresholds from config, over RUNTIME_GATE_DEFAULTS. */

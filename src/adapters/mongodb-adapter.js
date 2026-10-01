@@ -515,6 +515,23 @@ export class MongoDBAdapter extends BaseAdapter {
     return typeof value;
   }
 
+  /** All rule codes this adapter reports (for checking validation.rules). */
+  knownValidationCodes() {
+    const codes = new Set(['JS_SYNTAX_ERROR', 'MISSING_UP_EXPORT', 'MISSING_DOWN_EXPORT', 'MISSING_DOWN', 'ORPHAN_DROP_DOWN', 'ORPHAN_DROP_UP']);
+    for (const mode of ['versioned', 'repeatable']) {
+      const rules = this.getValidationRules(mode);
+      for (const group of [rules.forbidden, rules.dangerous]) {
+        for (const list of Object.values(group)) for (const r of list) codes.add(r.code);
+      }
+    }
+    return codes;
+  }
+
+  /** DDL inside a DCL project stays unbypassable, whatever config says. */
+  protectedValidationCodes() {
+    return (this.getValidationRules('repeatable').forbidden.dclReverse || []).map(r => r.code);
+  }
+
   /**
    * Pre-execution runtime gates R2–R4 (docs/RUNTIME-GATE-PLAN.md). Read-only;
    * each check that can't run (missing privilege, standalone server) is
@@ -1397,23 +1414,27 @@ export async function down(db, client) {
       warnings.push(perfWarning);
     }
 
-    // Combine errors
-    const allErrors = [...errors, ...forbiddenOps, ...dangerousOps];
+    // Project policy (validation.customRules / validation.rules — see BaseAdapter.getValidationPolicy())
+    this.evaluateCustomRules([normalizedUpBody || normalizedContent], options, { forbiddenOps, dangerousOps, warnings });
+    const policy = this.applyRulePolicy({ errors, forbiddenOps, dangerousOps, warnings });
+
+    // Combine errors: forbidden ops + dangerous ops (when not allowed) + structural errors
+    const allErrors = [...policy.errors, ...policy.forbiddenOps, ...policy.dangerousOps];
 
     return {
       valid: allErrors.length === 0,
       errors: allErrors,
-      warnings,
-      forbiddenOps,
-      dangerousOps,
-      suspiciousNames,
+      warnings: policy.warnings,
+      forbiddenOps: policy.forbiddenOps,
+      dangerousOps: policy.dangerousOps,
+      suspiciousNames: suspiciousNames,
       performanceIssues: performanceResult.warnings,
       performanceMetrics: performanceResult.metrics,
       summary: {
-        forbidden: forbiddenOps.length,
-        dangerous: dangerousOps.length,
-        warnings: warnings.length,
-        structural: errors.length,
+        forbidden: policy.forbiddenOps.length,
+        dangerous: policy.dangerousOps.length,
+        warnings: policy.warnings.length,
+        structural: policy.errors.length,
         suspiciousNames: suspiciousNames.length,
         performanceIssues: performanceResult.warnings.length
       }

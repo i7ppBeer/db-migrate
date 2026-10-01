@@ -106,6 +106,46 @@ One consistent, mail-client-safe HTML template regardless of what happened — s
 
 ---
 
+## Previewing a run: `dcl --plan`
+
+Account statements can't be tried and rolled back (`CREATE USER` / `GRANT` commit
+implicitly on MariaDB; MongoDB user commands aren't transactional), so the preview is
+built from what can be known without executing anything:
+
+```bash
+node src/cli.js dcl --plan -c <config>        # dcl-all --plan: per instance
+```
+
+```
+📄 R__001_readonly.sql (checksum changed)
+   - GRANT SELECT ON myapp.* TO 'app_readonly'@'%';
+   + GRANT SELECT, SHOW VIEW ON myapp.* TO 'app_readonly'@'%';
+   👤 app_readonly@% [CREATE USER]: exists
+      now: GRANT SELECT ON `myapp`.* TO `app_readonly`@`%`
+      🔑 already exists — password unchanged
+```
+
+- **What changed in the script** since it was last applied — a line diff against the
+  content stored at apply time (the file as written, with placeholders — never a
+  password). Scripts applied before content was stored show "no diff available" once,
+  until they're applied again.
+- **Every account the script names**, whether it exists now and its current grants
+  (MariaDB, password hashes stripped) / roles (MongoDB). MongoDB scripts are code, so
+  names built at runtime can't be seen — the plan says so instead of guessing.
+- **Passwords**: which accounts would get a newly generated password, a rotated one, or
+  keep theirs.
+
+Nothing is executed and no notification email is written.
+
+## Removed DCL scripts
+
+If an applied `R__` script is deleted (or renamed) from disk, the accounts and grants it
+created stay in the database while the tool no longer has the script for them.
+`dcl:status` lists such scripts, and `dcl` / `dcl-all` refuse to run until someone
+decides: restore the file, or — if removing it was intended and its accounts are dealt
+with — rerun with `--accept-removed-dcl`, which forgets the script's checksum record
+(logged with a timestamp). Accounts and grants are never touched by that.
+
 ## Kubernetes
 
 There's no volume-mounting or `kubectl cp` dance needed, and specifically **don't rely on `ttlSecondsAfterFinished`** to give you a window to fetch the file after the fact — once a Job's container process exits (`restartPolicy: Never`), `kubectl exec`/`kubectl cp` can no longer reach its filesystem, TTL or not. Fetch it while the container is still alive, right after the command that wrote it:

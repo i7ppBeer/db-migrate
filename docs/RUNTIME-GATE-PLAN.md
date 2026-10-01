@@ -20,7 +20,9 @@ Every gate below is one of two kinds, and this distinction is deliberate:
 - **Absolute** — never overridable by a flag. If it fails, something is structurally
   wrong (wrong database, corrupted changelog, read-only target) and proceeding would
   be actively harmful, not just risky. No `--force` exists for these.
-- **Advisory** — overridable with an explicit `--force`, because the person running
+- **Advisory** — overridable with an explicit flag named after what it overrides
+  (`--allow-open-transactions` for R2, `--allow-checksum-drift` for R1's checksum
+  check — deliberately not one blanket `--force`), because the person running
   the command may have context the tool doesn't (e.g. "yes, I know there's a long
   transaction, it's mine, I'm about to commit it"). Every advisory override is logged
   with a timestamp and the reason, if given — this is an audit trail, not a silent
@@ -93,11 +95,13 @@ displays it — it never blocks, being a read-only diagnostic.
 - Changelog table exists and is readable (it self-heals via `CREATE TABLE IF NOT
   EXISTS` already — this gate is about what's *in* it, not whether it exists).
 
-**Checks (DCL)**: ⬜ still not implemented — checksum table readable; a stored checksum
-for a file that no longer exists on disk is flagged (same "file deleted after being
-applied" concern). Note DCL already re-runs on checksum change by design (that's the
-whole "repeatable" model) — what's missing here specifically is flagging a checksum
-recorded for a file that's since vanished from disk entirely, not content drift.
+**Checks (DCL)**: ✅ implemented (2026-10-01) — a stored checksum for a file that no
+longer exists on disk is flagged (same "file deleted after being applied" concern):
+`dcl:status` lists it, `dcl`/`dcl-all` refuse until the file is restored or
+`--accept-removed-dcl` confirms the removal (which forgets the checksum record, logged;
+accounts are untouched). Unlike DDL there is an override, because retiring a DCL
+script is a legitimate thing to do. (Content drift isn't a DCL concern — DCL re-runs
+on checksum change by design; that's the whole "repeatable" model.)
 
 **On failure**: orphaned-entry/out-of-order failures abort with a report of the
 specific offending rows/files, exit non-zero, **no `--force`** — "someone should look
@@ -261,8 +265,7 @@ starts*; R5 gates *each statement*; R6 gates the *result*.
 
 ## Implementation status
 
-**R0 is live. R1 is fully live for DDL (all three checks), still unimplemented for
-DCL. R2, R3 and R4 are live** (2026-10-01). R5 is live for MariaDB as the Lock Guard,
+**R0, R1 (DDL and DCL), R2, R3 and R4 are live** (2026-10-01). R5 is live for MariaDB as the Lock Guard,
 not for MongoDB (`maxTimeMS`); R6 already existed before this plan. Recommended build
 order for what's left: DCL's side of R1 next (same shape as the DDL work, smaller),
 then R2/R3 (the actual incident-prevention value against real lock contention/replica

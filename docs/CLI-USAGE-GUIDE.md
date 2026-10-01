@@ -356,6 +356,10 @@ docker compose -f docker-compose.yml logs -f
    - All instances share the same migration files, unless an instance sets its own `migrationsDir`
    - Each instance has its own changelog table
 
+7. **DCL: preview and removed scripts**:
+   - `dcl --plan` (and `dcl-all --plan`) shows, without executing: what changed in each pending script since it was applied, every account it names with its current grants, and which passwords would be generated
+   - If an applied `R__` script was deleted, `dcl:status` lists it and `dcl` refuses until it's restored or `--accept-removed-dcl` confirms the removal (accounts are left untouched)
+
 6. **`down` asks first**:
    - It prints exactly which migrations it will roll back (most recent first) and waits for you to type `yes`
    - `--dry-run` only prints the plan; `--target <m>` rolls back everything after `<m>` and `<m>` itself

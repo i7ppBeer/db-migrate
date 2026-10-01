@@ -139,6 +139,9 @@ docker compose run --rm migrate test-instances --parallel -c /app/test-fixtures/
 ### DCL Multi-Instance
 
 ```bash
+# Preview what each instance would change, without executing
+docker compose run --rm migrate dcl-all --plan -c /app/test-fixtures/mariadb/multi-instance/dcl/config.js
+
 # Run DCL on all instances (writes notification-<instance>-<runId>.html per instance + notification-summary-<runId>.html)
 docker compose run --rm migrate dcl-all -c /app/test-fixtures/mariadb/multi-instance/dcl/config.js
 

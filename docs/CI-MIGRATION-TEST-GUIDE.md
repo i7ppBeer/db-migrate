@@ -2,6 +2,8 @@
 
 This document explains how to use the `ci-migration-test.sh` script, its flow diagrams, and how to integrate it into CI.
 
+> This repo's own GitHub Actions workflow doesn't use this script — it runs `test-all` (see [TESTING-GUIDE.md](TESTING-GUIDE.md#what-runs-against-real-databases)). `ci-migration-test.sh` is an alternative driver for other CI systems.
+
 ---
 
 ## Table of Contents

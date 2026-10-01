@@ -104,8 +104,10 @@ export default {
   type: 'mariadb',
   host: process.env.MARIADB_HOST || 'localhost',
   port: parseInt(process.env.MARIADB_PORT || '3306'),
-  user: process.env.MARIADB_USER || 'root',
-  password: process.env.MARIADB_PASSWORD || 'rootpass',
+  // From the environment (docker-compose.yml's `migrate` service sets these
+  // for the local test database) — the tool has no built-in credentials
+  user: process.env.MARIADB_USER,
+  password: process.env.MARIADB_PASSWORD,
   database: 'mysql',  // DCL operations run against the mysql system database
   
   migrationsDir: './migrations',
@@ -202,7 +204,7 @@ EOF
 ```bash
 # Run DCL with docker-compose
 docker compose run --rm migrate \
-  node src/cli.js dcl \
+  dcl \
   -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 
 # Or use a shorthand alias (set up first)
@@ -256,7 +258,7 @@ EOF
 ```bash
 # DCL automatically detects checksum changes and only re-runs modified files
 docker compose run --rm migrate \
-  node src/cli.js dcl \
+  dcl \
   -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
@@ -265,7 +267,7 @@ docker compose run --rm migrate \
 ```bash
 # See which DCL scripts need updating
 docker compose run --rm migrate \
-  node src/cli.js dcl:status \
+  dcl:status \
   -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
@@ -278,7 +280,7 @@ docker compose run --rm migrate \
 ```bash
 # Verify that all DCL scripts are idempotent (safe to re-run)
 docker compose run --rm migrate \
-  node src/cli.js dcl:verify \
+  dcl:verify \
   -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
@@ -307,7 +309,7 @@ docker compose run --rm migrate \
 ```bash
 # Preview which DCL scripts would run
 docker compose run --rm migrate \
-  node src/cli.js dcl --dry-run \
+  dcl --dry-run \
   -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
@@ -342,8 +344,9 @@ export default {
     host: process.env.MARIADB_HOST || 'localhost',
     port: parseInt(process.env.MARIADB_PORT || '3306', 10),
     database: process.env.MARIADB_DB || 'mydb',
-    user: process.env.MARIADB_USER || 'root',
-    password: process.env.MARIADB_PASSWORD || 'rootpass'
+    // From the environment (set by docker-compose.yml's `migrate` service) — no built-in fallback
+    user: process.env.MARIADB_USER,
+    password: process.env.MARIADB_PASSWORD
   },
   migrationsDir: './migrations',
   changelogTable: '_migrations',
@@ -363,7 +366,7 @@ EOF
 ```bash
 # Create a new DDL migration
 docker compose run --rm migrate \
-  node src/cli.js create create-users \
+  create create-users \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
@@ -467,7 +470,7 @@ ALTER TABLE users DROP COLUMN phone;
 ```bash
 # Validate all DDL migration files
 docker compose run --rm migrate \
-  node src/cli.js validate \
+  validate \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
@@ -491,12 +494,12 @@ Invalid: 0
 ```bash
 # Allow dangerous operations (e.g. DROP TABLE)
 docker compose run --rm migrate \
-  node src/cli.js validate --allow-dangerous \
+  validate --allow-dangerous \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 # Allow specific operation codes
 docker compose run --rm migrate \
-  node src/cli.js validate --allow DROP_TABLE,TRUNCATE \
+  validate --allow DROP_TABLE,TRUNCATE \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
@@ -505,7 +508,7 @@ docker compose run --rm migrate \
 ```bash
 # See which migrations have run and which are pending
 docker compose run --rm migrate \
-  node src/cli.js status \
+  status \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
@@ -535,7 +538,7 @@ docker compose exec mariadb mariadb -u root -prootpass -e "CREATE DATABASE IF NO
 ```bash
 # Step 1: Run DCL to create all accounts
 docker compose run --rm migrate \
-  node src/cli.js dcl \
+  dcl \
   -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 
 echo "✅ DCL completed"
@@ -546,7 +549,7 @@ echo "✅ DCL completed"
 ```bash
 # Run all pending DDL migrations
 docker compose run --rm migrate \
-  node src/cli.js up \
+  up \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 echo "✅ DDL Up completed"
@@ -557,7 +560,7 @@ echo "✅ DDL Up completed"
 ```bash
 # Roll back the last migration
 docker compose run --rm migrate \
-  node src/cli.js down -n 1 \
+  down -n 1 \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 echo "✅ DDL Down completed"
@@ -568,7 +571,7 @@ echo "✅ DDL Down completed"
 ```bash
 # Run Up again to confirm it's re-runnable
 docker compose run --rm migrate \
-  node src/cli.js up \
+  up \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 
 echo "✅ DDL Up completed again"
@@ -579,7 +582,7 @@ echo "✅ DDL Up completed again"
 ```bash
 # Run the Up-Down-Up test in one command
 docker compose run --rm migrate \
-  node src/cli.js test \
+  test \
   -c /app/test-fixtures/mariadb/my-project/ddl/config.js
 ```
 
@@ -641,28 +644,28 @@ docker compose exec mariadb mariadb -u root -prootpass -e "CREATE DATABASE IF NO
 # 3. Validate DCL scripts
 echo ""
 echo "📋 Step 3: Validating DCL scripts..."
-docker compose run --rm migrate node src/cli.js dcl:verify -c $DCL_CONFIG
+docker compose run --rm migrate dcl:verify -c $DCL_CONFIG
 
 # 4. Run DCL
 echo ""
 echo "🔐 Step 4: Running DCL (creating accounts)..."
-docker compose run --rm migrate node src/cli.js dcl -c $DCL_CONFIG
+docker compose run --rm migrate dcl -c $DCL_CONFIG
 
 # 5. Validate DDL scripts
 echo ""
 echo "📋 Step 5: Validating DDL scripts..."
-docker compose run --rm migrate node src/cli.js validate -c $DDL_CONFIG
+docker compose run --rm migrate validate -c $DDL_CONFIG
 
 # 6. Run the DDL Up-Down-Up test
 echo ""
 echo "🧪 Step 6: Running the DDL Up-Down-Up test..."
-docker compose run --rm migrate node src/cli.js test -c $DDL_CONFIG
+docker compose run --rm migrate test -c $DDL_CONFIG
 
 # 7. Show the final status
 echo ""
 echo "📊 Step 7: Showing the final status..."
-docker compose run --rm migrate node src/cli.js status -c $DDL_CONFIG
-docker compose run --rm migrate node src/cli.js dcl:status -c $DCL_CONFIG
+docker compose run --rm migrate status -c $DDL_CONFIG
+docker compose run --rm migrate dcl:status -c $DCL_CONFIG
 
 echo ""
 echo "=========================================="
@@ -710,7 +713,7 @@ chmod +x full-migration-test.sh
 
 ```bash
 # Define an alias for convenience
-alias migrate='docker compose run --rm migrate node src/cli.js'
+alias migrate='docker compose run --rm migrate'
 
 # Then use it like this:
 migrate dcl -c /app/test-fixtures/mariadb/my-project/dcl/config.js
@@ -746,7 +749,7 @@ export DB_READONLY_PASSWORD=$(az keyvault secret show --name db-readonly-pass --
 # Then run the migration
 docker compose run --rm \
   -e DB_READONLY_PASSWORD="$DB_READONLY_PASSWORD" \
-  migrate node src/cli.js dcl -c /app/test-fixtures/mariadb/my-project/dcl/config.js
+  migrate dcl -c /app/test-fixtures/mariadb/my-project/dcl/config.js
 ```
 
 ---

@@ -1,3 +1,5 @@
+> 📦 **Archived 2026-10-01** — a pre-development product-vision document, not usage documentation — see [README.md](../../README.md) for what the tool does. Kept for history; don't follow it as current guidance.
+
 # Future Press Release (Internal Press Release)
 
 > *This is an internal document in the AWS Working Backwards style, used to clarify product vision and customer value before development begins.*
@@ -498,8 +500,8 @@ npm test
 ## Additional Resources
 
 - 📖 [Full technical documentation](./MIGRATION-MANAGEMENT-GUIDE.md)
-- 🐳 [Local testing guide](./LOCAL-TEST-GUIDE.md)
-- ☸️ [Kubernetes deployment guide](./BUILD-IMAGE-GUIDE.md)
+- 🐳 [Local testing guide](./LOCAL-TEST-GUIDE.md) (archived too — see [TESTING-GUIDE.md](../TESTING-GUIDE.md))
+- ☸️ [Kubernetes deployment guide](../BUILD-IMAGE-GUIDE.md)
 
 ---
 

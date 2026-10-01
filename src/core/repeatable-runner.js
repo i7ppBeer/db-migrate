@@ -552,19 +552,26 @@ export class RepeatableRunner {
       CREATE TABLE IF NOT EXISTS ${this.checksumTable} (
         id VARCHAR(255) PRIMARY KEY,
         checksum VARCHAR(64) NOT NULL,
-        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        content MEDIUMTEXT NULL
       )
     `);
+    // content: the file as last applied (placeholders, never passwords), so
+    // `dcl --plan` can show what changed. Added to tables from before it existed.
+    await connection.execute(`ALTER TABLE ${this.checksumTable} ADD COLUMN IF NOT EXISTS content MEDIUMTEXT NULL`);
 
+    // applied_at as a Unix epoch — the driver would read the server-time-zone
+    // value as local time (same fix as the DDL changelog, mariadb-adapter status())
     const [rows] = await connection.execute(
-      `SELECT id, checksum, applied_at FROM ${this.checksumTable}`
+      `SELECT id, checksum, applied_at, UNIX_TIMESTAMP(applied_at) AS applied_epoch, content FROM ${this.checksumTable}`
     );
 
     const checksums = new Map();
     for (const row of rows) {
       checksums.set(row.id, {
         checksum: row.checksum,
-        appliedAt: row.applied_at
+        appliedAt: row.applied_epoch != null ? new Date(Number(row.applied_epoch) * 1000) : row.applied_at,
+        content: row.content ?? null
       });
     }
     return checksums;
@@ -624,7 +631,8 @@ export class RepeatableRunner {
     for (const doc of docs) {
       checksums.set(doc._id, {
         checksum: doc.checksum,
-        appliedAt: doc.appliedAt
+        appliedAt: doc.appliedAt,
+        content: doc.content ?? null
       });
     }
     return checksums;
@@ -636,11 +644,11 @@ export class RepeatableRunner {
    * @param {string} id - Migration ID
    * @param {string} checksum - New checksum
    */
-  async updateChecksumMariaDB(connection, id, checksum) {
+  async updateChecksumMariaDB(connection, id, checksum, content = null) {
     await connection.execute(
-      `INSERT INTO ${this.checksumTable} (id, checksum) VALUES (?, ?)
-       ON DUPLICATE KEY UPDATE checksum = ?, applied_at = CURRENT_TIMESTAMP`,
-      [id, checksum, checksum]
+      `INSERT INTO ${this.checksumTable} (id, checksum, content) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE checksum = VALUES(checksum), content = VALUES(content), applied_at = CURRENT_TIMESTAMP`,
+      [id, checksum, content]
     );
   }
 
@@ -650,11 +658,11 @@ export class RepeatableRunner {
    * @param {string} id - Migration ID
    * @param {string} checksum - New checksum
    */
-  async updateChecksumMongoDB(db, id, checksum) {
+  async updateChecksumMongoDB(db, id, checksum, content = null) {
     const collection = db.collection(this.checksumTable);
     await collection.updateOne(
       { _id: id },
-      { $set: { checksum, appliedAt: new Date() } },
+      { $set: { checksum, content, appliedAt: new Date() } },
       { upsert: true }
     );
   }
@@ -689,7 +697,9 @@ export class RepeatableRunner {
           fileName: file.fileName,
           reason: stored ? 'checksum changed' : 'new file',
           currentChecksum: file.checksum,
-          storedChecksum: stored?.checksum || null
+          storedChecksum: stored?.checksum || null,
+          content: file.content,
+          previousContent: stored?.content ?? null
         });
       } else {
         upToDate.push({
@@ -700,11 +710,34 @@ export class RepeatableRunner {
       }
     }
 
+    // R1 (DCL): a checksum recorded for a file that's no longer on disk —
+    // the script was deleted or renamed after being applied, and whatever it
+    // created (accounts, grants) is still in the database.
+    const onDisk = new Set(files.map(f => f.fileName));
+    const orphaned = [...storedChecksums.entries()]
+      .filter(([fileName]) => !onDisk.has(fileName))
+      .map(([fileName, stored]) => ({ fileName, appliedAt: stored.appliedAt }));
+
     return {
       pending,
       upToDate,
+      orphaned,
       total: files.length
     };
+  }
+
+  /**
+   * Drop checksum records for files that are gone (see status().orphaned),
+   * after someone confirmed the removal was intended (--accept-removed-dcl).
+   * Touches only this tool's bookkeeping, never accounts or grants.
+   */
+  async forgetChecksums(context, fileNames) {
+    if (!fileNames.length) return;
+    if (context.dbType === 'mariadb') {
+      await context.connection.query(`DELETE FROM ${this.checksumTable} WHERE id IN (?)`, [fileNames]);
+    } else {
+      await context.db.collection(this.checksumTable).deleteMany({ _id: { $in: fileNames } });
+    }
   }
 
   /**
@@ -786,7 +819,7 @@ export class RepeatableRunner {
         }
 
         // Update checksum
-        await this.updateChecksumMariaDB(connection, file.fileName, file.checksum);
+        await this.updateChecksumMariaDB(connection, file.fileName, file.checksum, file.content);
 
         result.applied.push({
           fileName: file.fileName,
@@ -918,7 +951,7 @@ export class RepeatableRunner {
         }
 
         // Update checksum
-        await this.updateChecksumMongoDB(db, file.fileName, file.checksum);
+        await this.updateChecksumMongoDB(db, file.fileName, file.checksum, file.content);
 
         result.applied.push({
           fileName: file.fileName,

@@ -698,6 +698,23 @@ export class MariaDBAdapter extends BaseAdapter {
     }
   }
 
+  /** All rule codes this adapter reports (for checking validation.rules). */
+  knownValidationCodes() {
+    const codes = new Set(['SQL_SYNTAX_ERROR', 'SQL_SYNTAX_ERROR_DOWN', 'SANITY_SQL_SYNTAX_ERROR', 'ORPHAN_DROP_DOWN', 'ORPHAN_DROP_UP', 'FK_REFERENCES_DROPPED_TABLE', 'FK_UNRESOLVED_REFERENCE', 'MISSING_DOWN', 'MISSING_UP_MARKER', 'INSERT_SELECT', 'DROP_TABLE']);
+    for (const mode of ['versioned', 'repeatable']) {
+      const rules = this.getValidationRules(mode);
+      for (const group of [rules.forbidden, rules.dangerous]) {
+        for (const list of Object.values(group)) for (const r of list) codes.add(r.code);
+      }
+    }
+    return codes;
+  }
+
+  /** DDL inside a DCL project stays unbypassable, whatever config says. */
+  protectedValidationCodes() {
+    return (this.getValidationRules('repeatable').forbidden.dclReverse || []).map(r => r.code);
+  }
+
   /**
    * Pre-execution runtime gates R2–R4 (docs/RUNTIME-GATE-PLAN.md). Read-only
    * queries; each check that can't run (missing privilege, binlog off) is
@@ -2084,23 +2101,27 @@ export class MariaDBAdapter extends BaseAdapter {
       }
     }
 
+    // Project policy (validation.customRules / validation.rules — see BaseAdapter.getValidationPolicy())
+    this.evaluateCustomRules(checkStatements, options, { forbiddenOps, dangerousOps, warnings });
+    const policy = this.applyRulePolicy({ errors, forbiddenOps, dangerousOps, warnings });
+
     // Combine errors: forbidden ops + dangerous ops (when not allowed) + structural errors
-    const allErrors = [...errors, ...forbiddenOps, ...dangerousOps];
+    const allErrors = [...policy.errors, ...policy.forbiddenOps, ...policy.dangerousOps];
 
     return {
       valid: allErrors.length === 0,
       errors: allErrors,
-      warnings,
-      forbiddenOps,
-      dangerousOps,
+      warnings: policy.warnings,
+      forbiddenOps: policy.forbiddenOps,
+      dangerousOps: policy.dangerousOps,
       suspiciousNames: suspiciousNameWarnings,
       performanceIssues: performanceWarnings,
       performanceMetrics: performanceResult.metrics,
       summary: {
-        forbidden: forbiddenOps.length,
-        dangerous: dangerousOps.length,
-        warnings: warnings.length,
-        structural: errors.length,
+        forbidden: policy.forbiddenOps.length,
+        dangerous: policy.dangerousOps.length,
+        warnings: policy.warnings.length,
+        structural: policy.errors.length,
         suspiciousNames: suspiciousNameWarnings.length,
         performanceIssues: performanceWarnings.length
       }
@@ -2327,7 +2348,11 @@ export class MariaDBAdapter extends BaseAdapter {
         if (!availableNow.has(ref)) {
           const nameLabel = fk.constraintName ? ` '${fk.constraintName}'` : '';
           const message = `FOREIGN KEY${nameLabel} references '${fk.referencedTable}' which has not been created in any preceding migration (if it predates these migrations, list it in validation.existingTables)`;
-          if (isAllowed) {
+          const fkSetting = this.getValidationPolicy().rules.FK_UNRESOLVED_REFERENCE;
+          if (fkSetting === 'off') continue;
+          if (fkSetting === 'warn') {
+            fileWarnings.push({ type: 'downgraded', code: 'FK_UNRESOLVED_REFERENCE', message: `⚠️ [warn via validation.rules] ${message}` });
+          } else if (isAllowed) {
             fileWarnings.push({ type: 'fk-unresolved-reference-allowed', code: 'FK_UNRESOLVED_REFERENCE', message: `⚠️ [ALLOWED] ${message} — assumed to exist via baseline or an externally-managed table` });
           } else {
             fileErrors.push({ type: 'fk-unresolved-reference', code: 'FK_UNRESOLVED_REFERENCE', message: `🔴 ${message}` });
