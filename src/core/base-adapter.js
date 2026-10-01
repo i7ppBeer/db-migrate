@@ -43,6 +43,21 @@ export function selectPendingMigrations(pending, { target, only } = {}) {
   return { selected, error: null };
 }
 
+/**
+ * Thresholds for the pre-execution runtime gates (R2–R4, see
+ * docs/RUNTIME-GATE-PLAN.md), overridable per config under `runtimeGates`.
+ */
+export const RUNTIME_GATE_DEFAULTS = {
+  // R2: a transaction / operation open longer than this blocks the run
+  longTransactionSec: 60,
+  // R3: replication lag above this is reported (never blocks)
+  replicationLagWarnSec: 30,
+  // R4: binary logs larger than this in total are reported (MariaDB, never blocks)
+  binlogWarnMb: 10240,
+  // R4: filesystem usage above this is reported (MongoDB, never blocks)
+  diskUsageWarnPercent: 90
+};
+
 export class BaseAdapter {
   constructor(config) {
     this.config = config;
@@ -77,6 +92,11 @@ export class BaseAdapter {
     return Object.keys(this.getValidationConfig().allow)
       .filter(f => !files.has(f))
       .map(f => `validation.allow lists '${f}', which is not a migration file in ${this.config.migrationsDir} — renamed or misspelled?`);
+  }
+
+  /** runtimeGates thresholds from config, over RUNTIME_GATE_DEFAULTS. */
+  getRuntimeGateConfig() {
+    return { ...RUNTIME_GATE_DEFAULTS, ...(this.config.runtimeGates || {}) };
   }
 
   /**

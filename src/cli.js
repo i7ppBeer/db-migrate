@@ -329,6 +329,61 @@ async function enforceValidationGate(adapter, status, options, { report = false 
   throw new Error(`Validation failed — nothing was applied: ${describeValidationFailures(gate.failures).join('; ')}`);
 }
 
+/**
+ * Pre-execution runtime gates (docs/RUNTIME-GATE-PLAN.md), right before
+ * anything executes:
+ *   R2 — long-open transactions / metadata-lock waits on this database:
+ *        refuses unless --allow-open-transactions (logged with a timestamp)
+ *   R3 — read-only target: refuses, no override (connect to the primary)
+ *   R4 — disk/binlog headroom, replication lag: warnings only
+ * Checks that couldn't run (privileges, server type) are listed as skipped.
+ *
+ * @param {{ locks?: boolean, disk?: boolean, report?: boolean }} [opts] -
+ *   locks/disk: run R2/R4 (DDL commands; `dcl` only needs R3);
+ *   report: dry-run — print, set a failing exit code, don't throw
+ */
+async function enforceRuntimeGates(adapter, options, { locks = true, disk = true, report = false } = {}) {
+  if (typeof adapter.runtimePreflight !== 'function') return;
+  const r = await adapter.runtimePreflight({ locks, disk });
+
+  for (const sk of r.skipped) console.log(chalk.gray(`   ℹ️  Skipped ${sk}`));
+  for (const w of r.warnings) console.log(chalk.yellow(`   ⚠️  ${w}`));
+
+  const refuse = (message) => {
+    if (report) {
+      console.error(chalk.red(`   ❌ This run would be refused: ${message}`));
+      process.exitCode = 1;
+      return;
+    }
+    throw new Error(message);
+  };
+
+  if (r.readOnly) {
+    refuse(`R3: ${resolveTargetLabel(adapter)} is read-only (${r.readOnly.reason}) — migrations must run against the writable primary. ` +
+      'No override: writing to a read-only node either fails midway or, for privileged accounts, makes a replica diverge.');
+    if (report) return;
+  }
+
+  const blockers = [...r.openTransactions, ...r.metadataLockWaits];
+  if (blockers.length > 0) {
+    const cfg = adapter.getRuntimeGateConfig();
+    console.log(chalk.red(`\n🔴 R2: ${blockers.length} session(s) on ${resolveTargetLabel(adapter)} could block this migration's DDL:`));
+    for (const t of r.openTransactions) {
+      console.log(chalk.red(`   ${t.id}  open ${t.durationSec}s  ${t.who}  ${t.query}`));
+    }
+    for (const w of r.metadataLockWaits) {
+      console.log(chalk.red(`   ${w.id}  waiting ${w.durationSec}s on "${w.state}"  ${w.who}  ${w.query}`));
+    }
+    console.log(chalk.gray(`   (transactions open longer than runtimeGates.longTransactionSec = ${cfg.longTransactionSec}s, and sessions waiting on a metadata lock)`));
+    if (options.allowOpenTransactions && !report) {
+      console.log(chalk.yellow(`   ⚠️  [${new Date().toISOString()}] --allow-open-transactions: proceeding anyway — the Lock Guard still bounds how long each statement waits`));
+    } else {
+      refuse('R2: open transactions or metadata-lock waits could make this migration queue behind them and block every later query on the table. ' +
+        'Let them finish (or end them), or rerun with --allow-open-transactions if you know they are safe.');
+    }
+  }
+}
+
 /** The --allow* options shared by validate and the commands it gates. */
 function addAllowOptions(command) {
   return command
@@ -617,7 +672,8 @@ const upCommand = program
   .option('--target <migration>', 'Run migrations up to and including this migration')
   .option('--only <migration>', 'Run only this specific migration')
   .option('--instance <name>', 'Run only on specified instance (for multi-instance configs)')
-  .option('--allow-checksum-drift', 'Accept already-applied migration files whose content changed since being applied, as the new checksum baseline');
+  .option('--allow-checksum-drift', 'Accept already-applied migration files whose content changed since being applied, as the new checksum baseline')
+  .option('--allow-open-transactions', 'Run even if long-open transactions or metadata-lock waits are found on the database (runtime gate R2)');
 addAllowOptions(upCommand)
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
@@ -648,6 +704,7 @@ addAllowOptions(upCommand)
         printChecksumMismatches(status);
         printChangelogConsistency(status);
         await enforceValidationGate(adapter, status, options, { report: true });
+        await enforceRuntimeGates(adapter, options, { report: true });
         return;
       }
 
@@ -655,6 +712,7 @@ addAllowOptions(upCommand)
       enforceChangelogConsistencyGate(preflightStatus);
       await enforceChecksumGate(preflightStatus, adapter, options);
       await enforceValidationGate(adapter, preflightStatus, options);
+      if (preflightStatus.pending.length > 0) await enforceRuntimeGates(adapter, options);
 
       console.log(chalk.blue(`\n[UP] Running migrations (${adapter.dbType})...`));
       
@@ -737,7 +795,8 @@ const syncCommand = program
   .option('--target <migration>', 'Run migrations up to and including this migration')
   .option('--only <migration>', 'Run only this specific migration')
   .option('-o, --output <dir>', 'Save a JSON+HTML report to this directory (sync-report-<timestamp>.{json,html})')
-  .option('--allow-checksum-drift', 'Accept already-applied migration files whose content changed since being applied, as the new checksum baseline');
+  .option('--allow-checksum-drift', 'Accept already-applied migration files whose content changed since being applied, as the new checksum baseline')
+  .option('--allow-open-transactions', 'Run even if long-open transactions or metadata-lock waits are found on the database (runtime gate R2)');
 addAllowOptions(syncCommand)
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
@@ -809,6 +868,7 @@ addAllowOptions(syncCommand)
         console.log(`   ⏳ ${f}`);
       }
       await enforceValidationGate(adapter, status, options);
+      await enforceRuntimeGates(adapter, options);
 
       // Snapshot before applying anything, so the schema section afterward
       // can show what actually changed instead of just the final state.
@@ -919,6 +979,7 @@ program
   .option('--dry-run', 'Show what would be rolled back, without doing it')
   .option('--yes', 'Skip the confirmation prompt (required when not running in a terminal)')
   .option('--allow-checksum-drift', 'Roll back migrations whose file was edited after being applied (their Down section may not be the reviewed one)')
+  .option('--allow-open-transactions', 'Run even if long-open transactions or metadata-lock waits are found on the database (runtime gate R2)')
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     let adapter;
@@ -952,6 +1013,7 @@ program
         console.log(chalk.yellow('   ⚠️  --allow-checksum-drift: rolling back with the edited files'));
       }
 
+      await enforceRuntimeGates(adapter, options, { report: Boolean(options.dryRun) });
       if (options.dryRun) return;
 
       if (!options.yes) {
@@ -1877,7 +1939,8 @@ const upAllCommand = program
   .command('up-all')
   .description('Run pending migrations on all instances (each validated first, like `up`)')
   .option('--dry-run', 'Show what would be run without executing')
-  .option('--allow-checksum-drift', 'Accept already-applied migration files whose content changed since being applied, as the new checksum baseline');
+  .option('--allow-checksum-drift', 'Accept already-applied migration files whose content changed since being applied, as the new checksum baseline')
+  .option('--allow-open-transactions', 'Run even if long-open transactions or metadata-lock waits are found on the database (runtime gate R2)');
 addAllowOptions(upAllCommand)
   .action(async (cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
@@ -1906,12 +1969,14 @@ addAllowOptions(upAllCommand)
           }
           printChangelogConsistency(status);
           await enforceValidationGate(adapter, status, options, { report: true });
+          await enforceRuntimeGates(adapter, options, { report: true });
         } else {
           console.log(chalk.blue(`\n[${name}] ${resolveTargetLabel(adapter)} — running migrations...`));
           // Same pre-run gates as single-instance `up`
           enforceChangelogConsistencyGate(status);
           await enforceChecksumGate(status, adapter, options);
           await enforceValidationGate(adapter, status, options);
+          if (status.pending.length > 0) await enforceRuntimeGates(adapter, options);
           const result = await adapter.up();
           
           if (result.applied.length > 0) {
@@ -2454,6 +2519,8 @@ program
       // Snapshot accounts/permissions before applying, so we can show what
       // actually changed afterward instead of just "N migrations applied".
       const dclChecker = new DCLIdempotentChecker({ verbose: false });
+      // R3 only: account changes don't wait on table locks, but must not go to a read-only node
+      await enforceRuntimeGates(adapter, options, { locks: false, disk: false });
       const beforeDCLState = await captureDCLState(dclChecker, adapter, config);
 
       const result = await runner.run(context);
@@ -2715,6 +2782,7 @@ program
           }
         } else {
           console.log(chalk.blue(`\n[${name}] ${target} — running DCL migrations from ${migrationsDir}...`));
+          await enforceRuntimeGates(adapter, options, { locks: false, disk: false });
           const beforeDCLState = await captureDCLState(dclChecker, adapter, instanceConfig);
           const result = await runner.run(context);
 

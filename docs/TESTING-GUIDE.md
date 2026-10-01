@@ -265,7 +265,7 @@ with sanity checks must pass them.
 | Unit tests (`npm test`) | CI `test` job | none — mocked drivers |
 | `validate-all` on the success fixtures | CI `test` job | MariaDB + MongoDB (DCL idempotency) |
 | `test-all --sanity-check`: per-file validation, Up-Down-Up, sanity checks incl. a real Post-Check rollback, DCL idempotency, for every fixture | CI `e2e` job | MariaDB + MongoDB (docker compose) |
-| Lock Guard scenarios (`npm run test:integration`) | CI `e2e` job, with `INTEGRATION_REQUIRE_DB=1` so a missing database fails instead of skipping | MariaDB |
+| Lock Guard scenarios + runtime gate R2 (`npm run test:integration`) | CI `e2e` job, with `INTEGRATION_REQUIRE_DB=1` so a missing database fails instead of skipping | MariaDB |
 
 Run the integration suite locally with `docker compose up -d mariadb` and
 `npm run test:integration`; without a database it skips (unless
@@ -273,7 +273,11 @@ Run the integration suite locally with `docker compose up -d mariadb` and
 
 ### Remaining gaps
 
-1. **Runtime gates R2–R4** (`docs/RUNTIME-GATE-PLAN.md`) — not implemented yet.
+1. **Runtime gates on a replica set** — R2 (open transaction + queued ALTER) and R3
+   (read-only server) are verified against real MariaDB/MongoDB (R2 in CI via
+   `test/integration.test.js` Scenario 4); secondaries and replication lag only with
+   mocked responses (`test/runtime-gates.test.js`), since the test setup is a
+   standalone MongoDB.
 2. **Bracket-notation validation bypass** (`docs/VALIDATION-RULES-MONGODB.md`
    discussion item #2) — static checks can't see `db['drop' + 'Database']()`; worth a
    test pinning the current behavior so it stays a documented gap.

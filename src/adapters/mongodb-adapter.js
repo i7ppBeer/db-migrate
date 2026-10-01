@@ -516,6 +516,85 @@ export class MongoDBAdapter extends BaseAdapter {
   }
 
   /**
+   * Pre-execution runtime gates R2–R4 (docs/RUNTIME-GATE-PLAN.md). Read-only;
+   * each check that can't run (missing privilege, standalone server) is
+   * reported as skipped rather than failing the run.
+   *
+   *   R2 openTransactions — operations on this database running longer than
+   *      longTransactionSec, and multi-document transactions open that long
+   *      (currentOp; needs the inprog privilege, e.g. clusterMonitor)
+   *   R3 readOnly — this connection is not to a writable primary
+   *      (hello.isWritablePrimary); replication lag above
+   *      replicationLagWarnSec is a warning only
+   *   R4 warnings — filesystem usage above diskUsageWarnPercent (dbStats)
+   *
+   * @param {{ locks?: boolean, disk?: boolean }} [which] - R2 / R4 (R3 always)
+   */
+  async runtimePreflight({ locks = true, disk = true } = {}) {
+    const cfg = this.getRuntimeGateConfig();
+    const dbName = this.db.databaseName;
+    const admin = this.client.db('admin');
+    const out = { openTransactions: [], metadataLockWaits: [], readOnly: null, warnings: [], skipped: [] };
+
+    const hello = await admin.command({ hello: 1 });
+    if (hello.isWritablePrimary === false) {
+      out.readOnly = { reason: hello.secondary ? 'connected to a secondary' : 'not a writable primary' };
+    }
+    if (hello.setName) {
+      try {
+        const rs = await admin.command({ replSetGetStatus: 1 });
+        const primary = rs.members.find(m => m.stateStr === 'PRIMARY');
+        for (const m of rs.members.filter(m => m.stateStr === 'SECONDARY')) {
+          const lagSec = primary ? (new Date(primary.optimeDate) - new Date(m.optimeDate)) / 1000 : null;
+          if (lagSec !== null && lagSec > cfg.replicationLagWarnSec) {
+            out.warnings.push(`Secondary ${m.name} is ${Math.round(lagSec)}s behind the primary — reads from it won't see this migration for a while`);
+          }
+        }
+      } catch (error) {
+        out.skipped.push(`R3 replication lag (needs replSetGetStatus): ${error.message}`);
+      }
+    }
+
+    if (locks) {
+      try {
+        const escaped = dbName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const { inprog } = await admin.command({
+          currentOp: true,
+          $or: [
+            { active: true, secs_running: { $gt: cfg.longTransactionSec }, ns: { $regex: `^${escaped}\\.` } },
+            { 'transaction.timeOpenMicros': { $gt: cfg.longTransactionSec * 1e6 } }
+          ]
+        });
+        out.openTransactions = inprog.map(op => ({
+          id: `opid ${op.opid}`,
+          durationSec: op.secs_running ?? Math.round((op.transaction?.timeOpenMicros || 0) / 1e6),
+          who: op.client || op.effectiveUsers?.map(u => u.user).join(',') || '?',
+          query: `${op.op || 'transaction'} ${op.ns || ''} ${JSON.stringify(op.command || {}).slice(0, 160)}`.trim()
+        }));
+      } catch (error) {
+        out.skipped.push(`R2 long-operation check (needs the inprog privilege, e.g. clusterMonitor): ${error.message}`);
+      }
+    }
+
+    if (disk) {
+      try {
+        const stats = await this.db.command({ dbStats: 1 });
+        if (stats.fsTotalSize > 0) {
+          const usedPct = (stats.fsUsedSize / stats.fsTotalSize) * 100;
+          if (usedPct > cfg.diskUsageWarnPercent) {
+            out.warnings.push(`The database's filesystem is ${usedPct.toFixed(1)}% full (over ${cfg.diskUsageWarnPercent}%) — index builds and large updates need headroom`);
+          }
+        } else {
+          out.skipped.push('R4 disk usage: not reported by this server');
+        }
+      } catch (error) {
+        out.skipped.push(`R4 disk usage (dbStats): ${error.message}`);
+      }
+    }
+    return out;
+  }
+
+  /**
    * Snapshot the real, current schema — one entry per collection with its indexes
    * and a best-effort field shape inferred from a single sample document.
    * Used by the `sync` CLI command to show what the database actually looks like

@@ -108,7 +108,7 @@ or typo in an already-applied file.
 
 ---
 
-## Gate R2 — Long-transaction / lock contention preflight (advisory)
+## Gate R2 — Long-transaction / lock contention preflight (advisory) — ✅ Implemented
 
 **When**: right before `up()`/`down()`/`dcl` starts executing migration SQL.
 
@@ -133,13 +133,35 @@ looking for long-running write ops or open multi-document transactions
 migration will touch.
 
 **On failure**: print what was found (thread/op id, duration, truncated query text),
-refuse to proceed, require `--force` to continue anyway. This is exactly what would
-have caught the 2026-09-10 incident before it happened — a stale DELETE transaction
-holding the table this migration's `ALTER` needed.
+refuse to proceed, require `--allow-open-transactions` to continue anyway (the override
+is printed with a timestamp). This is exactly what would have caught the 2026-09-10
+incident before it happened — a stale DELETE transaction holding the table this
+migration's `ALTER` needed.
+
+**As implemented** (`runtimePreflight()` in both adapters, `enforceRuntimeGates()` in
+`src/cli.js`): runs in `up`, `sync`, `up-all` and `down`, right before execution
+(`--dry-run` reports what it would refuse). Threshold `runtimeGates.longTransactionSec`
+(default 60). MariaDB looks only at sessions whose current database is the migration's
+own (or none) and skips its own connection — a long transaction in another schema on a
+shared server can't hold this schema's tables; MongoDB looks at operations on this
+database (`ns`) plus any multi-document transaction open that long. Needs the `PROCESS`
+privilege (MariaDB) / `inprog` (MongoDB, e.g. `clusterMonitor`); without it the check is
+reported as **skipped**, not passed, and the run continues. MariaDB without `PROCESS`
+may also see only its own sessions in `PROCESSLIST`.
+
+**Found while building this**: the tool's own startup could get stuck in exactly this
+situation. `ensureChangelogTable()` ran `CREATE DATABASE IF NOT EXISTS` on every connect
+and `status()`, and that statement requests an *exclusive* schema metadata lock even
+when the database exists — so with a long transaction open and an `ALTER` queued, `sync`
+waited behind them (MariaDB's default `lock_wait_timeout` is a year) before R2 could
+even run, and became one more waiter everything else queued behind. Fixed: the
+database is created only when it's actually missing (and `createDatabaseIfMissing`
+allows it), and the tool's own session uses the Lock Guard's `lock_wait_timeout`.
+Covered by Scenario 4 of `test/integration.test.js`, which CI runs against a real MariaDB.
 
 ---
 
-## Gate R3 — Writability / replica-target check (absolute for read-only, advisory for lag)
+## Gate R3 — Writability / replica-target check (absolute for read-only, advisory for lag) — ✅ Implemented
 
 **When**: with Gate R2, right before execution.
 
@@ -165,9 +187,15 @@ be immediately after this migration.
 node just fails again — the actual fix is connecting to the right node). Replication
 lag → advisory warning only, proceeds by default.
 
+**As implemented**: runs for every writing command — `up`, `sync`, `up-all`, `down`,
+`dcl`, `dcl-all`. The MariaDB check refuses on `read_only`/`innodb_read_only`
+**regardless of the account's privileges**: a `SUPER`/`READ_ONLY ADMIN` account can
+still write to a read-only server, which on a replica only makes it diverge. Lag
+threshold: `runtimeGates.replicationLagWarnSec` (default 30).
+
 ---
 
-## Gate R4 — Disk / binlog headroom (advisory, best-effort)
+## Gate R4 — Disk / binlog headroom (advisory, best-effort) — ✅ Implemented
 
 **When**: with Gate R2, only when the check itself is cheap and available — this gate
 degrades gracefully to "skipped, could not determine" rather than blocking on missing
@@ -181,6 +209,18 @@ privilege — if the connecting user doesn't have it, this gate logs "skipped: n
 permission" and does not block.
 
 **On failure**: warning only, never blocks.
+
+**As implemented**: MariaDB — total `SHOW BINARY LOGS` size over
+`runtimeGates.binlogWarnMb` (default 10240); "binary logging is off" or a missing
+privilege is reported as skipped. MariaDB has no SQL view of free disk space, so this is
+the only headroom signal. MongoDB — filesystem usage from `dbStats`
+(`fsUsedSize`/`fsTotalSize`) over `runtimeGates.diskUsageWarnPercent` (default 90).
+Runs with R2 (DDL commands only).
+
+```javascript
+// config.js — all optional
+runtimeGates: { longTransactionSec: 60, replicationLagWarnSec: 30, binlogWarnMb: 10240, diskUsageWarnPercent: 90 }
+```
 
 ---
 
@@ -222,7 +262,8 @@ starts*; R5 gates *each statement*; R6 gates the *result*.
 ## Implementation status
 
 **R0 is live. R1 is fully live for DDL (all three checks), still unimplemented for
-DCL. R2–R5 are still design** (R6 already existed before this plan). Recommended build
+DCL. R2, R3 and R4 are live** (2026-10-01). R5 is live for MariaDB as the Lock Guard,
+not for MongoDB (`maxTimeMS`); R6 already existed before this plan. Recommended build
 order for what's left: DCL's side of R1 next (same shape as the DDL work, smaller),
 then R2/R3 (the actual incident-prevention value against real lock contention/replica
 state), R4 last (lowest value, needs a privilege the connecting user may not have).

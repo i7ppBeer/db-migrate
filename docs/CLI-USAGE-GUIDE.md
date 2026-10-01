@@ -367,6 +367,7 @@ docker compose -f docker-compose.yml logs -f
    - The configured database doesn't exist — set `createDatabaseIfMissing: true` only for a genuinely new environment
    - A pending migration fails validation, or (MariaDB) has no `-- +migrate Up` section
    - `R__*` files in a DDL `migrationsDir` don't stop anything — they're ignored with a warning; put them in a DCL project
+   - Right before executing: a transaction open longer than `runtimeGates.longTransactionSec` (60s) or a session waiting on a metadata lock in the same database (`--allow-open-transactions` to proceed anyway), or a read-only target (no override). Without the `PROCESS` privilege (MariaDB) / `clusterMonitor` (MongoDB) the transaction check is skipped with a notice
 
 4. **`reset` only clears records, not data**:
    - Only deletes tracking records in changelog/checksum; does not run `down()` and does not touch the actual tables/collections

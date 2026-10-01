@@ -266,7 +266,9 @@ DROP TABLE users;
     // ensureChangelogTable()'s CREATE/ALTER statements.
     function mockConnection({ rows = [], updateSpy = vi.fn().mockResolvedValue([{}]) } = {}) {
       return {
+        query: vi.fn().mockResolvedValue([[]]),
         execute: vi.fn((sql, params) => {
+          if (/information_schema\.SCHEMATA/.test(sql)) return Promise.resolve([[{ SCHEMA_NAME: 'test' }]]);
           if (/^SELECT id, applied_at, (UNIX_TIMESTAMP\(applied_at\) AS applied_epoch, )?checksum/.test(sql)) return Promise.resolve([rows]);
           if (/^UPDATE/.test(sql)) return updateSpy(sql, params);
           return Promise.resolve([[]]);
@@ -286,6 +288,25 @@ DROP TABLE users;
       expect(status.checksumMismatches).toEqual([]);
       expect(status.checksumBaselined).toEqual([]);
       expect(status.applied).toHaveLength(1);
+    });
+
+    it('never runs CREATE DATABASE against an existing database (it would queue on the schema lock)', async () => {
+      ddlAdapter.connection = mockConnection();
+      await ddlAdapter.ensureChangelogTable();
+      const sqls = ddlAdapter.connection.execute.mock.calls.map(([sql]) => sql);
+      expect(sqls.some(sql => /CREATE DATABASE/i.test(sql))).toBe(false);
+    });
+
+    it('refuses to recreate a dropped database unless createDatabaseIfMissing is set', async () => {
+      const gone = { query: vi.fn().mockResolvedValue([[]]), execute: vi.fn(() => Promise.resolve([[]])) };
+      ddlAdapter.connection = gone;
+      await expect(ddlAdapter.ensureChangelogTable()).rejects.toThrow(/no longer exists/);
+      expect(gone.execute.mock.calls.some(([sql]) => /CREATE DATABASE/i.test(sql))).toBe(false);
+
+      const recreate = new MariaDBAdapter({ ...mockConfig, migrationsDir: tmpDir, createDatabaseIfMissing: true });
+      recreate.connection = { query: vi.fn().mockResolvedValue([[]]), execute: vi.fn(() => Promise.resolve([[]])) };
+      await recreate.ensureChangelogTable();
+      expect(recreate.connection.execute.mock.calls.some(([sql]) => /CREATE DATABASE IF NOT EXISTS `test`/.test(sql))).toBe(true);
     });
 
     it('reports applied_at from the server epoch, not the driver\'s local-time reading of it', async () => {
@@ -352,7 +373,9 @@ DROP TABLE users;
 
     function mockConnection(rows) {
       return {
+        query: vi.fn().mockResolvedValue([[]]),
         execute: vi.fn((sql) => {
+          if (/information_schema\.SCHEMATA/.test(sql)) return Promise.resolve([[{ SCHEMA_NAME: 'test' }]]);
           if (/^SELECT id, applied_at, (UNIX_TIMESTAMP\(applied_at\) AS applied_epoch, )?checksum/.test(sql)) return Promise.resolve([rows]);
           return Promise.resolve([[]]);
         })
@@ -451,9 +474,18 @@ DROP TABLE users;
           if (/information_schema\.SCHEMATA/.test(sql)) return Promise.resolve([exists ? [{ SCHEMA_NAME: reportedDbName }] : []]);
           return Promise.resolve([[]]);
         }),
+        query: vi.fn().mockResolvedValue([[]]),
         end: vi.fn().mockResolvedValue(undefined)
       };
     }
+
+    it('bounds the tool\'s own lock waits on the session (lock guard timeout)', async () => {
+      const mysql = (await import('mysql2/promise')).default;
+      const conn = mockConnection('test');
+      vi.mocked(mysql.createConnection).mockResolvedValue(conn);
+      await new MariaDBAdapter({ ...mockConfig, mode: 'repeatable', ddlSafety: { lockGuard: { lockWaitTimeoutSec: 7 } } }).connect();
+      expect(conn.query).toHaveBeenCalledWith('SET SESSION lock_wait_timeout = 7');
+    });
 
     it('passes a connectTimeout to mysql.createConnection()', async () => {
       const mysql = (await import('mysql2/promise')).default;
@@ -500,6 +532,7 @@ DROP TABLE users;
           if (/^SELECT DATABASE\(\)/.test(sql)) return Promise.resolve([[{ db: 'test' }]]);
           return Promise.resolve([[]]);
         }),
+        query: vi.fn().mockResolvedValue([[]]),
         end: vi.fn().mockResolvedValue(undefined)
       };
     }

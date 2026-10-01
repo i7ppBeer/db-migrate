@@ -78,17 +78,17 @@ The `reset` command (`node src/cli.js reset --yes -c <config>`) **only clears tr
 ## 4. Runtime Gate status (R0–R4)
 
 Full spec is in [RUNTIME-GATE-PLAN.md](./RUNTIME-GATE-PLAN.md); this is just the
-summary. R0 and R1's DDL checks are live now — R1's DCL side and R2–R4 are still
-design only:
+summary. R0, R1's DDL checks and R2–R4 are live — only R1's DCL side is still
+design:
 
 | Gate | Checks | Addresses | Status | `--force`-able? |
 |---|---|---|---|---|
 | R0 Connection identity | Does the connection actually point at the database the config says it should — and does that database exist (instead of being silently created)? | 1.6 | ✅ Live | ❌ No (`createDatabaseIfMissing: true` is a config decision for new environments, not a per-run override) |
 | R1 changelog consistency (DDL) | Does the changelog/checksum match the files on disk? | 1.7 | ✅ Live (checksum, orphaned entries, out-of-order all implemented) | Checksum content → ✅ `--allow-checksum-drift`; orphaned/out-of-order → ❌ No |
 | R1 changelog consistency (DCL) | Same, for the DCL checksum table/collection | 1.7 | ⬜ Not yet built | — |
-| R2 Long transactions / lock waits | Are there already stuck transactions or MDL waits before execution? | 1.1 | ⬜ Not yet built | ✅ Yes (planned) |
-| R3 Writability / replica check | Is the target a read-only replica? | Variant of 1.6 | ⬜ Not yet built | Read-only → ❌; lagging → ✅ (planned) |
-| R4 Disk/binlog space | Could a large ALTER exhaust available space? | 1.2 | ⬜ Not yet built | ✅ Yes (planned) |
+| R2 Long transactions / lock waits | Are there already stuck transactions or MDL waits before execution? | 1.1 | ✅ Live (`up`/`sync`/`up-all`/`down`) | ✅ `--allow-open-transactions` (logged) |
+| R3 Writability / replica check | Is the target a read-only replica? | Variant of 1.6 | ✅ Live (every writing command, incl. `dcl`) | Read-only → ❌; lag → warning only |
+| R4 Disk/binlog space | Could a large ALTER exhaust available space? | 1.2 | ✅ Live (warning only) | — never blocks |
 
 R0 and R1's orphaned/out-of-order checks deliberately have no override option —
 connecting to the wrong database or a changelog that's out of sync with the files on

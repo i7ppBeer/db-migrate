@@ -371,6 +371,15 @@ export class MariaDBAdapter extends BaseAdapter {
         }
       }
 
+      // The tool's own statements (changelog bookkeeping, checks) must never
+      // wait indefinitely on a lock either — same bound as the Lock Guard
+      // (MariaDB's default lock_wait_timeout is a year).
+      const guard = this.config.ddlSafety?.lockGuard ?? {};
+      if (guard.enabled ?? true) {
+        const wait = Number.isInteger(guard.lockWaitTimeoutSec) && guard.lockWaitTimeoutSec > 0 ? guard.lockWaitTimeoutSec : 5;
+        await this.connection.query(`SET SESSION lock_wait_timeout = ${wait}`);
+      }
+
       // Ensure changelog table exists (DDL/versioned mode only;
       // DCL/repeatable mode uses checksumTable, not changelogTable)
       if (this.config.mode !== 'repeatable') {
@@ -394,13 +403,25 @@ export class MariaDBAdapter extends BaseAdapter {
     const dbConfig = this.config.mariadb || this.config;
     const dbName = dbConfig.database;
 
-    // Re-create the database if it was dropped by a DOWN migration
-    // (e.g., 20260101000000-create-database.sql does DROP DATABASE in its DOWN section)
+    // Re-create the database if a DOWN migration dropped it (e.g. a
+    // create-database migration rolled back) — but only when it's really
+    // gone, and only if createDatabaseIfMissing allows it. Never run
+    // CREATE DATABASE IF NOT EXISTS against an existing database: it still
+    // requests an exclusive lock on the schema, so with a long transaction
+    // open it queues — and everything else in the schema queues behind it.
     if (dbName) {
-      await this.connection.execute(
-        `CREATE DATABASE IF NOT EXISTS \`${dbName}\` DEFAULT CHARACTER SET utf8mb4 DEFAULT COLLATE utf8mb4_unicode_ci`
+      const [existing] = await this.connection.execute(
+        'SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?', [dbName]
       );
-      await this.connection.execute(`USE \`${dbName}\``);
+      if (existing.length === 0) {
+        if (!this.config.createDatabaseIfMissing) {
+          throw new Error(`database '${dbName}' no longer exists (a Down section may have dropped it). Set createDatabaseIfMissing: true to let the tool recreate it.`);
+        }
+        await this.connection.execute(
+          `CREATE DATABASE IF NOT EXISTS \`${dbName}\` DEFAULT CHARACTER SET utf8mb4 DEFAULT COLLATE utf8mb4_unicode_ci`
+        );
+      }
+      await this.connection.query(`USE \`${dbName}\``);
     }
 
     // Use fully qualified table name so this works regardless of connection context
@@ -675,6 +696,74 @@ export class MariaDBAdapter extends BaseAdapter {
       if (error.code === 'ER_NO_SUCH_TABLE') return 0;
       throw error;
     }
+  }
+
+  /**
+   * Pre-execution runtime gates R2–R4 (docs/RUNTIME-GATE-PLAN.md). Read-only
+   * queries; each check that can't run (missing privilege, binlog off) is
+   * reported as skipped rather than failing the run.
+   *
+   *   R2 openTransactions / metadataLockWaits — transactions in this database
+   *      open longer than longTransactionSec, and sessions already queued on
+   *      a metadata lock: an ALTER now would queue behind them and jam every
+   *      later query on the table (the 2026-09-10 incident)
+   *   R3 readOnly — @@read_only / @@innodb_read_only. Checked regardless of
+   *      the account's privileges: a SUPER/READ_ONLY ADMIN account can still
+   *      write to a read-only replica, which only makes it diverge
+   *   R4 warnings — total binary log size above binlogWarnMb
+   *
+   * @param {{ locks?: boolean, disk?: boolean }} [which] - R2 / R4 (R3 always)
+   */
+  async runtimePreflight({ locks = true, disk = true } = {}) {
+    const cfg = this.getRuntimeGateConfig();
+    const dbName = (this.config.mariadb || this.config).database;
+    const out = { openTransactions: [], metadataLockWaits: [], readOnly: null, warnings: [], skipped: [] };
+
+    const [[ro]] = await this.connection.query('SELECT @@global.read_only AS ro, @@global.innodb_read_only AS iro');
+    if (Number(ro.ro) === 1 || Number(ro.iro) === 1) {
+      out.readOnly = { reason: Number(ro.iro) === 1 ? 'innodb_read_only = ON' : 'read_only = ON' };
+    }
+
+    if (locks) {
+      try {
+        const [trx] = await this.connection.query(
+          `SELECT t.trx_mysql_thread_id AS thread_id, TIMESTAMPDIFF(SECOND, t.trx_started, NOW()) AS duration_sec,
+                  p.USER AS user, p.HOST AS host, LEFT(COALESCE(t.trx_query, p.INFO, ''), 200) AS query
+             FROM information_schema.INNODB_TRX t
+             LEFT JOIN information_schema.PROCESSLIST p ON p.ID = t.trx_mysql_thread_id
+            WHERE TIMESTAMPDIFF(SECOND, t.trx_started, NOW()) > ?
+              AND t.trx_mysql_thread_id <> CONNECTION_ID()
+              AND (p.DB = ? OR p.DB IS NULL)
+            ORDER BY duration_sec DESC`,
+          [cfg.longTransactionSec, dbName]
+        );
+        out.openTransactions = trx.map(r => ({ id: `thread ${r.thread_id}`, durationSec: Number(r.duration_sec), who: `${r.user ?? '?'}@${r.host ?? '?'}`, query: r.query || '(idle in transaction)' }));
+        const [waits] = await this.connection.query(
+          `SELECT ID AS id, USER AS user, HOST AS host, TIME AS time_sec, STATE AS state, LEFT(COALESCE(INFO, ''), 200) AS query
+             FROM information_schema.PROCESSLIST
+            WHERE (STATE LIKE '%metadata lock%' OR STATE LIKE 'Waiting for table%') AND DB = ? AND ID <> CONNECTION_ID()`,
+          [dbName]
+        );
+        out.metadataLockWaits = waits.map(r => ({ id: `thread ${r.id}`, durationSec: Number(r.time_sec), who: `${r.user}@${r.host}`, state: r.state, query: r.query }));
+      } catch (error) {
+        out.skipped.push(`R2 open-transaction check (needs the PROCESS privilege): ${error.message}`);
+      }
+    }
+
+    if (disk) {
+      try {
+        const [logs] = await this.connection.query('SHOW BINARY LOGS');
+        const totalMb = logs.reduce((sum, l) => sum + Number(l.File_size || 0), 0) / 1024 / 1024;
+        if (totalMb > cfg.binlogWarnMb) {
+          out.warnings.push(`Binary logs total ${Math.round(totalMb)} MB (over ${cfg.binlogWarnMb} MB) — a large ALTER adds to that; check the server's disk headroom first`);
+        }
+      } catch (error) {
+        out.skipped.push(/not using binary logging/i.test(error.message)
+          ? 'R4 binary-log size: binary logging is off'
+          : `R4 binary-log size (needs BINLOG MONITOR / REPLICATION CLIENT): ${error.message}`);
+      }
+    }
+    return out;
   }
 
   /**

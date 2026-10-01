@@ -212,4 +212,39 @@ describe.skipIf(!dbAvailable)('MariaDB lock guard — real-server e2e', () => {
       await conn2.end();
     }
   }, 15000);
+
+  it('Scenario 4 — runtime gate R2 sees the open transaction and the queued ALTER, and the tool itself does not get stuck', async () => {
+    // The incident again: an open DELETE transaction, and someone else's ALTER
+    // already queued behind it on the metadata lock.
+    const holder = await mysql.createConnection({ host: HOST, port: PORT, user: ROOT_USER, password: ROOT_PASSWORD, database: TEST_DB });
+    const waiter = await mysql.createConnection({ host: HOST, port: PORT, user: ROOT_USER, password: ROOT_PASSWORD, database: TEST_DB });
+    await holder.query('START TRANSACTION');
+    await holder.query("DELETE FROM lock_guard_demo WHERE status = 'active'");
+    await waiter.query('SET SESSION lock_wait_timeout = 20');
+    const queuedAlter = waiter.query('ALTER TABLE lock_guard_demo ADD COLUMN queued_col INT').catch(() => {});
+    try {
+      await new Promise(resolve => setTimeout(resolve, 2500));
+
+      // The tool's own startup path (connect → changelog bookkeeping) must not
+      // queue on the schema lock behind them — it used to run CREATE DATABASE
+      // IF NOT EXISTS, which waited here for the full lock timeout.
+      const config = { ...adapter.config, runtimeGates: { longTransactionSec: 1 } };
+      const probe = createAdapter(config);
+      const startedAt = Date.now();
+      await probe.connect();
+      const r = await probe.runtimePreflight();
+      await probe.disconnect();
+      expect(Date.now() - startedAt).toBeLessThan(3000);
+
+      expect(r.readOnly).toBeNull();
+      expect(r.openTransactions.length).toBeGreaterThanOrEqual(1);
+      expect(r.metadataLockWaits.map(w => w.query)).toContainEqual(expect.stringMatching(/ALTER TABLE lock_guard_demo ADD COLUMN queued_col/));
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {});
+      await queuedAlter;
+      await waiter.query('ALTER TABLE lock_guard_demo DROP COLUMN IF EXISTS queued_col').catch(() => {});
+      await holder.end();
+      await waiter.end();
+    }
+  }, 30000);
 });
