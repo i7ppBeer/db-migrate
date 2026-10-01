@@ -101,9 +101,11 @@ Accounts every instance needs go into each directory (a copy of the same `R__` f
 
 | File | Contains | Send to |
 |---|---|---|
-| `notification-prod-tw.html` | prod-tw's account changes **and its generated passwords**; header `prod-tw`, `db-tw.internal:3306 · db app` | prod-tw's owner only |
-| `notification-prod-jp.html` | same for prod-jp — different accounts, different passwords | prod-jp's owner only |
-| `notification-summary.html` | every instance's status, host, which accounts changed and which file has the details — **no passwords** | whoever runs the rollout |
+| `notification-prod-tw-<runId>.html` | prod-tw's account changes **and its generated passwords**; header `prod-tw`, `db-tw.internal:3306 · db app` | prod-tw's owner only |
+| `notification-prod-jp-<runId>.html` | same for prod-jp — different accounts, different passwords | prod-jp's owner only |
+| `notification-summary-<runId>.html` | every instance's status, host, which accounts changed and which file has the details — **no passwords** | whoever runs the rollout |
+
+All files of one run share `<runId>` (UTC time + random suffix), so no run overwrites another's passwords; the summary links to that run's files. Each name without the `-<runId>` part (`notification-prod-tw.html`, …) is a copy of the latest run's file, for fixed-path fetching. All are owner-only (`0600`) — delete them once delivered.
 
 Because the database name alone is ambiguous here, every email and console line identifies an instance by name **and** `host:port`. Duplicate instance names are rejected before anything connects (they would overwrite each other's notification file). If one instance fails, the others still run and get their emails; the summary marks the failure and the command exits non-zero.
 
@@ -137,7 +139,7 @@ docker compose run --rm migrate test-instances --parallel -c /app/test-fixtures/
 ### DCL Multi-Instance
 
 ```bash
-# Run DCL on all instances (writes notification-<instance>.html per instance + notification-summary.html)
+# Run DCL on all instances (writes notification-<instance>-<runId>.html per instance + notification-summary-<runId>.html)
 docker compose run --rm migrate dcl-all -c /app/test-fixtures/mariadb/multi-instance/dcl/config.js
 
 # Check DCL status on all instances

@@ -208,3 +208,27 @@ describe('fixture expectations (@expect-error)', async () => {
     expect(checkFileExpectation(result(false, ['DROP_COLUMN']), null).message).toBe('expected to be valid, but failed with DROP_COLUMN');
   });
 });
+
+describe('sanity expectations (@expect-sanity)', async () => {
+  const { parseExpectedSanity, checkSanityExpectation } = await import('../src/core/fixture-expectations.js');
+
+  it('parses the annotation', () => {
+    expect(parseExpectedSanity('-- @expect-sanity: rollback\n-- +migrate Up')).toBe('rollback');
+    expect(parseExpectedSanity('// @expect-sanity: Rollback\n')).toBe('rollback');
+    expect(parseExpectedSanity('-- +migrate Up')).toBeNull();
+  });
+
+  it('a rollback fixture passes only if it failed, was rolled back, and is still pending', () => {
+    const failedRolledBack = { success: false, rolledBack: true, error: 'post-check failed' };
+    expect(checkSanityExpectation(failedRolledBack, 'rollback', { stillPending: true }).ok).toBe(true);
+    expect(checkSanityExpectation(failedRolledBack, 'rollback', { stillPending: false }).message).toMatch(/still recorded as applied/);
+    expect(checkSanityExpectation({ success: true }, 'rollback', { stillPending: false }).message).toMatch(/but it passed/);
+    expect(checkSanityExpectation({ success: false, rolledBack: false, critical: true, error: 'x' }, 'rollback', { stillPending: true }).message)
+      .toMatch(/rollback itself failed/);
+  });
+
+  it('any other migration must pass its sanity checks', () => {
+    expect(checkSanityExpectation({ success: true }, null, { stillPending: false }).ok).toBe(true);
+    expect(checkSanityExpectation({ success: false, error: 'boom' }, null, { stillPending: true }).message).toBe('boom');
+  });
+});

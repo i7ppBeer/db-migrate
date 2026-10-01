@@ -238,6 +238,24 @@ CommonJS that failed only because they couldn't be loaded at all.
 DCL fixtures use the existing per-file `@expect-fail` annotation for scripts that are
 meant to be non-idempotent.
 
+### Sanity checks, including a real rollback
+
+CI runs `test-all --sanity-check` (the `test-all` service in `docker-compose.yml`): after
+Up-Down-Up, every DDL fixture is reset and re-applied with its Pre-/Post-Checks.
+
+`test-fixtures/{mariadb,mongodb}/sanity-rollback/` each hold one migration whose Post-Check
+fails **by design** (a column created too short / a required unique index never
+created), annotated:
+
+```sql
+-- @expect-sanity: rollback
+```
+
+For such a file, `test-all` requires that the Post-Check failed, the migration was rolled
+back (its Down ran), it is **not** recorded as applied, and — since it's the only
+migration in its run — the schema afterwards is identical to before. Any other migration
+with sanity checks must pass them.
+
 ---
 
 ## What runs against real databases
@@ -246,7 +264,7 @@ meant to be non-idempotent.
 |---|---|---|
 | Unit tests (`npm test`) | CI `test` job | none — mocked drivers |
 | `validate-all` on the success fixtures | CI `test` job | MariaDB + MongoDB (DCL idempotency) |
-| `test-all`: per-file validation, Up-Down-Up, DCL idempotency, for every fixture | CI `e2e` job | MariaDB + MongoDB (docker compose) |
+| `test-all --sanity-check`: per-file validation, Up-Down-Up, sanity checks incl. a real Post-Check rollback, DCL idempotency, for every fixture | CI `e2e` job | MariaDB + MongoDB (docker compose) |
 | Lock Guard scenarios (`npm run test:integration`) | CI `e2e` job, with `INTEGRATION_REQUIRE_DB=1` so a missing database fails instead of skipping | MariaDB |
 
 Run the integration suite locally with `docker compose up -d mariadb` and
@@ -255,12 +273,9 @@ Run the integration suite locally with `docker compose up -d mariadb` and
 
 ### Remaining gaps
 
-1. **Sanity-check rollback against a real database** — the success path (Pre-Check →
-   migrate → Post-Check) runs in `test-all`; a Post-Check that genuinely fails and
-   triggers a real `down()` does not.
-2. **Runtime gates R2–R4** (`docs/RUNTIME-GATE-PLAN.md`) — not implemented yet.
-3. **Bracket-notation validation bypass** (`docs/VALIDATION-RULES-MONGODB.md`
+1. **Runtime gates R2–R4** (`docs/RUNTIME-GATE-PLAN.md`) — not implemented yet.
+2. **Bracket-notation validation bypass** (`docs/VALIDATION-RULES-MONGODB.md`
    discussion item #2) — static checks can't see `db['drop' + 'Database']()`; worth a
    test pinning the current behavior so it stays a documented gap.
-4. **No coverage threshold** — coverage is configured (`vitest.config.js`) but not
+3. **No coverage threshold** — coverage is configured (`vitest.config.js`) but not
    enforced.

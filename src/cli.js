@@ -10,12 +10,12 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { createAdapter, createAdapters, loadConfig } from './adapters/index.js';
-import { Reporter, buildSyncReport, saveSyncReport, buildNotificationEmail, notificationEmailToHTML, saveNotificationEmail, buildDCLNotificationEvents, buildMultiInstanceSummary, multiInstanceSummaryToHTML, partialApplyNote } from './core/reporter.js';
+import { Reporter, buildSyncReport, saveSyncReport, buildNotificationEmail, notificationEmailToHTML, saveNotificationEmail, buildDCLNotificationEvents, buildMultiInstanceSummary, multiInstanceSummaryToHTML, partialApplyNote, newRunId } from './core/reporter.js';
 import { diffSchemaSnapshots, isDiffEmpty } from './core/schema-diff.js';
 import { RepeatableRunner, mongodbHelpers } from './core/repeatable-runner.js';
 import { DCLIdempotentChecker } from './core/dcl-idempotent-checker.js';
 import { checkMigrationsToRun, describeValidationFailures, allowHintForFailures } from './core/validation-gate.js';
-import { parseExpectedErrors, checkFileExpectation } from './core/fixture-expectations.js';
+import { parseExpectedErrors, checkFileExpectation, parseExpectedSanity, checkSanityExpectation } from './core/fixture-expectations.js';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -769,8 +769,8 @@ addAllowOptions(syncCommand)
         dbType,
         ...extra
       });
-      const notificationPath = await saveNotificationEmail(options.output || 'reports', notificationEmailToHTML(report));
-      console.log(chalk.gray(`\n   📧 Notification email written to ${notificationPath}`));
+      const saved = await saveNotificationEmail(options.output || 'reports', notificationEmailToHTML(report));
+      console.log(chalk.gray(`\n   📧 Notification email written to ${saved.path} (latest copy: ${saved.latestPath})`));
     };
 
     try {
@@ -2292,7 +2292,9 @@ program
             // ═══════════════════════════════════════════════════════
             // DDL: Sanity Check (optional, requires --sanity-check flag)
             // ═══════════════════════════════════════════════════════
-            if (options.sanityCheck && typeof adapter.upWithSanityCheck === 'function') {
+            // Skipped for directories of migrations meant to be rejected —
+            // up/sync would never execute them.
+            if (options.sanityCheck && !expectsRejections && typeof adapter.upWithSanityCheck === 'function') {
               console.log(chalk.blue(`\n[SANITY] ${label} (${dbType}) PreCheck/PostCheck...`));
               console.log(chalk.cyan(`   Sanity Check: ENABLED`));
 
@@ -2303,36 +2305,61 @@ program
                 await adapter.down(appliedCount);
               }
 
+              const supportsSchema = typeof adapter.getSchemaSnapshot === 'function';
+              const schemaBefore = supportsSchema ? await adapter.getSchemaSnapshot() : null;
               const sanityStart = Date.now();
               const sanityRunResult = await adapter.upWithSanityCheck({ verbose: false });
+              const { pending: pendingAfter } = await adapter.status();
+              const schemaAfter = supportsSchema ? await adapter.getSchemaSnapshot() : null;
 
-              // Report per-migration sanity results
-              for (const sr of (sanityRunResult.sanityResults || [])) {
-                const skipped = sr.skipped === true;
-                if (skipped) {
+              // Per-migration results, judged against each file's
+              // @expect-sanity annotation (see src/core/fixture-expectations.js)
+              const results = sanityRunResult.sanityResults || [];
+              for (const sr of results) {
+                if (sr.skipped === true) {
                   console.log(chalk.gray(`   ⏭️  ${sr.file}: SKIPPED (no sanity blocks)`));
-                } else if (sr.success) {
-                  console.log(chalk.green(`   ✅ ${sr.file}: PASSED`));
-                } else {
-                  console.log(chalk.red(`   ❌ ${sr.file}: FAILED — ${sr.error}`));
-                  if (sr.rolledBack) console.log(chalk.yellow(`      ↩️  Auto-rolled back`));
+                  continue;
+                }
+                const content = await fs.readFile(path.join(config.migrationsDir, sr.file), 'utf-8');
+                const expected = parseExpectedSanity(content);
+                const outcome = checkSanityExpectation(sr, expected, { stillPending: pendingAfter.includes(sr.file) });
+
+                // A rollback is only really proven if the database ended up
+                // exactly as it started — checkable when it was the only
+                // migration this run touched.
+                if (outcome.ok && expected === 'rollback' && supportsSchema && results.length === 1) {
+                  const diff = diffSchemaSnapshots(schemaBefore, schemaAfter);
+                  if (!isDiffEmpty(diff)) {
+                    outcome.ok = false;
+                    outcome.message = 'rolled back, but the schema differs from before the run';
+                  }
                 }
 
-                if (!skipped) {
-                  reporter.addResult({
-                    database: `${label} [${sr.file}]`,
-                    dbType,
-                    testType: 'sanity-check',
-                    success: sr.success,
-                    duration: Date.now() - sanityStart,
-                    error: sr.success ? null : sr.error
-                  });
+                if (outcome.ok) {
+                  console.log(chalk.green(expected === 'rollback'
+                    ? `   ✅ ${sr.file}: Post-Check failed as expected and was rolled back — database restored (${sr.error})`
+                    : `   ✅ ${sr.file}: PASSED`));
+                } else {
+                  console.log(chalk.red(`   ❌ ${sr.file}: ${outcome.message}`));
                 }
+                reporter.addResult({
+                  database: `${label} [${sr.file}]`,
+                  dbType,
+                  testType: 'sanity-check',
+                  success: outcome.ok,
+                  duration: Date.now() - sanityStart,
+                  error: outcome.message
+                });
               }
 
-              // Overall sanity summary if no per-file results (e.g. all skipped)
-              if ((sanityRunResult.sanityResults || []).filter(sr => !sr.skipped).length === 0) {
-                console.log(chalk.yellow(`   ⚠️  No sanity blocks found in any migration (add -- +sanity PreCheck/PostCheck sections)`));
+              if (results.filter(sr => !sr.skipped).length === 0) {
+                console.log(chalk.gray(`   (no sanity blocks in any migration)`));
+              }
+              for (const e of sanityRunResult.errors || []) {
+                if (!results.some(sr => e.startsWith(`${sr.file}:`))) {
+                  console.log(chalk.red(`   ❌ ${e}`));
+                  reporter.addResult({ database: label, dbType, testType: 'sanity-check', success: false, duration: Date.now() - sanityStart, error: e });
+                }
               }
             }
           }
@@ -2491,8 +2518,8 @@ program
               skipped: hasSkipped ? result.skipped : undefined
             }
           });
-          const notificationPath = await saveNotificationEmail(options.output, notificationEmailToHTML(report));
-          console.log(chalk.gray(`\n   📧 Notification email written to ${notificationPath}`));
+          const saved = await saveNotificationEmail(options.output, notificationEmailToHTML(report));
+          console.log(chalk.gray(`\n   📧 Notification email written to ${saved.path} (latest copy: ${saved.latestPath})`));
         }
       }
     } catch (error) {
@@ -2509,8 +2536,8 @@ program
           status: 'failed',
           dcl: { events: [], errors: [error.message] }
         });
-        const notificationPath = await saveNotificationEmail(options.output || 'reports', notificationEmailToHTML(report));
-        console.log(chalk.gray(`   📧 Failure notification written to ${notificationPath}`));
+        const saved = await saveNotificationEmail(options.output || 'reports', notificationEmailToHTML(report));
+        console.log(chalk.gray(`   📧 Failure notification written to ${saved.path} (latest copy: ${saved.latestPath})`));
       } catch (notifyError) {
         console.error(chalk.gray(`   (also failed to write failure notification: ${notifyError.message})`));
       }
@@ -2657,6 +2684,8 @@ program
     
     console.log(chalk.blue(`\n🔐 Running DCL migrations on ${adapters.length} instance(s)...\n`));
 
+    // One id for this run's files: notification-<instance>-<runId>.html …
+    const runId = newRunId();
     let hasErrors = false;
     const dclChecker = new DCLIdempotentChecker({ verbose: false });
     const summaryInstances = [];
@@ -2733,9 +2762,9 @@ program
                 skipped: hasSkipped ? result.skipped : undefined
               }
             });
-            const notificationPath = await saveNotificationEmail(options.output, notificationEmailToHTML(report), instanceNotificationFileName(name));
-            summary.notificationFile = notificationPath;
-            console.log(chalk.gray(`      📧 Notification email written to ${notificationPath}`));
+            const saved = await saveNotificationEmail(options.output, notificationEmailToHTML(report), instanceNotificationFileName(name), { runId });
+            summary.notificationFile = saved.path;
+            console.log(chalk.gray(`      📧 Notification email written to ${saved.path}`));
           }
         }
         
@@ -2757,8 +2786,8 @@ program
           environment: process.env.DB_MIGRATE_ENVIRONMENT,
           instances: summaryInstances
         });
-        const summaryPath = await saveNotificationEmail(options.output, multiInstanceSummaryToHTML(summaryReport), 'notification-summary.html');
-        console.log(chalk.gray(`\n📋 Run summary (no passwords) written to ${summaryPath}`));
+        const saved = await saveNotificationEmail(options.output, multiInstanceSummaryToHTML(summaryReport), 'notification-summary.html', { runId });
+        console.log(chalk.gray(`\n📋 Run summary (no passwords) written to ${saved.path} (latest copies: notification-summary.html, notification-<instance>.html)`));
       } catch (summaryError) {
         hasErrors = true;
         console.error(chalk.red(`\n[ERROR] Failed to write run summary: ${summaryError.message}`));

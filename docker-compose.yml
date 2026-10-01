@@ -119,7 +119,9 @@ services:
     volumes:
       - ./test-fixtures:/app/test-fixtures:ro
       - ./reports:/app/reports
-    command: ["test-all", "-o", "/app/reports", "--pattern", "test-fixtures/**/config.js"]
+    # --sanity-check: also runs every migration with Pre/Post-Checks, incl. the
+    # sanity-rollback fixtures whose Post-Check fails by design (real rollback)
+    command: ["test-all", "--sanity-check", "-o", "/app/reports", "--pattern", "test-fixtures/**/config.js"]
     networks:
       - migrate-network
 

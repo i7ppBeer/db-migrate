@@ -5,6 +5,7 @@
 
 import fs from 'fs/promises';
 import path from 'path';
+import crypto from 'crypto';
 
 /**
  * Escape HTML special characters to prevent XSS
@@ -514,20 +515,50 @@ export function notificationEmailToHTML(report) {
 }
 
 /**
- * Save a notification email to <outputDir>/<fileName>. Unlike saveSyncReport,
- * the file name is fixed (not timestamped) by default — this file is meant to
- * be fetched by a fixed, known path (e.g. `kubectl exec ... cat`) right after
- * the run, not archived alongside other reports.
+ * An id for one run: UTC timestamp + random suffix, e.g. 20261001T105432Z-3f9a.
+ * Sorts chronologically; the suffix keeps two runs in the same second apart.
+ */
+export function newRunId(now = new Date()) {
+  const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  return `${stamp}-${crypto.randomBytes(2).toString('hex')}`;
+}
+
+/**
+ * Save a notification email. Two files, both owner-only (0600) since a DCL
+ * email holds plaintext passwords:
+ *
+ *   <name>-<runId>.html   this run's own copy — created exclusively, so no
+ *                         later or concurrent run can overwrite it (and lose
+ *                         the passwords in it)
+ *   <name>.html           the latest run's copy, at a fixed path for anything
+ *                         that fetches it right after the run (e.g.
+ *                         `kubectl exec … cat /app/reports/notification.html`);
+ *                         replaced atomically, never half-written
+ *
  * @param {string} outputDir
  * @param {string} html - from notificationEmailToHTML()
- * @param {string} [fileName]
- * @returns {Promise<string>} path written
+ * @param {string} [fileName] - the fixed "latest" name, e.g. notification-prod-tw.html
+ * @param {Object} [opts]
+ * @param {string} [opts.runId] - share one id across a run's files (dcl-all)
+ * @returns {Promise<{path: string, latestPath: string, runId: string}>}
  */
-export async function saveNotificationEmail(outputDir, html, fileName = 'notification.html') {
+export async function saveNotificationEmail(outputDir, html, fileName = 'notification.html', { runId = newRunId() } = {}) {
   await fs.mkdir(outputDir, { recursive: true });
-  const filePath = path.join(outputDir, fileName);
-  await fs.writeFile(filePath, html, 'utf-8');
-  return filePath;
+  const ext = path.extname(fileName) || '.html';
+  const base = fileName.slice(0, fileName.length - path.extname(fileName).length);
+
+  const runPath = path.join(outputDir, `${base}-${runId}${ext}`);
+  await fs.writeFile(runPath, html, { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
+
+  const latestPath = path.join(outputDir, fileName);
+  const tmpPath = path.join(outputDir, `.${fileName}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`);
+  try {
+    await fs.writeFile(tmpPath, html, { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
+    await fs.rename(tmpPath, latestPath);
+  } finally {
+    await fs.rm(tmpPath, { force: true }).catch(() => {});
+  }
+  return { path: runPath, latestPath, runId };
 }
 
 /**

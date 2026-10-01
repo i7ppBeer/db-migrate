@@ -12,7 +12,8 @@ import path from 'path';
 import {
   buildSyncReport, syncReportToHTML, saveSyncReport,
   buildDCLNotificationEvents, passwordExpiryNote, notificationEmailToHTML, buildNotificationEmail,
-  buildMultiInstanceSummary, multiInstanceSummaryToHTML, partialApplyNote
+  buildMultiInstanceSummary, multiInstanceSummaryToHTML, partialApplyNote,
+  saveNotificationEmail, newRunId
 } from '../src/core/reporter.js';
 import { diffSchemaSnapshots } from '../src/core/schema-diff.js';
 
@@ -339,5 +340,49 @@ describe('partial-apply note in DDL failure emails', () => {
       ddl: { applied: [], errors: ['Validation failed — nothing was applied'] }
     }));
     expect(refusedBeforeRun).not.toContain('may have been partly applied');
+  });
+});
+
+describe('saveNotificationEmail', () => {
+  let dir;
+  beforeEach(async () => { dir = await fs.mkdtemp(path.join(os.tmpdir(), 'db-migrate-notify-')); });
+  afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+
+  it('keeps every run\'s email: a later run never overwrites an earlier one', async () => {
+    const first = await saveNotificationEmail(dir, '<p>run 1 password</p>');
+    const second = await saveNotificationEmail(dir, '<p>run 2 password</p>');
+
+    expect(first.path).not.toBe(second.path);
+    expect(await fs.readFile(first.path, 'utf-8')).toBe('<p>run 1 password</p>');
+    expect(await fs.readFile(second.path, 'utf-8')).toBe('<p>run 2 password</p>');
+    // The fixed path holds the latest run
+    expect(second.latestPath).toBe(path.join(dir, 'notification.html'));
+    expect(await fs.readFile(second.latestPath, 'utf-8')).toBe('<p>run 2 password</p>');
+  });
+
+  it('names run files after the fixed name and a sortable run id', async () => {
+    const saved = await saveNotificationEmail(dir, 'x', 'notification-prod-tw.html', { runId: '20261001T105432Z-3f9a' });
+    expect(path.basename(saved.path)).toBe('notification-prod-tw-20261001T105432Z-3f9a.html');
+    expect(newRunId(new Date('2026-10-01T10:54:32.123Z'))).toMatch(/^20261001T105432Z-[0-9a-f]{4}$/);
+  });
+
+  it('writes both files readable by the owner only', async () => {
+    if (process.platform === 'win32') return;
+    const saved = await saveNotificationEmail(dir, 'secret');
+    expect((await fs.stat(saved.path)).mode & 0o777).toBe(0o600);
+    expect((await fs.stat(saved.latestPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it('concurrent runs each keep their own file, and leave no temp files behind', async () => {
+    const saves = await Promise.all(Array.from({ length: 10 }, (_, i) => saveNotificationEmail(dir, `run ${i}`)));
+    expect(new Set(saves.map(s => s.path)).size).toBe(10);
+    const names = await fs.readdir(dir);
+    expect(names.filter(n => n.endsWith('.tmp'))).toEqual([]);
+    expect(names).toHaveLength(11); // 10 run files + notification.html
+  });
+
+  it('refuses to overwrite an existing run file (same run id twice)', async () => {
+    await saveNotificationEmail(dir, 'first', 'notification.html', { runId: 'same' });
+    await expect(saveNotificationEmail(dir, 'second', 'notification.html', { runId: 'same' })).rejects.toThrow(/EEXIST/);
   });
 });

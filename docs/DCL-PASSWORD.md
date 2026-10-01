@@ -48,16 +48,21 @@ Setting a character-set variable to an empty string is an error, not "use the de
 `dcl`, `dcl-all`, and `sync` all write a notification email after a run that changed anything:
 
 ```bash
-node src/cli.js dcl -c <config>              # writes reports/notification.html
-node src/cli.js dcl -c <config> -o /app/out  # writes /app/out/notification.html
-node src/cli.js dcl-all -c <config>          # writes reports/notification-<instance>.html per instance
-                                             #   + reports/notification-summary.html (no passwords)
-node src/cli.js sync -c <config>             # writes reports/notification.html (DDL section)
+node src/cli.js dcl -c <config>              # reports/notification-<runId>.html  + latest copy reports/notification.html
+node src/cli.js dcl -c <config> -o /app/out  # same, under /app/out/
+node src/cli.js dcl-all -c <config>          # reports/notification-<instance>-<runId>.html per instance
+                                             #   + reports/notification-summary-<runId>.html (no passwords)
+                                             #   + latest copies notification-<instance>.html / notification-summary.html
+node src/cli.js sync -c <config>             # reports/notification-<runId>.html + notification.html (DDL section)
 ```
+
+`<runId>` is the run's UTC time plus a random suffix, e.g. `20261001T105432Z-3f9a` — files sort chronologically, and one `dcl-all` run's files share it.
 
 `-o, --output <dir>` defaults to `reports/` when not given — the file is **always** written when there's anything to report, so a generated or rotated password is never silently lost just because nobody remembered the flag. This is deliberately independent of `sync`'s separate `-o`-gated JSON+HTML report (`saveSyncReport`) — that one stays opt-in.
 
-The file name is fixed (`notification.html`, not timestamped) because it's meant to be fetched from a known path right after the run — e.g. `kubectl exec <pod> -- cat /app/reports/notification.html` from an external orchestrator — not archived alongside other reports.
+Every run writes **its own file** (`notification-<runId>.html`), created exclusively — a later or concurrent run can never overwrite it, so a generated password can't be lost to the next run. `notification.html` is additionally replaced (atomically) with the latest run's email, so anything that fetches from a fixed path right after the run keeps working — e.g. `kubectl exec <pod> -- cat /app/reports/notification.html` from an external orchestrator. If two runs share an output directory at the same time, `notification.html` holds whichever finished last; each run's own file is still intact (the console prints its exact path).
+
+Both files are written **readable by the owner only** (mode `0600`), since a DCL email contains plaintext passwords.
 
 ### Event types
 
@@ -83,7 +88,7 @@ Add `PASSWORD EXPIRE` for accounts a person logs into. Leave it off for applicat
 
 Each instance gets its **own** file, `notification-<instance name>.html`, with its own passwords — the same account name on two instances gets two different passwords, and one instance's password doesn't work on the other. The header shows the instance name **and** `host:port · db <name>`, so instances that share a database name (e.g. one `app` database per region) can't be confused.
 
-`notification-summary.html` is written once per run: per instance, its status, `host:port`, which accounts changed and which file holds the details — **no passwords**, so it can go to whoever runs the rollout while each instance's file goes only to that instance's owner. A failed instance doesn't stop the others; the summary marks it failed and the command exits non-zero.
+`notification-summary-<runId>.html` is written once per run: per instance, its status, `host:port`, which accounts changed and which file holds the details — **no passwords**, so it can go to whoever runs the rollout while each instance's file goes only to that instance's owner. A failed instance doesn't stop the others; the summary marks it failed and the command exits non-zero.
 
 Instance names must be unique — two instances with the same name would write the same file and overwrite each other's passwords, so `dcl-all` refuses to start. For different accounts per instance, give each instance its own `migrationsDir` — see [MULTI-INSTANCE.md](MULTI-INSTANCE.md).
 
@@ -182,7 +187,7 @@ Set `DCL_PASSWORD_EXPIRY_DAYS` (default `7`) to control the expiry window. This 
 ## Security Best Practices
 
 1. **Never commit `reports/`** — it's already in `.gitignore`; don't override that.
-2. **Treat `notification.html` as a one-time secret in transit** — read it, deliver it to wherever it needs to go, then don't keep a long-lived copy around. Nothing in this tool archives it for you.
+2. **Treat notification files as one-time secrets in transit** — read them, deliver them to wherever they need to go, then delete them. Because each run now keeps its own file, they **accumulate** in a persistent output directory (e.g. a bind-mounted `reports/`): delete them after delivery. In a Kubernetes Job the output directory is the pod's `emptyDir`, which goes away with the pod.
 3. **Rotate credentials** regularly by adding an `ALTER USER` DCL migration — that always produces a `password_changed` event regardless of whether the account already existed.
 4. **Idempotency** — the checksum is computed from the original file (with `CHANGE_ME_ON_FIRST_LOGIN` intact), so password rotation does **not** trigger a re-run automatically.
 5. **Run `dcl:verify` / `dcl:verify-all` / `test-all` against a scratch database.** They really execute the files (twice) to check idempotency, without recording checksums or writing an email. Accounts they create get a throwaway random password that nobody sees — so a later `dcl` run reports them as "already existed, password unchanged". If you did verify against a real database, rotate those accounts afterwards. (Previously the placeholder wasn't resolved on MariaDB, and such accounts ended up with the literal password `CHANGE_ME_ON_FIRST_LOGIN`.)

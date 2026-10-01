@@ -47,3 +47,33 @@ export function checkFileExpectation(fileResult, expected) {
     ].filter(Boolean).join('; ')
   };
 }
+
+/**
+ * Expected sanity-check outcome declared in a fixture migration:
+ *
+ *   -- @expect-sanity: rollback      (SQL)
+ *   // @expect-sanity: rollback      (JS)
+ *
+ * meaning: with --sanity-check, its Post-Check is meant to fail and the
+ * migration must be rolled back. Returns 'rollback' or null.
+ */
+export function parseExpectedSanity(content) {
+  const m = /^\s*(?:--|\/\/)\s*@expect-sanity\s*:\s*(\S+)/m.exec(content || '');
+  return m && m[1].toLowerCase() === 'rollback' ? 'rollback' : null;
+}
+
+/**
+ * Compare one migration's sanity result with its expectation.
+ * @param {Object} sr - an entry of upWithSanityCheck().sanityResults
+ * @param {'rollback'|null} expected
+ * @param {{ stillPending: boolean }} after - whether the file is pending after the run
+ */
+export function checkSanityExpectation(sr, expected, { stillPending }) {
+  if (expected !== 'rollback') {
+    return sr.success ? { ok: true, message: null } : { ok: false, message: sr.error || 'sanity check failed' };
+  }
+  if (sr.success) return { ok: false, message: 'expected the Post-Check to fail and the migration to be rolled back, but it passed' };
+  if (!sr.rolledBack) return { ok: false, message: `expected a rollback, but it was not rolled back${sr.critical ? ' (rollback itself failed)' : ''}: ${sr.error}` };
+  if (!stillPending) return { ok: false, message: 'rolled back, but still recorded as applied in the changelog' };
+  return { ok: true, message: null };
+}
