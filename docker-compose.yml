@@ -1,6 +1,6 @@
 # ============================================================
 # Docker Compose for Database Migration Testing
-# Includes: MongoDB, MariaDB, Migration Runner
+# Includes: MongoDB, MariaDB, the test-all runner and the `migrate` CLI service
 # ============================================================
 
 services:
@@ -44,50 +44,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    networks:
-      - migrate-network
-
-  # ──────────────────────────────────────────────────────────
-  # Migration Runner - MongoDB
-  # ──────────────────────────────────────────────────────────
-  runner-mongodb:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: migrate-runner-mongodb
-    depends_on:
-      mongodb:
-        condition: service_healthy
-    environment:
-      - DB_TYPE=mongodb
-      - DB_HOST=mongodb
-      - DB_PORT=27017
-      - DB_NAME=migrate_test
-    volumes:
-      - ./test-fixtures/mongodb/test-success:/app/migrations:ro
-    networks:
-      - migrate-network
-
-  # ──────────────────────────────────────────────────────────
-  # Migration Runner - MariaDB
-  # ──────────────────────────────────────────────────────────
-  runner-mariadb:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: migrate-runner-mariadb
-    depends_on:
-      mariadb:
-        condition: service_healthy
-    environment:
-      - DB_TYPE=mariadb
-      - DB_HOST=mariadb
-      - DB_PORT=3306
-      - DB_NAME=migrate_test
-      - DB_USER=migrate
-      - DB_PASSWORD=migratepass
-    volumes:
-      - ./test-fixtures/mariadb/test-success:/app/migrations:ro
     networks:
       - migrate-network
 

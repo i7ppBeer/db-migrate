@@ -3,7 +3,7 @@
 > Unified DDL + DCL migration tool for MongoDB and MariaDB/MySQL — versioned schema migrations, repeatable account/permission management, multi-instance rollout, and production guardrails (lock-wait protection, dangerous-operation validation, sanity checks) behind one CLI.
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D20-green.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22.12-green.svg)](https://nodejs.org/)
 [![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](package.json)
 
 New to this tool? [QUICKSTART.md](QUICKSTART.md) is a task-oriented walkthrough ("I want to create a migration", "I want to add a DB account", …). This README is the reference: what the tool does, every command, every config shape, and where the deeper docs live.
@@ -39,7 +39,7 @@ cd db-migrate
 npm install
 ```
 
-Requires Node.js ≥ 20. For local development against real databases you'll also want Docker (see below) — on Windows that means Docker Desktop with the WSL2 backend enabled (`wsl --install`, since Windows Home has no Hyper-V).
+Requires Node.js ≥ 22.12 (CI and the Docker image use Node 24 LTS; Node 20 reached end-of-life in April 2026). For local development against real databases you'll also want Docker (see below) — on Windows that means Docker Desktop with the WSL2 backend enabled (`wsl --install`, since Windows Home has no Hyper-V).
 
 ---
 

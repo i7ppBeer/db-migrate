@@ -13,7 +13,7 @@
   wsl --install
   ```
   After the reboot, just start Docker Desktop (it registers the `docker-desktop` WSL2 distro automatically).
-- Or: local Node.js ≥ 20 with a reachable MariaDB/MongoDB of your own.
+- Or: local Node.js ≥ 22.12 with a reachable MariaDB/MongoDB of your own.
 
 Start the test databases:
 
