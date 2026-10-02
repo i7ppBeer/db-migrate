@@ -215,15 +215,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # A release tag must match package.json's version, or the image would
-      # be published under a version number the code doesn't report.
-      - name: Check release tag matches package.json
+      # A release tag must match package.json's version (or the image would be
+      # published under a version number the code doesn't report) and must
+      # have its release notes in CHANGELOG.md — checked before anything is
+      # pushed, so a tag without notes publishes nothing.
+      - name: Check release tag (package.json version, CHANGELOG.md notes)
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           pkg="$(node -p "require('./package.json').version")"
           tag="${GITHUB_REF_NAME#v}"
           if [ "$pkg" != "$tag" ]; then
             echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${pkg} — bump package.json (and the CLI's .version()) first, or tag v${pkg}."
+            exit 1
+          fi
+          if ! node scripts/changelog-section.mjs "$tag" > /dev/null; then
+            echo "::error::CHANGELOG.md needs a non-empty \"## [${tag}]\" section with the release notes (see Releasing in CHANGELOG.md)."
             exit 1
           fi
 
@@ -271,7 +277,46 @@ jobs:
           echo "Digest: ${{ steps.build.outputs.digest }}"
 
   # ============================================================
-  # Job 4: Deploy to Staging
+  # Job 4: GitHub Release (release tags only)
+  # ============================================================
+  # The tag's CHANGELOG.md section becomes the release notes the team reads;
+  # the image's pull command and digest are appended.
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Create the release from CHANGELOG.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          DIGEST: ${{ needs.build.outputs.image_digest }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          node scripts/changelog-section.mjs "$version" > notes.md
+          image="$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')"
+          {
+            echo
+            echo '---'
+            echo
+            echo '### Image'
+            echo
+            echo '```'
+            echo "docker pull ${image}:${version}"
+            echo '```'
+            echo
+            echo "Digest \`${DIGEST}\` — also tagged \`${version%.*}\` and with the commit SHA."
+          } >> notes.md
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+
+  # ============================================================
+  # Job 5: Deploy to Staging
   # ============================================================
   deploy-staging:
     name: Deploy to Staging
@@ -349,7 +394,7 @@ jobs:
           kubectl logs "job/db-migrate-${PROJECT}-sync-${CONTENT_HASH:0:7}" -n "$NAMESPACE" --tail=100
 
   # ============================================================
-  # Job 5: Deploy to Production (Manual Approval)
+  # Job 6: Deploy to Production (Manual Approval)
   # ============================================================
   deploy-production:
     name: Deploy to Production

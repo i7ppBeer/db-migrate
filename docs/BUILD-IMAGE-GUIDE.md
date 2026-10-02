@@ -198,7 +198,17 @@ The `build` job pushes `ghcr.io/<owner>/db-migrate/db-migrate` (for this repo: `
 | push to `release/x` | `release-x`, `<commit sha>` |
 | push of tag `v2.2.0` | `2.2.0`, `2.2`, `<commit sha>` |
 
-Pin deployments to a version tag (`2.2.0`) or a commit SHA — `latest` and `main` move with every push to main. To release a version, bump `version` in `package.json` (and `.version()` in `src/cli.js`), merge, then `git tag v2.2.0 && git push origin v2.2.0`. The build fails if the tag doesn't match `package.json`, so an image is never published under a version number the code doesn't report. Version tags are written only by tag pushes; later main builds never overwrite them.
+Pin deployments to a version tag (`2.2.0`) or a commit SHA — `latest` and `main` move with every push to main. Version tags are written only by tag pushes; later main builds never overwrite them.
+
+#### Releasing
+
+Every tag is a release with team-facing notes (see "Releasing" at the end of [CHANGELOG.md](../CHANGELOG.md)):
+
+1. Move `## [Unreleased]` in `CHANGELOG.md` into `## [2.2.0] - YYYY-MM-DD` — what changed, new features, how to upgrade, caveats, in English.
+2. Bump `version` in `package.json` and `.version()` in `src/cli.js`; merge.
+3. `git tag v2.2.0 && git push origin v2.2.0`.
+
+Before pushing anything, the build checks the tag matches `package.json` and that `CHANGELOG.md` has a non-empty `## [2.2.0]` section (`node scripts/changelog-section.mjs 2.2.0` shows what will be published). After the image is pushed, the `release` job creates the GitHub Release from that section, with the image's pull command and digest appended.
 
 #### Setup steps
 

@@ -88,9 +88,9 @@ Two things deliberately have **no** fallback:
 - **MariaDB credentials.** `user`/`password` come from the config or `MARIADB_USER`/`MARIADB_PASSWORD`; if neither is set, the run stops with an error instead of trying `root` with a well-known password. (Use `password: ''` explicitly for an account without one.)
 - **Creating the database.** If the configured database doesn't exist, the run stops — a missing database almost always means the wrong host or a typo, and creating it would quietly apply every migration to a brand-new empty database. For a genuinely new environment (or local/test setups), set `createDatabaseIfMissing: true`. On MongoDB this is checked with `listDatabases`; an account without that right gets a warning instead of a refusal.
 
-### Upgrading from 2.1.0
+### Upgrading from 2.0.0
 
-These used to be silent and now stop the run:
+The full, step-by-step upgrade guide and release notes for the team are in **[CHANGELOG.md](CHANGELOG.md)** (`[Unreleased]` until the next release is tagged). In short, these used to be silent and now stop the run:
 
 | Before | Now |
 |---|---|
@@ -414,6 +414,7 @@ The full index, grouped by task, is **[docs/README.md](docs/README.md)**. The on
 
 | Document | Description |
 |---|---|
+| [CHANGELOG.md](CHANGELOG.md) | Release notes per version: what changed, new features, how to upgrade, caveats |
 | [DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md) | **Start here for production** — what causes lock-ups, the protections, pre-flight checklist, abort/rollback runbook |
 | [CLI-USAGE-GUIDE.md](docs/CLI-USAGE-GUIDE.md) | Every command, in `node` and `docker compose run` form |
 | [USER-GUIDE-MARIADB.md](docs/USER-GUIDE-MARIADB.md) / [USER-GUIDE-MONGODB.md](docs/USER-GUIDE-MONGODB.md) | Writing migration files |
