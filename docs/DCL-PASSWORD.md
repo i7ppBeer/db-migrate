@@ -64,7 +64,7 @@ Every run writes **its own file** (`notification-<runId>.html`), created exclusi
 
 Both files are written **readable by the owner only** (mode `0600`), since a DCL email contains plaintext passwords.
 
-**Retention.** Per-run copies would otherwise pile up — each holding passwords — so after writing, only the newest `notifications.keepRuns` copies **of each file name** are kept (default `20`; `0` keeps every copy). The latest copy (`notification.html`, `notification-<instance>.html`, `notification-summary.html`) is never removed, and one name's copies never count against another's (`notification-prod-tw-*` is not pruned by a `notification-*` run). An invalid value or a failed delete only prints a warning: cleanup never costs a run its own email.
+**Retention.** Per-run copies would otherwise pile up — each holding passwords — so after writing, only the newest `notifications.keepRuns` copies **of each file name** are kept (default `20`; `0` keeps every copy). The latest copy (`notification.html`, `notification-<instance>.html`, `notification-summary.html`) is never removed, and one name's copies never count against another's (`notification-prod-tw-*` is not pruned by a `notification-*` run). An invalid value or a failed delete only prints a warning: cleanup never costs a run its own email. The same setting also prunes `sync -o`'s `sync-report-<timestamp>.json` / `.html` files (newest `keepRuns` of each format).
 
 ```javascript
 // config.js

@@ -187,6 +187,27 @@ export function syncReportToHTML(report) {
 }
 
 /**
+ * Keep only the newest `keepRuns` sync reports (`sync -o`) of each format —
+ * same setting and rules as the notification emails (notifications.keepRuns,
+ * default 20, 0 keeps all). Never throws: a bad setting or failed delete is
+ * returned as a warning.
+ * @returns {Promise<{removed: string[], warning?: string}>}
+ */
+export async function pruneSyncReports(outputDir, keepRuns) {
+  try {
+    const keep = resolveKeepRuns(keepRuns);
+    if (keep === 0) return { removed: [] };
+    const removed = [];
+    for (const ext of ['json', 'html']) {
+      removed.push(...await pruneMatching(outputDir, new RegExp(`^sync-report-(\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-\\d{3}Z)\\.${ext}$`), keep));
+    }
+    return { removed };
+  } catch (error) {
+    return { removed: [], warning: `old sync reports were not cleaned up: ${error.message}` };
+  }
+}
+
+/**
  * Save a sync report to <outputDir>/sync-report-<timestamp>.{json,html}.
  * @param {string} outputDir
  * @param {Object} report - from buildSyncReport()
@@ -609,7 +630,11 @@ const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  * (no run id) is never a candidate. Run ids sort chronologically.
  */
 async function pruneRunCopies(outputDir, base, ext, keep) {
-  const pattern = new RegExp(`^${escapeRegExp(base)}-(\\d{8}T\\d{6}Z-[0-9a-f]{4})${escapeRegExp(ext)}$`);
+  return pruneMatching(outputDir, new RegExp(`^${escapeRegExp(base)}-(\\d{8}T\\d{6}Z-[0-9a-f]{4})${escapeRegExp(ext)}$`), keep);
+}
+
+/** Delete all but the newest `keep` files whose name matches; group 1 is a chronologically sortable key. */
+async function pruneMatching(outputDir, pattern, keep) {
   const copies = (await fs.readdir(outputDir))
     .map(f => ({ f, m: f.match(pattern) }))
     .filter(x => x.m)

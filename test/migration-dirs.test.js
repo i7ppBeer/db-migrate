@@ -66,6 +66,17 @@ describe('migration-dirs', () => {
     ]);
   });
 
+  it('RepeatableRunner.status() says which directory each file is in', async () => {
+    const runner = new RepeatableRunner({});
+    const connection = { execute: async () => [[]] }; // no checksum table yet
+    const status = await runner.status({ dbType: 'mariadb', connection, migrationsDir: [path.join(root, 'shared'), path.join(root, 'prod-tw')] });
+    expect(status.pending.map(p => [p.fileName, path.basename(p.dir)])).toEqual([
+      ['R__01_readonly.sql', 'shared'],
+      ['R__02_tw_app.sql', 'prod-tw'],
+      ['R__03_reporting.sql', 'shared']
+    ]);
+  });
+
   it('a DDL adapter refuses a list of directories', () => {
     expect(() => new BaseAdapter({ migrationsDir: ['a', 'b'] })).toThrow(/only DCL configs/);
     expect(() => new BaseAdapter({ mode: 'repeatable', migrationsDir: ['a', 'b'] })).not.toThrow();

@@ -10,7 +10,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { createAdapter, createAdapters, loadConfig } from './adapters/index.js';
-import { Reporter, buildSyncReport, saveSyncReport, buildNotificationEmail, notificationEmailToHTML, saveNotificationEmail, buildDCLNotificationEvents, buildMultiInstanceSummary, multiInstanceSummaryToHTML, partialApplyNote, newRunId } from './core/reporter.js';
+import { Reporter, buildSyncReport, saveSyncReport, pruneSyncReports, buildNotificationEmail, notificationEmailToHTML, saveNotificationEmail, buildDCLNotificationEvents, buildMultiInstanceSummary, multiInstanceSummaryToHTML, partialApplyNote, newRunId } from './core/reporter.js';
 import { diffSchemaSnapshots, isDiffEmpty } from './core/schema-diff.js';
 import { RepeatableRunner, mongodbHelpers } from './core/repeatable-runner.js';
 import { DCLIdempotentChecker } from './core/dcl-idempotent-checker.js';
@@ -340,7 +340,9 @@ async function enforceValidationGate(adapter, status, options, { report = false 
  * Pre-execution runtime gates (docs/RUNTIME-GATE-PLAN.md), right before
  * anything executes:
  *   R2 — long-open transactions / metadata-lock waits on this database:
- *        refuses unless --allow-open-transactions (logged with a timestamp)
+ *        refuses unless --allow-open-transactions (logged with a timestamp);
+ *        with runtimeGates.requireLockCheck, also refuses when the check
+ *        couldn't run (missing privilege)
  *   R3 — read-only target: refuses, no override (connect to the primary)
  *   R4 — disk/binlog headroom, replication lag, and (MongoDB, for `files`)
  *        index builds / bulk writes on large collections: warnings only
@@ -373,6 +375,19 @@ async function enforceRuntimeGates(adapter, options, { locks = true, disk = true
     throw new Error(message);
   };
 
+  // R2 couldn't run (privilege) and the project says it must
+  const lockCheckSkipped = locks ? r.skipped.find(sk => sk.startsWith('R2 ')) : null;
+  if (lockCheckSkipped && adapter.getRuntimeGateConfig().requireLockCheck) {
+    if (options.allowOpenTransactions && !report) {
+      console.log(chalk.yellow(`   ⚠️  [${new Date().toISOString()}] --allow-open-transactions: proceeding without the R2 check runtimeGates.requireLockCheck asks for`));
+    } else {
+      refuse(`R2: the open-transaction / lock check could not run, and runtimeGates.requireLockCheck is on — ` +
+        `grant the migration account ${adapter.dbType === 'mongodb' ? 'the clusterMonitor role (inprog privilege)' : 'the PROCESS privilege'}, ` +
+        'or rerun with --allow-open-transactions if you have checked the database yourself.');
+      if (report) return;
+    }
+  }
+
   if (r.readOnly) {
     refuse(`R3: ${resolveTargetLabel(adapter)} is read-only (${r.readOnly.reason}) — migrations must run against the writable primary. ` +
       'No override: writing to a read-only node either fails midway or, for privileged accounts, makes a replica diverge.');
@@ -399,6 +414,14 @@ async function enforceRuntimeGates(adapter, options, { locks = true, disk = true
   }
 }
 
+/**
+ * " [shared]" after a DCL file name when migrationsDir lists several
+ * directories — which one the file is in; '' for a single directory.
+ */
+function dirTag(entry, multiDir) {
+  return multiDir && entry.dir ? chalk.gray(` [${path.basename(entry.dir)}]`) : '';
+}
+
 /** Print a `dcl --plan` (see src/core/dcl-plan.js). */
 function printDCLPlan(plan, label) {
   console.log(chalk.blue(`\n[DCL PLAN] ${label} — nothing is executed`));
@@ -406,7 +429,7 @@ function printDCLPlan(plan, label) {
     console.log(chalk.gray(`   All ${plan.upToDate} DCL script(s) are up to date — a run would change nothing.`));
   }
   for (const f of plan.files) {
-    console.log(chalk.cyan(`\n   📄 ${f.fileName} (${f.reason})`));
+    console.log(chalk.cyan(`\n   📄 ${f.fileName} (${f.reason})`) + dirTag(f, plan.multiDir));
     if (f.diffNote) console.log(chalk.gray(`      ${f.diffNote}`));
     if (f.diff) {
       for (const d of f.diff) {
@@ -609,8 +632,8 @@ function notificationOptions(config, extra = {}) {
   return { keepRuns: config?.notifications?.keepRuns, ...extra };
 }
 
-function printNotificationCleanup(saved) {
-  if (saved.removed?.length) console.log(chalk.gray(`   🧹 Removed ${saved.removed.length} older notification cop${saved.removed.length === 1 ? 'y' : 'ies'} (notifications.keepRuns)`));
+function printNotificationCleanup(saved, what = 'notification') {
+  if (saved.removed?.length) console.log(chalk.gray(`   🧹 Removed ${saved.removed.length} older ${what} cop${saved.removed.length === 1 ? 'y' : 'ies'} (notifications.keepRuns)`));
   if (saved.warning) console.log(chalk.yellow(`   ⚠️  ${saved.warning}`));
 }
 
@@ -895,6 +918,7 @@ addAllowOptions(syncCommand)
       try {
         const files = await saveSyncReport(options.output, report);
         console.log(chalk.gray(`\n📄 Report saved: ${files.join(', ')}`));
+        printNotificationCleanup(await pruneSyncReports(options.output, adapter?.config?.notifications?.keepRuns), 'sync report');
       } catch (reportError) {
         console.error(chalk.red(`\n[ERROR] Failed to save report: ${reportError.message}`));
       }
@@ -2606,7 +2630,7 @@ program
         const status = await runner.status(context);
         console.log(chalk.blue('\n[DRY RUN] Would apply these DCL migrations:'));
         for (const p of status.pending) {
-          console.log(`   ${p.fileName} (${p.reason})`);
+          console.log(`   ${p.fileName} (${p.reason})${dirTag(p, Array.isArray(migrationsDir))}`);
         }
         console.log(chalk.gray(`\n   Up-to-date: ${status.upToDate.length}`));
         return;
@@ -2637,7 +2661,7 @@ program
         console.log(chalk.green(`\n✅ Applied ${result.applied.length} DCL migration(s):`));
         for (const m of result.applied) {
           const annotationInfo = m.annotations?.allowDangerous ? chalk.yellow(' [allow-dangerous]') : '';
-          console.log(`   ${m.fileName} (${m.reason})${annotationInfo}`);
+          console.log(`   ${m.fileName} (${m.reason})${dirTag(m, Array.isArray(migrationsDir))}${annotationInfo}`);
         }
       } else if (!result.skipped || result.skipped.length === 0) {
         console.log(chalk.gray('\n   All DCL migrations are up-to-date.'));
@@ -2752,14 +2776,15 @@ program
       console.log(chalk.gray('─'.repeat(50)));
       
       console.log(chalk.yellow(`\n⏳ Pending (${status.pending.length}):`));
+      const multiDir = Array.isArray(migrationsDir);
       for (const p of status.pending) {
-        console.log(`   ${p.fileName}`);
+        console.log(`   ${p.fileName}${dirTag(p, multiDir)}`);
         console.log(chalk.gray(`      Reason: ${p.reason}`));
       }
       
       console.log(chalk.green(`\n✅ Up-to-date (${status.upToDate.length}):`));
       for (const u of status.upToDate) {
-        console.log(`   ${u.fileName}`);
+        console.log(`   ${u.fileName}${dirTag(u, multiDir)}`);
         console.log(chalk.gray(`      Applied: ${u.appliedAt}`));
       }
       printOrphanedDCL(status.orphaned);
@@ -2898,7 +2923,7 @@ program
           const status = await runner.status(context);
           console.log(chalk.blue(`\n[${name}] ${target} — would apply ${status.pending.length} DCL migration(s) from ${describeDirs(migrationsDir)}`));
           for (const p of status.pending) {
-            console.log(chalk.gray(`   - ${p.fileName} (${p.reason})`));
+            console.log(chalk.gray(`   - ${p.fileName} (${p.reason})`) + dirTag(p, Array.isArray(migrationsDir)));
           }
         } else {
           console.log(chalk.blue(`\n[${name}] ${target} — running DCL migrations from ${describeDirs(migrationsDir)}...`));
@@ -2910,7 +2935,7 @@ program
           if (result.applied.length > 0) {
             console.log(chalk.green(`   ✅ Applied ${result.applied.length} DCL migration(s)`));
             for (const m of result.applied) {
-              console.log(chalk.gray(`      - ${m.fileName} (${m.reason})`));
+              console.log(chalk.gray(`      - ${m.fileName} (${m.reason})`) + dirTag(m, Array.isArray(migrationsDir)));
             }
           } else if (result.errors.length === 0) {
             console.log(chalk.gray(`   All DCL migrations are up-to-date.`));
@@ -3030,7 +3055,7 @@ program
         
         if (status.pending.length > 0) {
           for (const p of status.pending) {
-            console.log(chalk.gray(`     - ${p.fileName} (${p.reason})`));
+            console.log(chalk.gray(`     - ${p.fileName} (${p.reason})`) + dirTag(p, Array.isArray(instanceConfig.migrationsDir)));
           }
         }
         

@@ -89,11 +89,11 @@ export class RepeatableRunner {
       f => f.startsWith('R__') && (f.endsWith('.sql') || f.endsWith('.js')));
 
     const result = [];
-    for (const { fileName, filePath } of repeatableFiles) {
+    for (const { fileName, filePath, dir } of repeatableFiles) {
       const content = await fs.readFile(filePath, 'utf-8');
       const checksum = this.calculateChecksum(content);
       const annotations = this.parseFileAnnotations(content, fileName);
-      result.push({ fileName, filePath, content, checksum, annotations });
+      result.push({ fileName, filePath, dir, content, checksum, annotations });
     }
 
     return result;
@@ -721,6 +721,7 @@ export class RepeatableRunner {
       if (!stored || stored.checksum !== file.checksum) {
         pending.push({
           fileName: file.fileName,
+          dir: file.dir,
           reason: stored ? 'checksum changed' : 'new file',
           currentChecksum: file.checksum,
           storedChecksum: stored?.checksum || null,
@@ -730,6 +731,7 @@ export class RepeatableRunner {
       } else {
         upToDate.push({
           fileName: file.fileName,
+          dir: file.dir,
           checksum: file.checksum,
           appliedAt: stored.appliedAt
         });
@@ -857,6 +859,7 @@ export class RepeatableRunner {
 
         result.applied.push({
           fileName: file.fileName,
+          dir: file.dir,
           reason: stored ? 'checksum changed' : 'new file',
           annotations: file.annotations
         });
@@ -997,6 +1000,7 @@ export class RepeatableRunner {
 
         result.applied.push({
           fileName: file.fileName,
+          dir: file.dir,
           reason: stored ? 'checksum changed' : 'new file',
           annotations: file.annotations
         });

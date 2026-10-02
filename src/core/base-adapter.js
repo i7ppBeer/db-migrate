@@ -60,7 +60,11 @@ export const RUNTIME_GATE_DEFAULTS = {
   // R4: a pending MongoDB migration running an index build or a bulk
   // update/delete on a collection with at least this many documents is
   // reported (never blocks); 0 turns the check off
-  largeCollectionDocs: 1000000
+  largeCollectionDocs: 1000000,
+  // R2: refuse when the open-transaction / lock check itself couldn't run
+  // (missing PROCESS / clusterMonitor privilege) instead of skipping it —
+  // for production, where "skipped" must not quietly mean "unchecked"
+  requireLockCheck: false
 };
 
 /** Never relaxable via validation.rules: the file couldn't run at all. */

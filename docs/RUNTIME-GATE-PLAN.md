@@ -153,6 +153,14 @@ privilege (MariaDB) / `inprog` (MongoDB, e.g. `clusterMonitor`); without it the 
 reported as **skipped**, not passed, and the run continues. MariaDB without `PROCESS`
 may also see only its own sessions in `PROCESSLIST`.
 
+For production, where "skipped" shouldn't quietly mean "unchecked", set
+`runtimeGates.requireLockCheck: true`: a run whose R2 check couldn't execute is then
+refused (`--dry-run` reports it), with a message naming the privilege to grant.
+`--allow-open-transactions` still proceeds, logged with a timestamp. Only R2 is covered:
+it is the one blocking check that a missing privilege can skip — R3's writability check
+always runs, and R4's checks are warnings whose "skipped" is often just the environment
+(binary logging off, a server that doesn't report disk usage).
+
 **Found while building this**: the tool's own startup could get stuck in exactly this
 situation. `ensureChangelogTable()` ran `CREATE DATABASE IF NOT EXISTS` on every connect
 and `status()`, and that statement requests an *exclusive* schema metadata lock even
@@ -245,7 +253,7 @@ seen. A file that can't be read or counted is listed as skipped.
 
 ```javascript
 // config.js — all optional
-runtimeGates: { longTransactionSec: 60, replicationLagWarnSec: 30, binlogWarnMb: 10240, diskUsageWarnPercent: 90, largeCollectionDocs: 1000000 }
+runtimeGates: { longTransactionSec: 60, replicationLagWarnSec: 30, binlogWarnMb: 10240, diskUsageWarnPercent: 90, largeCollectionDocs: 1000000, requireLockCheck: false }
 ```
 
 ---

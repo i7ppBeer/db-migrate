@@ -164,7 +164,8 @@ export async function buildDCLPlan(runner, adapter, context) {
       }
       accounts.push({ account: a.key, statement: a.kind || null, ...state, password: passwordOutcome(a, state.exists) });
     }
-    files.push({ fileName: p.fileName, reason: p.reason, diff, diffNote, accounts });
+    files.push({ fileName: p.fileName, dir: p.dir, reason: p.reason, diff, diffNote, accounts });
   }
-  return { files, orphaned: status.orphaned || [], upToDate: status.upToDate.length };
+  // multiDir: migrationsDir lists several directories, so say where each file is
+  return { files, orphaned: status.orphaned || [], upToDate: status.upToDate.length, multiDir: Array.isArray(context.migrationsDir) };
 }

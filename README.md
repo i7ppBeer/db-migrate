@@ -114,7 +114,7 @@ These used to be silent and now stop the run:
 | MongoDB: an apostrophe in a comment or a nested `{ … }` in `up()` cut the validated body short, hiding later calls | the whole body is validated — some migrations that used to pass now need an `@allow` |
 | `status`, `up --dry-run`, `dcl:status`, `dcl --plan` created the changelog/checksum table and backfilled checksums | read-only — they work with a `SELECT`-only account and change nothing |
 | `DROP DATABASE` in Up was reported under two codes (`DROP_DATABASE` + `DROP_SCHEMA`, or `DROP_DATABASE` + `DROP_DATABASE_CMD` on MongoDB), so `@allow: DROP_DATABASE` was never enough | one code per form; `@allow: DROP_DATABASE` releases `DROP DATABASE` / `.dropDatabase()` |
-| Per-run notification copies accumulated forever | only the newest `notifications.keepRuns` (default 20) of each name are kept; the latest copy always stays |
+| Per-run notification copies (and `sync -o` reports) accumulated forever | only the newest `notifications.keepRuns` (default 20) of each name are kept; the latest copy always stays |
 
 ### Multi-Instance
 
@@ -238,6 +238,8 @@ export default {
 One known-slow migration (e.g. a large index build) can get its own limit without loosening the rest — `// @operation-timeout-ms: 600000` at the top of the file (`0` = no limit for that file).
 
 Before `up`/`sync`/`up-all` run, a pending MongoDB migration that builds an index or runs `updateMany`/`deleteMany`/`bulkWrite` on a collection with 1,000,000+ documents gets a warning naming the collection's size and the time limit that will apply (`runtimeGates.largeCollectionDocs` to change the threshold, `0` to turn it off). It never blocks.
+
+Without the privilege the open-transaction check (R2) needs — `PROCESS` on MariaDB, `clusterMonitor` on MongoDB — it is skipped with a notice. For production, `runtimeGates: { requireLockCheck: true }` refuses such a run instead.
 
 See Gate R5 in [docs/RUNTIME-GATE-PLAN.md](docs/RUNTIME-GATE-PLAN.md).
 

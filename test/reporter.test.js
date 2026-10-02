@@ -10,7 +10,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import {
-  buildSyncReport, syncReportToHTML, saveSyncReport,
+  buildSyncReport, syncReportToHTML, saveSyncReport, pruneSyncReports,
   buildDCLNotificationEvents, passwordExpiryNote, notificationEmailToHTML, buildNotificationEmail,
   buildMultiInstanceSummary, multiInstanceSummaryToHTML, partialApplyNote,
   saveNotificationEmail, newRunId
@@ -180,6 +180,31 @@ describe('saveSyncReport', () => {
     expect(files[0]).toContain(nested);
     const stat = await fs.stat(nested);
     expect(stat.isDirectory()).toBe(true);
+  });
+
+  it('pruneSyncReports keeps the newest keepRuns reports of each format and leaves other files alone', async () => {
+    for (let i = 0; i < 4; i++) {
+      for (const ext of ['json', 'html']) await fs.writeFile(path.join(tmpDir, `sync-report-2026-10-0${i + 1}T00-00-00-000Z.${ext}`), '');
+    }
+    await fs.writeFile(path.join(tmpDir, 'notification.html'), '');
+    const { removed } = await pruneSyncReports(tmpDir, 2);
+    expect(removed.sort()).toEqual([
+      'sync-report-2026-10-01T00-00-00-000Z.html', 'sync-report-2026-10-01T00-00-00-000Z.json',
+      'sync-report-2026-10-02T00-00-00-000Z.html', 'sync-report-2026-10-02T00-00-00-000Z.json'
+    ]);
+    expect((await fs.readdir(tmpDir)).sort()).toEqual([
+      'notification.html',
+      'sync-report-2026-10-03T00-00-00-000Z.html', 'sync-report-2026-10-03T00-00-00-000Z.json',
+      'sync-report-2026-10-04T00-00-00-000Z.html', 'sync-report-2026-10-04T00-00-00-000Z.json'
+    ]);
+  });
+
+  it('pruneSyncReports keeps everything with keepRuns: 0 and only warns on a bad value', async () => {
+    const report = buildSyncReport({ dbType: 'mariadb', status: 'applied', durationMs: 1 });
+    await saveSyncReport(tmpDir, report);
+    expect((await pruneSyncReports(tmpDir, 0)).removed).toEqual([]);
+    expect((await pruneSyncReports(tmpDir, 'many')).warning).toMatch(/notifications\.keepRuns must be/);
+    expect(await fs.readdir(tmpDir)).toHaveLength(2);
   });
 });
 
