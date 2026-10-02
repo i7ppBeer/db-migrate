@@ -402,8 +402,21 @@ export function buildNotificationEmail(data) {
     dbType: data.dbType,
     status: data.status ?? 'success',
     ddl: data.ddl ?? null,
-    dcl: data.dcl ?? null
+    dcl: data.dcl ?? null,
+    // [{file, code, approvedBy}] — forbidden operations this run was allowed to execute
+    approvals: data.approvals && data.approvals.length > 0 ? data.approvals : null
   };
+}
+
+function approvalsHTML(approvals) {
+  if (!approvals || approvals.length === 0) return '';
+  const rows = approvals.map(a => {
+    const who = a.approvedBy ? `approved by ${a.approvedBy}` : 'no approver recorded';
+    return `<tr><td bgcolor="#fdf3e3" class="mono" style="background:#fdf3e3;border-left:3px solid #a8752a;padding:8px 12px;font-family:${MONO_FONT};font-size:12px;color:#6e4d1c;">` +
+      `${escapeHtml(a.file)}${a.code ? ` [${escapeHtml(a.code)}]` : ''} — ${escapeHtml(who)}</td></tr>`;
+  }).join(`<tr><td style="height:6px;font-size:1px;line-height:6px;">&nbsp;</td></tr>`);
+  return `<tr><td style="padding:18px 28px 6px;border-top:1px solid #d7ddd4;font-family:Arial,sans-serif;font-size:12px;color:#5b6259;text-transform:uppercase;">Approved exceptions - ${approvals.length} forbidden operation${approvals.length === 1 ? '' : 's'} allowed</td></tr>` +
+    `<tr><td style="padding:0 28px 16px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${rows}</table></td></tr>`;
 }
 
 /**
@@ -509,7 +522,7 @@ export function notificationEmailToHTML(report) {
     `<tr><td style="padding:20px 28px 4px;font-family:Arial,sans-serif;font-size:12px;color:#5b6259;">${meta}</td></tr>` +
     statusHTML +
     ddlFailureHTML + partialRiskHTML + dclFailureHTML + dclSkippedHTML +
-    ddlHTML + dclHTML +
+    ddlHTML + approvalsHTML(report.approvals) + dclHTML +
     `<tr><td style="padding:18px 28px 22px;border-top:1px solid #d7ddd4;font-family:Arial,sans-serif;font-size:11px;color:#8a8f86;">This is an automated migration notification. Do not reply.</td></tr>` +
     `</table></td></tr></table></body></html>`;
 }
@@ -535,14 +548,19 @@ export function newRunId(now = new Date()) {
  *                         `kubectl exec … cat /app/reports/notification.html`);
  *                         replaced atomically, never half-written
  *
+ * Per-run copies pile up (and they hold passwords), so only the newest
+ * `keepRuns` of each name are kept — config notifications.keepRuns, default
+ * 20, 0 keeps all. The latest copy is never removed.
+ *
  * @param {string} outputDir
  * @param {string} html - from notificationEmailToHTML()
  * @param {string} [fileName] - the fixed "latest" name, e.g. notification-prod-tw.html
  * @param {Object} [opts]
  * @param {string} [opts.runId] - share one id across a run's files (dcl-all)
- * @returns {Promise<{path: string, latestPath: string, runId: string}>}
+ * @param {number} [opts.keepRuns] - per-run copies of this name to keep (default 20, 0 = all)
+ * @returns {Promise<{path: string, latestPath: string, runId: string, removed: string[], warning?: string}>}
  */
-export async function saveNotificationEmail(outputDir, html, fileName = 'notification.html', { runId = newRunId() } = {}) {
+export async function saveNotificationEmail(outputDir, html, fileName = 'notification.html', { runId = newRunId(), keepRuns } = {}) {
   await fs.mkdir(outputDir, { recursive: true });
   const ext = path.extname(fileName) || '.html';
   const base = fileName.slice(0, fileName.length - path.extname(fileName).length);
@@ -558,7 +576,50 @@ export async function saveNotificationEmail(outputDir, html, fileName = 'notific
   } finally {
     await fs.rm(tmpPath, { force: true }).catch(() => {});
   }
-  return { path: runPath, latestPath, runId };
+  // Cleanup must never cost this run its email (it may hold the only copy
+  // of new passwords): a bad setting or a failed delete is only a warning.
+  let removed = [];
+  let warning;
+  try {
+    const keep = resolveKeepRuns(keepRuns);
+    if (keep > 0) removed = await pruneRunCopies(outputDir, base, ext, keep);
+  } catch (error) {
+    warning = `old notification copies were not cleaned up: ${error.message}`;
+  }
+  return { path: runPath, latestPath, runId, removed, ...(warning ? { warning } : {}) };
+}
+
+export const DEFAULT_KEEP_RUNS = 20;
+
+/** notifications.keepRuns → a count (0 = keep all); throws on nonsense. */
+export function resolveKeepRuns(value) {
+  if (value == null) return DEFAULT_KEEP_RUNS;
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`notifications.keepRuns must be a whole number ≥ 0 (0 keeps every copy), got: ${value}`);
+  }
+  return value;
+}
+
+const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Delete all but the newest `keep` per-run copies of <base>-<runId><ext>.
+ * Matches only this exact name plus a run id, so notification-<runId>.html
+ * never touches notification-prod-tw-<runId>.html, and the latest copy
+ * (no run id) is never a candidate. Run ids sort chronologically.
+ */
+async function pruneRunCopies(outputDir, base, ext, keep) {
+  const pattern = new RegExp(`^${escapeRegExp(base)}-(\\d{8}T\\d{6}Z-[0-9a-f]{4})${escapeRegExp(ext)}$`);
+  const copies = (await fs.readdir(outputDir))
+    .map(f => ({ f, m: f.match(pattern) }))
+    .filter(x => x.m)
+    .sort((a, b) => (a.m[1] < b.m[1] ? 1 : a.m[1] > b.m[1] ? -1 : 0));
+  const removed = [];
+  for (const { f } of copies.slice(keep)) {
+    await fs.rm(path.join(outputDir, f), { force: true });
+    removed.push(f);
+  }
+  return removed;
 }
 
 /**

@@ -4,6 +4,7 @@
  */
 
 import path from 'path';
+import { describeDirs } from './migration-dirs.js';
 
 /**
  * `R__*` files are repeatable (DCL) migrations. A versioned (DDL) project
@@ -63,6 +64,11 @@ export const PROTECTED_RULE_CODES = ['MISSING_UP_MARKER', 'MISSING_UP_EXPORT', '
 
 export class BaseAdapter {
   constructor(config) {
+    // A list of directories is a DCL-only feature (core/migration-dirs.js):
+    // a DDL changelog has to come from one place.
+    if (config && Array.isArray(config.migrationsDir) && config.mode !== 'repeatable') {
+      throw new Error(`migrationsDir lists ${config.migrationsDir.length} directories, but only DCL configs (mode: 'repeatable') accept a list — a DDL config takes one directory.`);
+    }
     this.config = config;
     this.dbType = 'unknown';
   }
@@ -76,7 +82,10 @@ export class BaseAdapter {
    *   (MongoDB): ['name', …] — tables/collections that exist without a
    *                              migration creating them (pre-existing or
    *                              baselined), for the FK and drop checks
-   * @returns {{allow: Object<string,string[]>, existing: string[]}}
+   *   validation.requireApprover: true — a forbidden operation that was
+   *                              allowed must name who approved it
+   *                              (@approved-by / --approved-by), see applyApproval()
+   * @returns {{allow: Object<string,string[]>, existing: string[], requireApprover: boolean}}
    */
   getValidationConfig() {
     const v = this.config.validation || {};
@@ -86,7 +95,49 @@ export class BaseAdapter {
     }
     const existing = v.existingTables || v.existingCollections || [];
     // MariaDB table names compare case-insensitively here; MongoDB's don't
-    return { allow, existing: existing.map(t => (this.dbType === 'mongodb' ? String(t) : String(t).toLowerCase())) };
+    return {
+      allow,
+      existing: existing.map(t => (this.dbType === 'mongodb' ? String(t) : String(t).toLowerCase())),
+      requireApprover: v.requireApprover === true
+    };
+  }
+
+  /**
+   * Who approved a released forbidden operation. Runs after applyRulePolicy()
+   * in validateContent(): every 'forbidden-allowed' warning gets the approver
+   * (file's @approved-by, else --approved-by) attached so it shows up in the
+   * run log and the notification email. With validation.requireApprover on
+   * and nobody named, those releases are turned back into failures.
+   *
+   * @returns the policy result plus `approval`: null when nothing forbidden
+   *   was released, else { approvedBy: string|null, codes: string[] }
+   */
+  applyApproval(policy, approvedBy) {
+    const released = policy.warnings.filter(w => w.type === 'forbidden-allowed');
+    if (released.length === 0) return { ...policy, approval: null };
+    const approver = typeof approvedBy === 'string' ? approvedBy.trim() : '';
+    const codes = [...new Set(released.map(w => w.code).filter(Boolean))];
+    if (approver) {
+      return {
+        ...policy,
+        warnings: policy.warnings.map(w => (released.includes(w) ? { ...w, approvedBy: approver } : w)),
+        approval: { approvedBy: approver, codes }
+      };
+    }
+    if (!this.getValidationConfig().requireApprover) return { ...policy, approval: { approvedBy: null, codes } };
+    const marker = this.dbType === 'mongodb' ? '//' : '--';
+    return {
+      ...policy,
+      warnings: policy.warnings.filter(w => !released.includes(w)),
+      forbiddenOps: [...policy.forbiddenOps, ...released.map(w => ({
+        type: 'approver-required',
+        code: 'APPROVER_REQUIRED',
+        releasedCode: w.code,
+        message: `🔴 ${w.code || 'A forbidden operation'} is allowed, but no approver is recorded and validation.requireApprover is on — ` +
+          `add "${marker} @approved-by: <name>" to the file or pass --approved-by <name>`
+      }))],
+      approval: null
+    };
   }
 
   /**
@@ -221,7 +272,7 @@ export class BaseAdapter {
     return [
       ...Object.keys(this.getValidationConfig().allow)
         .filter(f => !files.has(f))
-        .map(f => `validation.allow lists '${f}', which is not a migration file in ${this.config.migrationsDir} — renamed or misspelled?`),
+        .map(f => `validation.allow lists '${f}', which is not a migration file in ${describeDirs(this.config.migrationsDir)} — renamed or misspelled?`),
       ...this.getValidationPolicy().problems
     ];
   }

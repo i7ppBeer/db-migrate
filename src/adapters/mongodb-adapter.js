@@ -5,9 +5,10 @@
  */
 
 import { BaseAdapter, isRepeatableMigrationFile, selectPendingMigrations } from '../core/base-adapter.js';
+import { listMigrationFiles } from '../core/migration-dirs.js';
 import { SanityChecker, MongoDBChecks } from '../core/sanity-checker.js';
 import migrateMongo from 'migrate-mongo';
-import { MongoClient } from 'mongodb';
+import { MongoClient, MongoOperationTimeoutError } from 'mongodb';
 import { maskComments, findMatchingBrace } from '../core/source-scan.js';
 import fs from 'fs/promises';
 import path from 'path';
@@ -339,7 +340,9 @@ export class MongoDBAdapter extends BaseAdapter {
           // for this entry rather than fail status() entirely.
         }
         if (currentChecksum) {
-          if (doc.checksum == null) {
+          if (doc.checksum == null && this.readOnly) {
+            // Would be baselined by a writing command; read-only leaves it.
+          } else if (doc.checksum == null) {
             // Doc predates checksum tracking (upgraded from an older version
             // of this tool, or written by migrate-mongo itself). Adopt current
             // content as the trusted baseline going forward.
@@ -408,13 +411,68 @@ export class MongoDBAdapter extends BaseAdapter {
   }
 
   /**
+   * Gate R5 for MongoDB: ddlSafety.operationTimeoutMs, or null when unset
+   * (off by default — a limit that's too low would fail legitimate index
+   * builds, so each project picks its own).
+   */
+  getOperationTimeoutMs() {
+    const value = this.config.ddlSafety?.operationTimeoutMs;
+    if (value == null || value === 0) return null;
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`ddlSafety.operationTimeoutMs must be a positive integer (milliseconds), got: ${value}`);
+    }
+    return value;
+  }
+
+  /**
+   * The db/client a migration's up()/down() receive. With an operation time
+   * limit set, both carry the driver's timeoutMS, so every operation issued
+   * through them — including through client.db('other') — is bounded and
+   * stopped on the server when it runs over, instead of a write stuck behind
+   * another lock hanging the whole run.
+   * @private
+   */
+  _migrationHandles() {
+    const timeoutMS = this.getOperationTimeoutMs();
+    if (!timeoutMS) return { db: this.db, client: this.client, timeoutMS: null };
+    const db = this.client.db(this.db.databaseName, { timeoutMS });
+    const client = new Proxy(this.client, {
+      get(target, prop) {
+        if (prop === 'db') return (name, opts = {}) => target.db(name, { timeoutMS, ...opts });
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
+    return { db, client, timeoutMS };
+  }
+
+  /**
+   * Call a migration's up/down with the R5-bounded handles; a timeout is
+   * reported against the setting that caused it (callers prefix the file name).
+   * @private
+   */
+  async _runMigrationFunction(fn) {
+    const { db, client, timeoutMS } = this._migrationHandles();
+    try {
+      await fn(db, client);
+    } catch (error) {
+      const timedOut = error instanceof MongoOperationTimeoutError || error?.code === 50 || error?.codeName === 'MaxTimeMSExpired';
+      if (timeoutMS && timedOut) {
+        throw new Error(`An operation ran longer than ddlSafety.operationTimeoutMs (${timeoutMS} ms) and was stopped (${error.message}). ` +
+          'If this migration is expected to be slow (e.g. a large index build), raise the limit for it or run it off-peak.');
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Run one migration's up() and record it in the changelog.
    * @private
    */
   async _applyOne(fileName) {
     const { module, content } = await this._loadMigration(fileName);
     if (typeof module.up !== 'function') throw new Error('Migration must export an "up" function');
-    await module.up(this.db, this.client);
+    await this._runMigrationFunction(module.up);
     await this.db.collection(this.changelogCollection).insertOne({
       fileName,
       appliedAt: new Date(),
@@ -429,7 +487,7 @@ export class MongoDBAdapter extends BaseAdapter {
   async _rollbackOne(fileName) {
     const { module } = await this._loadMigration(fileName);
     if (typeof module.down !== 'function') throw new Error('Migration must export a "down" function');
-    await module.down(this.db, this.client);
+    await this._runMigrationFunction(module.down);
     await this.db.collection(this.changelogCollection).deleteOne({ fileName });
   }
 
@@ -990,9 +1048,14 @@ export async function down(db, client) {
       const migrationsDir = this.config.migrationsDir;
       // Same file set and order status()/up() use: in a versioned project,
       // R__ (DCL) files are ignored and reported, not validated as DDL.
-      const migrationFiles = this.config.mode === 'repeatable'
-        ? (await fs.readdir(migrationsDir)).filter(f => f.endsWith('.js')).sort()
+      // DCL may list several directories (see core/migration-dirs.js).
+      const repeatableFiles = this.config.mode === 'repeatable'
+        ? await listMigrationFiles(migrationsDir, f => f.endsWith('.js'))
+        : null;
+      const migrationFiles = repeatableFiles
+        ? repeatableFiles.map(f => f.fileName)
         : await this.getMigrationFiles();
+      const filePathOf = new Map((repeatableFiles || []).map(f => [f.fileName, f.filePath]));
       results.ignoredRepeatableFiles = await this.getIgnoredRepeatableFiles();
       // options.files: validate only these (e.g. the pending ones); the rest
       // are listed as skipped so the caller can say so.
@@ -1001,7 +1064,7 @@ export async function down(db, client) {
 
       const filesData = [];
       for (const file of migrationFiles) {
-        filesData.push({ fileName: file, content: await fs.readFile(path.join(migrationsDir, file), 'utf-8') });
+        filesData.push({ fileName: file, content: await fs.readFile(filePathOf.get(file) || path.join(migrationsDir, file), 'utf-8') });
       }
       results.configWarnings = this.checkValidationConfig(migrationFiles);
       const knownBefore = this.config.mode === 'repeatable' ? null : this.collectionsBeforeEachFile(filesData);
@@ -1045,7 +1108,8 @@ export async function down(db, client) {
     const annotations = {
       allowDangerous: false,
       allowForbidden: false,
-      allowedCodes: []
+      allowedCodes: [],
+      approvedBy: null
     };
     for (const line of content.split('\n')) {
       const t = line.trim();
@@ -1061,6 +1125,8 @@ export async function down(db, client) {
         const v = forbiddenMatch[1].trim().toLowerCase();
         annotations.allowForbidden = ['true', 'yes', '1'].includes(v);
       }
+      const approvedMatch = t.match(/\/\/\s*@approved-by\s*:\s*(.+)/i);
+      if (approvedMatch && approvedMatch[1].trim()) annotations.approvedBy = approvedMatch[1].trim();
       const allowMatch = t.match(/\/\/\s*@allow\s*:\s*(.+)/i);
       if (allowMatch) {
         const codes = allowMatch[1].split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
@@ -1298,6 +1364,10 @@ export async function down(db, client) {
 
           // Forbid dropDatabase in up() unless explicitly approved via @allow-forbidden
           if (hasDropDBInUp) {
+            // Only the rule whose own pattern matches: .dropDatabase() is
+            // DROP_DATABASE, { dropDatabase: 1 } is DROP_DATABASE_CMD — not
+            // both, or allowing the one code shown could never be enough.
+            if (!rule.pattern.test(normalizedUpBody)) continue;
             const isAllowed = options.allowForbidden ||
               (options.allowedCodes && options.allowedCodes.includes(rule.code));
             if (isAllowed) {
@@ -1416,7 +1486,7 @@ export async function down(db, client) {
 
     // Project policy (validation.customRules / validation.rules — see BaseAdapter.getValidationPolicy())
     this.evaluateCustomRules([normalizedUpBody || normalizedContent], options, { forbiddenOps, dangerousOps, warnings });
-    const policy = this.applyRulePolicy({ errors, forbiddenOps, dangerousOps, warnings });
+    const policy = this.applyApproval(this.applyRulePolicy({ errors, forbiddenOps, dangerousOps, warnings }), fileAnnotations.approvedBy || options.approvedBy);
 
     // Combine errors: forbidden ops + dangerous ops (when not allowed) + structural errors
     const allErrors = [...policy.errors, ...policy.forbiddenOps, ...policy.dangerousOps];
@@ -1427,6 +1497,7 @@ export async function down(db, client) {
       warnings: policy.warnings,
       forbiddenOps: policy.forbiddenOps,
       dangerousOps: policy.dangerousOps,
+      approval: policy.approval,
       suspiciousNames: suspiciousNames,
       performanceIssues: performanceResult.warnings,
       performanceMetrics: performanceResult.metrics,

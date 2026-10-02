@@ -95,7 +95,30 @@ export default {
 };
 ```
 
-Accounts every instance needs go into each directory (a copy of the same `R__` file per directory is fine — each instance tracks its own checksums in its own database).
+### Shared accounts + each instance's own (`migrationsDir` as a list)
+
+Accounts every instance needs don't have to be copied into each directory. For DCL (`mode: 'repeatable'`), `migrationsDir` can be a **list** of directories — one shared, one per instance:
+
+```javascript
+const instance = (name, host, dir) => ({
+  name,
+  migrationsDir: ['./shared', dir],   // R__ files from both, run in file-name order
+  mariadb: { host, port: 3306, database: 'app', user: 'root', password: process.env.MARIADB_PASSWORD }
+});
+// instances: [instance('prod-tw', 'db-tw.internal', './prod-tw'), instance('prod-jp', 'db-jp.internal', './prod-jp')]
+```
+
+```
+dcl/
+├── config.js
+├── shared/   R__01_readonly_report.sql      ← every instance
+├── prod-tw/  R__02_tw_app.sql               ← prod-tw only
+└── prod-jp/  R__02_jp_app.sql               ← prod-jp only
+```
+
+prod-tw ends up with `readonly_report` and `tw_app`, prod-jp with `readonly_report` and `jp_app`. The files of all listed directories are merged and run in file-name order, exactly as if they were in one directory. A file name is what the checksum record is keyed by, so **the same file name in two of the listed directories is rejected** (nothing runs) — rename one. The top-level `migrationsDir` (and `dcl`, `dcl:status`, `dcl --plan`, `dcl:verify` for a single-instance config) accepts a list the same way.
+
+DDL configs still take exactly **one** directory: a list is rejected, since a versioned changelog has to come from one ordered place.
 
 `dcl-all -c dcl/config.js` then writes, under `reports/` (or `-o <dir>`):
 

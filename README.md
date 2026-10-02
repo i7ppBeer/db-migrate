@@ -112,6 +112,9 @@ These used to be silent and now stop the run:
 | MariaDB `DROP TABLE` of an existing table was reported as `ORPHAN_DROP_UP` | `DROP_TABLE` (data loss); `ORPHAN_DROP_UP` now means the table exists nowhere (likely a typo) |
 | MongoDB: `dropDatabase()` in `down()` was auto-allowed if `up()` created any collection | always needs explicit approval |
 | MongoDB: an apostrophe in a comment or a nested `{ … }` in `up()` cut the validated body short, hiding later calls | the whole body is validated — some migrations that used to pass now need an `@allow` |
+| `status`, `up --dry-run`, `dcl:status`, `dcl --plan` created the changelog/checksum table and backfilled checksums | read-only — they work with a `SELECT`-only account and change nothing |
+| `DROP DATABASE` in Up was reported under two codes (`DROP_DATABASE` + `DROP_SCHEMA`, or `DROP_DATABASE` + `DROP_DATABASE_CMD` on MongoDB), so `@allow: DROP_DATABASE` was never enough | one code per form; `@allow: DROP_DATABASE` releases `DROP DATABASE` / `.dropDatabase()` |
+| Per-run notification copies accumulated forever | only the newest `notifications.keepRuns` (default 20) of each name are kept; the latest copy always stays |
 
 ### Multi-Instance
 
@@ -133,7 +136,7 @@ docker compose run --rm migrate <command> [options] -c /app/test-fixtures/<db-ty
 
 | Command | What it does |
 |---|---|
-| `status` | Show applied vs. pending migrations |
+| `status` | Show applied vs. pending migrations. Read-only: works with a `SELECT`-only account, creates nothing (same for `up --dry-run`, `dcl:status`, `dcl --plan`) |
 | `up [--dry-run] [--sanity-check] [--no-auto-rollback] [--target <m>] [--only <m>] [--instance <n>] [--allow-checksum-drift] [--allow-*] [--allow-open-transactions]` | Apply pending migrations. **Validates the migrations about to run first and refuses (nothing applied) if any fails** — same rules and `--allow-*` escape hatches as `validate`. Also refuses if an already-applied file's content no longer matches its recorded checksum — see below |
 | `sync [--sanity-check] [--target <m>] [--only <m>] [-o <dir>] [--allow-checksum-drift] [--allow-*] [--allow-open-transactions]` | `status` → validate → `up` → diff → real current schema, plus a run notification email (`reports/notification.html`). **Errors (non-zero exit) if nothing was pending**, same validation and checksum refusals as `up` — see [docs/DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md) |
 | `down -n <N> [--target <m>] [--dry-run] [--yes] [--allow-checksum-drift] [--instance <n>] [--allow-open-transactions]` | Rollback the last N migrations (or down to and including `--target`). Shows the plan and asks you to type `yes`; outside a terminal it needs `--yes`. Refuses if a file to roll back was edited after being applied |
@@ -156,7 +159,7 @@ docker compose run --rm migrate <command> [options] -c /app/test-fixtures/<db-ty
 
 | Command | What it does |
 |---|---|
-| `dcl [--plan] [--dry-run] [--validate] [--allow-dangerous] [--allow-forbidden] [--accept-removed-dcl] [-o <dir>]` | Run pending/changed repeatable scripts, then print an account/permission before/after diff and write the run notification email (`<dir>/notification.html`, default `reports/`). `--plan` previews the run (script diffs, affected accounts and their grants, passwords to be generated) without executing |
+| `dcl [--plan] [--dry-run] [--validate] [--allow-dangerous] [--allow-forbidden] [--approved-by <name>] [--accept-removed-dcl] [-o <dir>]` | Run pending/changed repeatable scripts, then print an account/permission before/after diff and write the run notification email (`<dir>/notification.html`, default `reports/`). `--plan` previews the run (script diffs, affected accounts and their grants, passwords to be generated) without executing |
 | `dcl:status` | Show which `R__*` scripts are applied and whether their checksum still matches |
 | `dcl:verify` | Run each script twice and diff state to confirm idempotency, without leaving changes applied for real use |
 | `create-dcl <name> [-n <seq>]` | Scaffold a new `R__` DCL migration file |
@@ -222,6 +225,18 @@ export default {
 
 See [docs/LOCK-GUARD.md](docs/LOCK-GUARD.md) for why this exists and what it does and doesn't protect against.
 
+MongoDB DDL projects can bound each operation a migration issues (off by default — pick a limit your largest index build fits in):
+
+```javascript
+export default {
+  type: 'mongodb',
+  mongodb: { databaseName: 'myapp' },
+  ddlSafety: { operationTimeoutMs: 60000 }   // an operation running longer is stopped and the run fails
+};
+```
+
+See Gate R5 in [docs/RUNTIME-GATE-PLAN.md](docs/RUNTIME-GATE-PLAN.md).
+
 ### MongoDB DCL
 
 ```javascript
@@ -243,6 +258,19 @@ export default {
   checksumTable: '_dcl_migrations'
 };
 ```
+
+DCL `migrationsDir` can be a list — accounts every server needs plus this server's own (the same file name in two directories is rejected; DDL takes one directory):
+
+```javascript
+export default {
+  type: 'mariadb',
+  mode: 'repeatable',
+  database: 'mysql',
+  migrationsDir: ['./shared', './prod-tw']
+};
+```
+
+Notification emails: `notifications: { keepRuns: 20 }` (default) keeps the newest 20 per-run copies of each file name; `0` keeps all. See [docs/DCL-PASSWORD.md](docs/DCL-PASSWORD.md).
 
 ### Multi-instance (either type)
 
@@ -310,6 +338,8 @@ node src/cli.js validate --allow TRUNCATE_TABLE,DROP_INDEX -c <config>
 
 The same flags work on `up`/`sync`/`up-all`. Every allowance actually used (flag or annotation) is printed in the run log, so the approval is visible there too.
 
+For forbidden (🔴) operations, record **who** approved it: `-- @approved-by: Alice (CAB-1042)` in the file, or `--approved-by "Alice (CAB-1042)"` for the run. The approver is printed with each allowance and listed under **Approved exceptions** in `sync`'s notification email. `validation: { requireApprover: true }` makes it mandatory — a forbidden allowance without an approver is refused (`APPROVER_REQUIRED`).
+
 Some failures can't be allowed, only fixed in the file — e.g. a syntax error, a missing Up/Down section, or schema DDL inside a DCL file. The refusal message says which.
 
 Approvals and known tables can also live in the config — useful for files that are already applied, or tables that predate your migrations:
@@ -325,7 +355,7 @@ Per-file annotation (recommended — keeps the approval traceable in code review
 
 ```sql
 -- @allow: DROP_COLUMN
--- Approved: deprecated since v2.0 (ticket #123)
+-- @approved-by: Alice (ticket #123) — deprecated since v2.0
 
 -- +migrate Up
 ALTER TABLE users DROP COLUMN old_field;

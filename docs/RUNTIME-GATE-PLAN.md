@@ -228,7 +228,7 @@ runtimeGates: { longTransactionSec: 60, replicationLagWarnSec: 30, binlogWarnMb:
 
 ---
 
-## Gate R5 — Session lock guard (advisory, execution-time)
+## Gate R5 — Session lock guard (advisory, execution-time) — ✅ Implemented (MongoDB: opt-in)
 
 Already specified in the Lock Guard plan (`feat/mariadb-lock-guard`): `SET SESSION
 lock_wait_timeout` / `innodb_lock_wait_timeout` + bounded retry around each executed
@@ -239,6 +239,30 @@ subsequent query down with it.
 MongoDB equivalent: `maxTimeMS` on the operations the migration issues, so a write
 blocked behind another long-held lock also fails fast rather than hanging the whole
 migration run.
+
+**MongoDB — implemented as `ddlSafety.operationTimeoutMs` (off by default).** When set,
+the `db` and `client` a migration's `up()`/`down()` receive carry the driver's
+`timeoutMS` (client-side operation timeout, which also sends `maxTimeMS` to the
+server), so **each operation** issued through them — including through
+`client.db('other')` — is stopped once it runs longer than the limit. The run fails
+with an error that names the setting:
+
+```
+An operation ran longer than ddlSafety.operationTimeoutMs (2000 ms) and was stopped (…).
+If this migration is expected to be slow (e.g. a large index build), raise the limit for it or run it off-peak.
+```
+
+```javascript
+// config.js (MongoDB DDL)
+ddlSafety: { operationTimeoutMs: 60000 }
+```
+
+Off by default because a sensible limit depends on the data: a legitimate index build
+on a large collection can take minutes. It bounds single operations, not the whole
+migration — many fast operations never trip it. Verified against a real MongoDB 7: a
+migration whose query takes ~10 s server-side stopped after 2.5 s with a 2000 ms limit,
+and ran its full 10.9 s without one. As with any failed MongoDB migration, operations
+before the one that timed out are not undone.
 
 ---
 
@@ -266,7 +290,7 @@ starts*; R5 gates *each statement*; R6 gates the *result*.
 ## Implementation status
 
 **R0, R1 (DDL and DCL), R2, R3 and R4 are live** (2026-10-01). R5 is live for MariaDB as the Lock Guard,
-not for MongoDB (`maxTimeMS`); R6 already existed before this plan. Recommended build
+and for MongoDB as the opt-in `ddlSafety.operationTimeoutMs` (2026-10-02); R6 already existed before this plan. Recommended build
 order for what's left: DCL's side of R1 next (same shape as the DDL work, smaller),
 then R2/R3 (the actual incident-prevention value against real lock contention/replica
 state), R4 last (lowest value, needs a privilege the connecting user may not have).

@@ -1,4 +1,4 @@
-// @expect-error: DROP_DATABASE,DROP_DATABASE_CMD
+// @expect-error: DROP_DATABASE
 /**
  * 混合測試：危險的資料庫層級操作
  * 預期驗證結果：失敗（包含 dropDatabase 和其他危險操作）

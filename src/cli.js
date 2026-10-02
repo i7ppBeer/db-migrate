@@ -17,6 +17,7 @@ import { DCLIdempotentChecker } from './core/dcl-idempotent-checker.js';
 import { checkMigrationsToRun, describeValidationFailures, allowHintForFailures } from './core/validation-gate.js';
 import { parseExpectedErrors, checkFileExpectation, parseExpectedSanity, checkSanityExpectation } from './core/fixture-expectations.js';
 import { buildDCLPlan } from './core/dcl-plan.js';
+import { resolveDirs, describeDirs } from './core/migration-dirs.js';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -32,14 +33,12 @@ program
 /**
  * Resolve a config's migrationsDir to an absolute path, relative to the
  * directory the config file itself lives in. Returns the value unchanged if
- * it's already absolute or not set.
+ * not set. DCL configs may give a list of directories (each one resolved);
+ * DDL configs may not (see core/migration-dirs.js).
  */
-function resolveMigrationsDir(config, configPath) {
-  if (!config.migrationsDir || path.isAbsolute(config.migrationsDir)) {
-    return config.migrationsDir;
-  }
+function resolveMigrationsDir(config, configPath, migrationsDir = config.migrationsDir) {
   const configDir = path.dirname(path.resolve(configPath));
-  return path.resolve(configDir, config.migrationsDir);
+  return resolveDirs(migrationsDir, configDir, config.mode);
 }
 
 /**
@@ -53,7 +52,7 @@ function resolveChecksumTable(config) {
 /**
  * Load config and create single adapter (for backward compatibility)
  */
-async function getAdapter(options) {
+async function getAdapter(options, { readOnly = false } = {}) {
   if (!options.config) {
     console.error(chalk.red('[ERROR] Config file is required (-c or --config)'));
     process.exit(1);
@@ -67,28 +66,32 @@ async function getAdapter(options) {
     config.type = options.type;
   }
 
-  return createAdapter(config);
+  const adapter = createAdapter(config);
+  // Read-only commands (status, --dry-run, --plan) never create the
+  // changelog/checksum table or the database, so they work with a
+  // SELECT-only account and leave the database exactly as it was.
+  adapter.readOnly = readOnly;
+  return adapter;
 }
 
 /**
  * Load config and create multiple adapters for multi-instance configs
  */
-async function getAdapters(options) {
+async function getAdapters(options, { readOnly = false } = {}) {
   if (!options.config) {
     console.error(chalk.red('[ERROR] Config file is required (-c or --config)'));
     process.exit(1);
   }
 
   const config = await loadConfig(options.config);
-  const configDir = path.dirname(path.resolve(options.config));
   config.migrationsDir = resolveMigrationsDir(config, options.config);
 
   // Handle instances - resolve their migrationsDir too
   if (config.instances) {
     for (const instance of config.instances) {
-      if (instance.migrationsDir && !path.isAbsolute(instance.migrationsDir)) {
-        instance.migrationsDir = path.resolve(configDir, instance.migrationsDir);
-      } else if (!instance.migrationsDir && config.migrationsDir) {
+      if (instance.migrationsDir) {
+        instance.migrationsDir = resolveMigrationsDir({ ...config, ...instance }, options.config, instance.migrationsDir);
+      } else if (config.migrationsDir) {
         instance.migrationsDir = config.migrationsDir;
       }
     }
@@ -99,7 +102,9 @@ async function getAdapters(options) {
     config.type = options.type;
   }
 
-  return createAdapters(config);
+  const adapters = createAdapters(config);
+  for (const { adapter } of adapters) adapter.readOnly = readOnly;
+  return adapters;
 }
 
 /**
@@ -302,7 +307,8 @@ async function enforceValidationGate(adapter, status, options, { report = false 
   if (options.allow && options.allow.length > 0) console.log(chalk.cyan(`   📋 --allow given: ${options.allow.join(', ')}`));
   for (const w of gate.configWarnings || []) console.log(chalk.yellow(`   ⚠️  ${w}`));
   for (const a of gate.allowed) {
-    console.log(chalk.yellow(`   ⚠️  Allowed in ${a.file}${a.code ? ` [${a.code}]` : ''}: ${a.message.replace(/^.*?\[(?:FORCE )?ALLOWED\]\s*/, '')}`));
+    const approver = a.forbidden ? ` — approved by ${a.approvedBy || '(nobody recorded)'}` : '';
+    console.log(chalk.yellow(`   ⚠️  Allowed in ${a.file}${a.code ? ` [${a.code}]` : ''}: ${a.message.replace(/^.*?\[(?:FORCE )?ALLOWED\]\s*/, '')}${approver}`));
   }
 
   if (gate.failures.length === 0) {
@@ -442,7 +448,8 @@ function addAllowOptions(command) {
   return command
     .option('--allow-dangerous', 'Allow dangerous operations (🟠 level)')
     .option('--allow-forbidden', 'Allow forbidden operations (🔴 level) - requires team approval')
-    .option('--allow <codes>', 'Allow specific operation codes (comma-separated)', (val) => val.split(','));
+    .option('--allow <codes>', 'Allow specific operation codes (comma-separated)', (val) => val.split(','))
+    .option('--approved-by <name>', 'Who approved the forbidden operations this run allows (recorded in the run log and notification email)');
 }
 
 function printSchemaDiff(diff, dbType) {
@@ -582,6 +589,16 @@ function assertUniqueInstanceNames(adapters) {
   }
 }
 
+/** saveNotificationEmail() options from config (notifications.keepRuns). */
+function notificationOptions(config, extra = {}) {
+  return { keepRuns: config?.notifications?.keepRuns, ...extra };
+}
+
+function printNotificationCleanup(saved) {
+  if (saved.removed?.length) console.log(chalk.gray(`   🧹 Removed ${saved.removed.length} older notification cop${saved.removed.length === 1 ? 'y' : 'ies'} (notifications.keepRuns)`));
+  if (saved.warning) console.log(chalk.yellow(`   ⚠️  ${saved.warning}`));
+}
+
 function instanceNotificationFileName(name) {
   return `notification-${String(name).replace(/[^A-Za-z0-9._-]/g, '_')}.html`;
 }
@@ -682,7 +699,7 @@ program
     let adapter;
     
     try {
-      adapter = await getAdapter(options);
+      adapter = await getAdapter(options, { readOnly: true });
       await adapter.connect();
       
       const status = await adapter.status();
@@ -733,7 +750,7 @@ addAllowOptions(upCommand)
     let adapter;
 
     try {
-      adapter = await getAdapter(options);
+      adapter = await getAdapter(options, { readOnly: Boolean(options.dryRun) });
 
       // Override sanity check settings from CLI
       if (options.sanityCheck) {
@@ -881,8 +898,9 @@ addAllowOptions(syncCommand)
         dbType,
         ...extra
       });
-      const saved = await saveNotificationEmail(options.output || 'reports', notificationEmailToHTML(report));
+      const saved = await saveNotificationEmail(options.output || 'reports', notificationEmailToHTML(report), undefined, notificationOptions(adapter?.config));
       console.log(chalk.gray(`\n   📧 Notification email written to ${saved.path} (latest copy: ${saved.latestPath})`));
+      printNotificationCleanup(saved);
     };
 
     try {
@@ -920,7 +938,10 @@ addAllowOptions(syncCommand)
       for (const f of status.pending) {
         console.log(`   ⏳ ${f}`);
       }
-      await enforceValidationGate(adapter, status, options);
+      const gate = await enforceValidationGate(adapter, status, options);
+      // Forbidden operations this run was allowed to execute, and who
+      // approved each — the email's "Approved exceptions" section
+      const approvals = gate.allowed.filter(a => a.forbidden).map(a => ({ file: a.file, code: a.code, approvedBy: a.approvedBy }));
       await enforceRuntimeGates(adapter, options);
 
       // Snapshot before applying anything, so the schema section afterward
@@ -956,7 +977,8 @@ addAllowOptions(syncCommand)
           status: 'failed',
           // Failed while executing (not refused beforehand): the failing
           // migration itself may have run partway.
-          ddl: { applied: result.applied, errors: formatDDLFailureDetails(result), partialRisk: true }
+          ddl: { applied: result.applied, errors: formatDDLFailureDetails(result), partialRisk: true },
+          approvals
         });
         process.exitCode = 1;
         return;
@@ -993,7 +1015,7 @@ addAllowOptions(syncCommand)
       });
 
       try {
-        await writeNotification(databaseName, adapter.dbType, { ddl: { applied: result.applied, diff } });
+        await writeNotification(databaseName, adapter.dbType, { ddl: { applied: result.applied, diff }, approvals });
       } catch (notifyError) {
         // The migrations DID apply — say so plainly instead of falling into
         // the generic failure path below (which would also write a
@@ -1339,7 +1361,8 @@ addAllowOptions(validateCommand)
       const validateOptions = {
         allowDangerous: options.allowDangerous,
         allowForbidden: options.allowForbidden,
-        allowedCodes: options.allow || []
+        allowedCodes: options.allow || [],
+        approvedBy: options.approvedBy
       };
 
       // --pending-only: exactly what up/sync's validation gate checks.
@@ -1373,7 +1396,7 @@ addAllowOptions(validateCommand)
 
       if (result.error) {
         console.error(chalk.red(`[ERROR] Validation could not run: ${result.error}`));
-        console.error(chalk.gray(`   migrationsDir: ${adapter.config.migrationsDir}`));
+        console.error(chalk.gray(`   migrationsDir: ${describeDirs(adapter.config.migrationsDir)}`));
         process.exitCode = 1;
         return;
       }
@@ -1516,6 +1539,7 @@ program
   .argument('<dir>', 'Directory path (e.g., databases/mariadb/production-server)')
   .option('--allow-dangerous', 'Allow dangerous operations (🟠 level)')
   .option('--allow-forbidden', 'Allow forbidden operations (🔴 level) - requires team approval')
+  .option('--approved-by <name>', 'Who approved the forbidden operations this run allows')
   .option('--allow <codes>', 'Allow specific operation codes (comma-separated)', (val) => val.split(','))
   .option('--ddl-only', 'Validate DDL migrations only')
   .option('--dcl-only', 'Validate DCL migrations only')
@@ -1532,7 +1556,8 @@ program
       const validateOptions = {
         allowDangerous: options.allowDangerous,
         allowForbidden: options.allowForbidden,
-        allowedCodes: options.allow || []
+        allowedCodes: options.allow || [],
+        approvedBy: options.approvedBy
       };
       
       // Show active allowances
@@ -1948,7 +1973,7 @@ program
     
     let adapters;
     try {
-      adapters = await getAdapters(options);
+      adapters = await getAdapters(options, { readOnly: true });
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
       process.exit(1);
@@ -2000,7 +2025,7 @@ addAllowOptions(upAllCommand)
     
     let adapters;
     try {
-      adapters = await getAdapters(options);
+      adapters = await getAdapters(options, { readOnly: Boolean(options.dryRun) });
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
       process.exit(1);
@@ -2217,10 +2242,14 @@ program
         continue;
       }
 
-      if (!baseConfig.migrationsDir) {
-        baseConfig.migrationsDir = path.resolve(path.dirname(configPath), 'migrations');
-      } else if (!path.isAbsolute(baseConfig.migrationsDir)) {
-        baseConfig.migrationsDir = path.resolve(path.dirname(configPath), baseConfig.migrationsDir);
+      try {
+        baseConfig.migrationsDir = resolveMigrationsDir(baseConfig, configPath, baseConfig.migrationsDir || 'migrations');
+      } catch (error) {
+        reporter.addResult({
+          database: relativePath, dbType, testType: 'connection', success: false, duration: 0,
+          error: `Invalid config: ${error.message}`
+        });
+        continue;
       }
       // Prefer type from config.js; fall back to path-based detection
       if (baseConfig.type) {
@@ -2527,6 +2556,7 @@ program
   .option('--validate', 'Enable validation before running (blocks dangerous operations)')
   .option('--allow-dangerous', 'Allow dangerous operations when validating')
   .option('--allow-forbidden', 'Allow forbidden operations when validating (requires approval)')
+  .option('--approved-by <name>', 'Who approved the forbidden operations --validate lets through')
   .option('-o, --output <dir>', 'Directory to write the run notification email to', 'reports')
   .option('--plan', 'Show what a run would change — script diffs, affected accounts and their current grants, passwords to be generated — without executing')
   .option('--accept-removed-dcl', 'Forget applied DCL scripts that were deleted from disk (their accounts/grants are left as they are)')
@@ -2535,7 +2565,7 @@ program
     let adapter;
     
     try {
-      adapter = await getAdapter(options);
+      adapter = await getAdapter(options, { readOnly: Boolean(options.plan || options.dryRun) });
       await adapter.connect();
       
       const config = await loadConfig(options.config);
@@ -2547,7 +2577,8 @@ program
       
       // validator is only passed through when --validate is enabled
       const context = buildDCLContext(adapter, migrationsDir, {
-        validator: options.validate ? adapter : null
+        validator: options.validate ? adapter : null,
+        approvedBy: options.approvedBy
       });
 
       if (options.plan) {
@@ -2646,8 +2677,9 @@ program
               skipped: hasSkipped ? result.skipped : undefined
             }
           });
-          const saved = await saveNotificationEmail(options.output, notificationEmailToHTML(report));
+          const saved = await saveNotificationEmail(options.output, notificationEmailToHTML(report), undefined, notificationOptions(config));
           console.log(chalk.gray(`\n   📧 Notification email written to ${saved.path} (latest copy: ${saved.latestPath})`));
+          printNotificationCleanup(saved);
         }
       }
     } catch (error) {
@@ -2664,8 +2696,9 @@ program
           status: 'failed',
           dcl: { events: [], errors: [error.message] }
         });
-        const saved = await saveNotificationEmail(options.output || 'reports', notificationEmailToHTML(report));
+        const saved = await saveNotificationEmail(options.output || 'reports', notificationEmailToHTML(report), undefined, notificationOptions(adapter?.config));
         console.log(chalk.gray(`   📧 Failure notification written to ${saved.path} (latest copy: ${saved.latestPath})`));
+        printNotificationCleanup(saved);
       } catch (notifyError) {
         console.error(chalk.gray(`   (also failed to write failure notification: ${notifyError.message})`));
       }
@@ -2682,7 +2715,7 @@ program
     let adapter;
     
     try {
-      adapter = await getAdapter(options);
+      adapter = await getAdapter(options, { readOnly: true });
       await adapter.connect();
       
       const config = await loadConfig(options.config);
@@ -2798,6 +2831,7 @@ program
   .option('--validate', 'Enable validation before running')
   .option('--allow-dangerous', 'Allow dangerous operations when validating')
   .option('--allow-forbidden', 'Allow forbidden operations when validating')
+  .option('--approved-by <name>', 'Who approved the forbidden operations --validate lets through')
   .option('-o, --output <dir>', 'Directory for the per-instance notification emails and the run summary', 'reports')
   .option('--plan', 'Show what a run would change on each instance, without executing')
   .option('--accept-removed-dcl', 'Forget applied DCL scripts that were deleted from disk (their accounts/grants are left as they are)')
@@ -2806,7 +2840,7 @@ program
     
     let adapters;
     try {
-      adapters = await getAdapters(options);
+      adapters = await getAdapters(options, { readOnly: Boolean(options.plan || options.dryRun) });
       assertUniqueInstanceNames(adapters);
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
@@ -2835,19 +2869,20 @@ program
         });
 
         const context = buildDCLContext(adapter, migrationsDir, {
-          validator: options.validate ? adapter : null
+          validator: options.validate ? adapter : null,
+          approvedBy: options.approvedBy
         });
 
         if (options.plan) {
           printDCLPlan(await buildDCLPlan(runner, adapter, context), `[${name}] ${target}`);
         } else if (options.dryRun) {
           const status = await runner.status(context);
-          console.log(chalk.blue(`\n[${name}] ${target} — would apply ${status.pending.length} DCL migration(s) from ${migrationsDir}`));
+          console.log(chalk.blue(`\n[${name}] ${target} — would apply ${status.pending.length} DCL migration(s) from ${describeDirs(migrationsDir)}`));
           for (const p of status.pending) {
             console.log(chalk.gray(`   - ${p.fileName} (${p.reason})`));
           }
         } else {
-          console.log(chalk.blue(`\n[${name}] ${target} — running DCL migrations from ${migrationsDir}...`));
+          console.log(chalk.blue(`\n[${name}] ${target} — running DCL migrations from ${describeDirs(migrationsDir)}...`));
           await enforceRuntimeGates(adapter, options, { locks: false, disk: false });
           await enforceRemovedDCLGate(runner, context, options);
           const beforeDCLState = await captureDCLState(dclChecker, adapter, instanceConfig);
@@ -2897,9 +2932,10 @@ program
                 skipped: hasSkipped ? result.skipped : undefined
               }
             });
-            const saved = await saveNotificationEmail(options.output, notificationEmailToHTML(report), instanceNotificationFileName(name), { runId });
+            const saved = await saveNotificationEmail(options.output, notificationEmailToHTML(report), instanceNotificationFileName(name), notificationOptions(instanceConfig, { runId }));
             summary.notificationFile = saved.path;
             console.log(chalk.gray(`      📧 Notification email written to ${saved.path}`));
+            printNotificationCleanup(saved);
           }
         }
         
@@ -2921,8 +2957,9 @@ program
           environment: process.env.DB_MIGRATE_ENVIRONMENT,
           instances: summaryInstances
         });
-        const saved = await saveNotificationEmail(options.output, multiInstanceSummaryToHTML(summaryReport), 'notification-summary.html', { runId });
+        const saved = await saveNotificationEmail(options.output, multiInstanceSummaryToHTML(summaryReport), 'notification-summary.html', notificationOptions(adapters[0]?.config, { runId }));
         console.log(chalk.gray(`\n📋 Run summary (no passwords) written to ${saved.path} (latest copies: notification-summary.html, notification-<instance>.html)`));
+        printNotificationCleanup(saved);
       } catch (summaryError) {
         hasErrors = true;
         console.error(chalk.red(`\n[ERROR] Failed to write run summary: ${summaryError.message}`));
@@ -2942,7 +2979,7 @@ program
     
     let adapters;
     try {
-      adapters = await getAdapters(options);
+      adapters = await getAdapters(options, { readOnly: true });
     } catch (error) {
       console.error(chalk.red(`[ERROR] ${error.message}`));
       process.exit(1);
@@ -2964,7 +3001,7 @@ program
         const status = await runner.status(context);
         
         console.log(chalk.blue(`\n[${name}] (${adapter.dbType}) ${resolveTargetLabel(adapter)}`));
-        console.log(chalk.gray(`  ${instanceConfig.migrationsDir}`));
+        console.log(chalk.gray(`  ${describeDirs(instanceConfig.migrationsDir)}`));
         console.log(chalk.gray('─'.repeat(40)));
         console.log(chalk.yellow(`  ⏳ Pending: ${status.pending.length}`));
         console.log(chalk.green(`  ✅ Up-to-date: ${status.upToDate.length}`));

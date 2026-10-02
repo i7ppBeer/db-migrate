@@ -53,6 +53,42 @@ Both adapters follow the same shape:
   in DCL projects and vice versa, so the two kinds of migration can't accidentally
   leak into each other.
 
+## Recording who approved a forbidden operation
+
+A released 🔴 forbidden operation can name its approver, either in the file's leading
+comment block or for one run:
+
+```sql
+-- @allow: DROP_DATABASE
+-- @approved-by: Alice (CAB-1042)
+```
+
+```bash
+node src/cli.js sync -c <config> --allow-forbidden --approved-by "Alice (CAB-1042)"
+```
+
+The file's `@approved-by` wins over `--approved-by`. The approver is printed next to
+each allowance in the run log (`Allowed in <file> [DROP_DATABASE]: … — approved by
+Alice (CAB-1042)`, or `(nobody recorded)`), and `sync`'s notification email gets an
+**Approved exceptions** section listing each released forbidden operation and who
+approved it. `--approved-by` is accepted by `validate`, `validate-all`, `up`, `up-all`,
+`sync`, and by `dcl` / `dcl-all` together with `--validate`.
+
+```javascript
+// config.js
+validation: { requireApprover: true }
+```
+
+With `requireApprover` on, a forbidden operation that was allowed **without** an
+approver fails validation with `APPROVER_REQUIRED` (nothing is applied); the message
+says to add `@approved-by` or pass `--approved-by`. `--allow` can't release it — only a
+name can. Dangerous-level (🟠) allowances never need an approver.
+
+`DROP DATABASE` reports exactly one code per form: MariaDB `DROP DATABASE` →
+`DROP_DATABASE`, `DROP SCHEMA` → `DROP_SCHEMA`; MongoDB `.dropDatabase()` →
+`DROP_DATABASE`, `{ dropDatabase: 1 }` → `DROP_DATABASE_CMD`. (Previously a drop in the
+Up section was reported under both codes, so allowing the one shown was never enough.)
+
 ## Project policy: turning rules off, down or up, and adding your own
 
 ```javascript
@@ -93,6 +129,7 @@ node src/cli.js validate -c <config>
 node src/cli.js validate -c <config> --allow-dangerous
 node src/cli.js validate -c <config> --allow-forbidden
 node src/cli.js validate -c <config> --allow ALTER_TABLE_MODIFY,DROP_INDEX
+node src/cli.js validate -c <config> --allow-forbidden --approved-by "Alice (CAB-1042)"
 ```
 
 ## Programmatic usage

@@ -385,4 +385,38 @@ describe('saveNotificationEmail', () => {
     await saveNotificationEmail(dir, 'first', 'notification.html', { runId: 'same' });
     await expect(saveNotificationEmail(dir, 'second', 'notification.html', { runId: 'same' })).rejects.toThrow(/EEXIST/);
   });
+
+  const runIdAt = (i) => `2026100${Math.floor(i / 10)}T00000${i % 10}Z-abcd`;
+
+  it('keeps only the newest keepRuns copies of each name, and always the latest copy', async () => {
+    for (let i = 0; i < 5; i++) {
+      await saveNotificationEmail(dir, `run ${i}`, 'notification.html', { runId: runIdAt(i), keepRuns: 3 });
+    }
+    // another name's copies are not this name's to prune
+    await saveNotificationEmail(dir, 'tw', 'notification-prod-tw.html', { runId: runIdAt(0), keepRuns: 3 });
+    const names = (await fs.readdir(dir)).sort();
+    expect(names).toEqual([
+      'notification-20261000T000002Z-abcd.html',
+      'notification-20261000T000003Z-abcd.html',
+      'notification-20261000T000004Z-abcd.html',
+      'notification-prod-tw-20261000T000000Z-abcd.html',
+      'notification-prod-tw.html',
+      'notification.html'
+    ]);
+    expect(await fs.readFile(path.join(dir, 'notification.html'), 'utf-8')).toBe('run 4');
+  });
+
+  it('keeps 20 copies by default and every copy with keepRuns: 0', async () => {
+    for (let i = 0; i < 22; i++) await saveNotificationEmail(dir, `run ${i}`, 'notification.html', { runId: runIdAt(i) });
+    expect((await fs.readdir(dir)).filter(n => n !== 'notification.html')).toHaveLength(20);
+    const last = await saveNotificationEmail(dir, 'all', 'notification.html', { runId: runIdAt(25), keepRuns: 0 });
+    expect(last.removed).toEqual([]);
+    expect((await fs.readdir(dir)).filter(n => n !== 'notification.html')).toHaveLength(21);
+  });
+
+  it('an invalid keepRuns still saves the email and only warns', async () => {
+    const saved = await saveNotificationEmail(dir, 'pw', 'notification.html', { keepRuns: -1 });
+    expect(await fs.readFile(saved.path, 'utf-8')).toBe('pw');
+    expect(saved.warning).toMatch(/notifications\.keepRuns must be/);
+  });
 });

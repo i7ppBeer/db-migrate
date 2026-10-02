@@ -9,7 +9,8 @@
  *
  * Escape hatches are the same ones `validate` has — CLI --allow-dangerous /
  * --allow-forbidden / --allow <codes>, or the file's own @allow annotations —
- * and every allowance that was used is returned so the caller can log it.
+ * and every allowance that was used is returned so the caller can log it,
+ * with who approved it for forbidden ones (@approved-by / --approved-by).
  */
 
 import { selectPendingMigrations } from './base-adapter.js';
@@ -25,7 +26,9 @@ const ALLOWABLE_STRUCTURAL_CODES = new Set(['ORPHAN_DROP_DOWN', 'ORPHAN_DROP_UP'
 function classifyCodes(r) {
   const allowable = new Set();
   for (const op of r.forbiddenOps || []) {
-    if (op.type !== 'forbidden-dclReverse') allowable.add(op.code);
+    // DDL in a DCL file can never be released; a missing approver needs a
+    // name (@approved-by / --approved-by), not another --allow
+    if (op.type !== 'forbidden-dclReverse' && op.type !== 'approver-required') allowable.add(op.code);
   }
   for (const op of r.dangerousOps || []) allowable.add(op.code);
   for (const e of r.errors || []) {
@@ -40,7 +43,8 @@ export function validationOptionsFromCli(options = {}) {
   return {
     allowDangerous: Boolean(options.allowDangerous),
     allowForbidden: Boolean(options.allowForbidden),
-    allowedCodes: (options.allow || []).map(c => c.trim().toUpperCase()).filter(Boolean)
+    allowedCodes: (options.allow || []).map(c => c.trim().toUpperCase()).filter(Boolean),
+    approvedBy: typeof options.approvedBy === 'string' && options.approvedBy.trim() ? options.approvedBy.trim() : undefined
   };
 }
 
@@ -51,7 +55,7 @@ export function validationOptionsFromCli(options = {}) {
  * @param {string[]} pending - status().pending, in run order
  * @param {Object} options - CLI options (target, only, allowDangerous, allowForbidden, allow)
  * @returns {Promise<{ files: string[], failures: Array<{file: string, codes: string[], allowable: string[], mustFix: string[], messages: string[]}>,
- *   allowed: Array<{file: string, code: string|null, message: string}>, error: string|null }>}
+ *   allowed: Array<{file: string, code: string|null, message: string, forbidden?: boolean, approvedBy?: string|null}>, error: string|null }>}
  */
 export async function checkMigrationsToRun(adapter, pending, options = {}) {
   const { selected, error } = selectPendingMigrations(pending, options);
@@ -73,7 +77,7 @@ export async function checkMigrationsToRun(adapter, pending, options = {}) {
       // Only allowances that were actually used — the audit trail of what
       // was let through, not every advisory warning.
       if (/-allowed$/.test(w.type || '')) {
-        allowed.push({ file: r.file, code: w.code || null, message: w.message });
+        allowed.push({ file: r.file, code: w.code || null, message: w.message, ...(w.type === 'forbidden-allowed' ? { forbidden: true, approvedBy: w.approvedBy || null } : {}) });
       }
     }
   }

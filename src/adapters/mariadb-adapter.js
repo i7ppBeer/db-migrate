@@ -5,6 +5,7 @@
 
 import { BaseAdapter, isRepeatableMigrationFile, selectPendingMigrations } from '../core/base-adapter.js';
 import { SanityChecker, SQLChecks } from '../core/sanity-checker.js';
+import { listMigrationFiles } from '../core/migration-dirs.js';
 import mysql from 'mysql2/promise';
 import fs from 'fs/promises';
 import path from 'path';
@@ -331,6 +332,13 @@ export class MariaDBAdapter extends BaseAdapter {
           'SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?', [dbName]
         );
         if (existing.length === 0) {
+          if (this.readOnly) {
+            await tempConnection.end();
+            throw new Error(
+              `database '${dbName}' does not exist on ${connectionOptions.host}:${connectionOptions.port}` +
+              (this.config.createDatabaseIfMissing ? ' yet — a writing run would create it (createDatabaseIfMissing: true); read-only commands never do.' : '. Check the host and database name.')
+            );
+          }
           if (!this.config.createDatabaseIfMissing) {
             await tempConnection.end();
             throw new Error(
@@ -382,7 +390,9 @@ export class MariaDBAdapter extends BaseAdapter {
 
       // Ensure changelog table exists (DDL/versioned mode only;
       // DCL/repeatable mode uses checksumTable, not changelogTable)
-      if (this.config.mode !== 'repeatable') {
+      // Skipped for read-only commands (status, up --dry-run): they must work
+      // with a SELECT-only account and leave the database untouched.
+      if (this.config.mode !== 'repeatable' && !this.readOnly) {
         await this.ensureChangelogTable();
       }
 
@@ -397,6 +407,15 @@ export class MariaDBAdapter extends BaseAdapter {
       await this.connection.end();
       this.connection = null;
     }
+  }
+
+  /** Column names of the changelog table, or null when it doesn't exist (read-only lookup). */
+  async changelogColumns() {
+    const [rows] = await this.connection.execute(
+      'SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?',
+      [this.changelogTable]
+    );
+    return rows.length ? new Set(rows.map(r => String(r.name).toLowerCase())) : null;
   }
 
   async ensureChangelogTable() {
@@ -477,16 +496,28 @@ export class MariaDBAdapter extends BaseAdapter {
         return { pending: [], applied: [], total: 0 };
       }
 
-      // Ensure DB + changelog table exist (may have been dropped by a DOWN migration)
-      await this.ensureChangelogTable();
-
       // Get applied migrations from changelog
       // applied_at read as a Unix epoch: the driver would otherwise
       // interpret the server-session-time-zone value as *local* time and be
       // off by the zone difference (e.g. 8h for a UTC server read in UTC+8).
-      const [rawRows] = await this.connection.execute(
-        `SELECT id, applied_at, UNIX_TIMESTAMP(applied_at) AS applied_epoch, checksum FROM ${this.changelogTable} ORDER BY applied_at`
-      );
+      let rawRows = [];
+      if (this.readOnly) {
+        // Read-only: never create or alter the changelog. A missing table
+        // just means nothing has been applied yet.
+        const columns = await this.changelogColumns();
+        if (columns) {
+          const checksumCol = columns.has('checksum') ? 'checksum' : 'NULL AS checksum';
+          [rawRows] = await this.connection.execute(
+            `SELECT id, applied_at, UNIX_TIMESTAMP(applied_at) AS applied_epoch, ${checksumCol} FROM ${this.changelogTable} ORDER BY applied_at`
+          );
+        }
+      } else {
+        // Ensure DB + changelog table exist (may have been dropped by a DOWN migration)
+        await this.ensureChangelogTable();
+        [rawRows] = await this.connection.execute(
+          `SELECT id, applied_at, UNIX_TIMESTAMP(applied_at) AS applied_epoch, checksum FROM ${this.changelogTable} ORDER BY applied_at`
+        );
+      }
       const rows = rawRows.map(r => ({
         ...r,
         applied_at: r.applied_epoch != null ? new Date(Number(r.applied_epoch) * 1000) : r.applied_at
@@ -541,7 +572,9 @@ export class MariaDBAdapter extends BaseAdapter {
           }
 
           if (currentChecksum) {
-            if (row.checksum == null) {
+            if (row.checksum == null && this.readOnly) {
+              // Would be baselined by a writing command; read-only leaves it.
+            } else if (row.checksum == null) {
               // Row predates checksum tracking (upgraded from an older version
               // of this tool). There's no historical checksum to compare
               // against, so adopt the current on-disk content as the trusted
@@ -1464,9 +1497,14 @@ export class MariaDBAdapter extends BaseAdapter {
       // Same file set and order status()/up() use, so the cross-file FK
       // check below sees files in the order they actually run. In a
       // versioned project R__ (DCL) files are ignored and reported.
-      const migrationFiles = this.config.mode === 'repeatable'
-        ? (await fs.readdir(migrationsDir)).filter(f => f.endsWith('.sql')).sort()
+      // DCL may list several directories (see core/migration-dirs.js).
+      const repeatableFiles = this.config.mode === 'repeatable'
+        ? await listMigrationFiles(migrationsDir, f => f.endsWith('.sql'))
+        : null;
+      const migrationFiles = repeatableFiles
+        ? repeatableFiles.map(f => f.fileName)
         : await this.getMigrationFiles();
+      const filePathOf = new Map((repeatableFiles || []).map(f => [f.fileName, f.filePath]));
       results.ignoredRepeatableFiles = await this.getIgnoredRepeatableFiles();
       // options.files: report only these (e.g. the pending ones). Every file
       // is still read, so the cross-file FK check knows what earlier
@@ -1476,7 +1514,7 @@ export class MariaDBAdapter extends BaseAdapter {
 
       const filesData = [];
       for (const file of migrationFiles) {
-        filesData.push({ fileName: file, content: await fs.readFile(path.join(migrationsDir, file), 'utf-8') });
+        filesData.push({ fileName: file, content: await fs.readFile(filePathOf.get(file) || path.join(migrationsDir, file), 'utf-8') });
       }
       results.configWarnings = this.checkValidationConfig(migrationFiles);
 
@@ -1541,7 +1579,8 @@ export class MariaDBAdapter extends BaseAdapter {
     const annotations = {
       allowDangerous: false,
       allowForbidden: false,
-      allowedCodes: []
+      allowedCodes: [],
+      approvedBy: null
     };
     const commentPrefix = '--';
     for (const line of content.split('\n')) {
@@ -1558,6 +1597,8 @@ export class MariaDBAdapter extends BaseAdapter {
         const v = forbiddenMatch[1].trim().toLowerCase();
         annotations.allowForbidden = ['true', 'yes', '1'].includes(v);
       }
+      const approvedMatch = t.match(/--\s*@approved-by\s*:\s*(.+)/i);
+      if (approvedMatch && approvedMatch[1].trim()) annotations.approvedBy = approvedMatch[1].trim();
       const allowMatch = t.match(/--\s*@allow\s*:\s*(.+)/i);
       if (allowMatch) {
         const codes = allowMatch[1].split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
@@ -1933,8 +1974,12 @@ export class MariaDBAdapter extends BaseAdapter {
             });
             continue;
           }
-          // Forbid DROP DATABASE in UP section unless explicitly approved via @allow-forbidden
-          if (hasDropDatabaseInUp) {
+          // Forbid DROP DATABASE in UP section unless explicitly approved via @allow-forbidden.
+          // Only the rule whose own pattern matches reports it: DROP DATABASE
+          // is DROP_DATABASE, DROP SCHEMA is DROP_SCHEMA — not both for either,
+          // or allowing the one code shown could never be enough.
+          if (hasDropDatabaseInUp || /DROP\s+SCHEMA/i.test(normalizedUpSQL)) {
+            if (!rule.pattern.test(normalizedUpSQL)) continue;
             const isAllowed = options.allowForbidden ||
               (options.allowedCodes && options.allowedCodes.includes(rule.code));
             if (isAllowed) {
@@ -2103,7 +2148,7 @@ export class MariaDBAdapter extends BaseAdapter {
 
     // Project policy (validation.customRules / validation.rules — see BaseAdapter.getValidationPolicy())
     this.evaluateCustomRules(checkStatements, options, { forbiddenOps, dangerousOps, warnings });
-    const policy = this.applyRulePolicy({ errors, forbiddenOps, dangerousOps, warnings });
+    const policy = this.applyApproval(this.applyRulePolicy({ errors, forbiddenOps, dangerousOps, warnings }), fileAnnotations.approvedBy || options.approvedBy);
 
     // Combine errors: forbidden ops + dangerous ops (when not allowed) + structural errors
     const allErrors = [...policy.errors, ...policy.forbiddenOps, ...policy.dangerousOps];
@@ -2114,6 +2159,7 @@ export class MariaDBAdapter extends BaseAdapter {
       warnings: policy.warnings,
       forbiddenOps: policy.forbiddenOps,
       dangerousOps: policy.dangerousOps,
+      approval: policy.approval,
       suspiciousNames: suspiciousNameWarnings,
       performanceIssues: performanceWarnings,
       performanceMetrics: performanceResult.metrics,

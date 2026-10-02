@@ -64,6 +64,13 @@ Every run writes **its own file** (`notification-<runId>.html`), created exclusi
 
 Both files are written **readable by the owner only** (mode `0600`), since a DCL email contains plaintext passwords.
 
+**Retention.** Per-run copies would otherwise pile up — each holding passwords — so after writing, only the newest `notifications.keepRuns` copies **of each file name** are kept (default `20`; `0` keeps every copy). The latest copy (`notification.html`, `notification-<instance>.html`, `notification-summary.html`) is never removed, and one name's copies never count against another's (`notification-prod-tw-*` is not pruned by a `notification-*` run). An invalid value or a failed delete only prints a warning: cleanup never costs a run its own email.
+
+```javascript
+// config.js
+notifications: { keepRuns: 5 }
+```
+
 ### Event types
 
 | Event | Shown in email | Password shown? |
@@ -227,7 +234,7 @@ Set `DCL_PASSWORD_EXPIRY_DAYS` (default `7`) to control the expiry window. This 
 ## Security Best Practices
 
 1. **Never commit `reports/`** — it's already in `.gitignore`; don't override that.
-2. **Treat notification files as one-time secrets in transit** — read them, deliver them to wherever they need to go, then delete them. Because each run now keeps its own file, they **accumulate** in a persistent output directory (e.g. a bind-mounted `reports/`): delete them after delivery. In a Kubernetes Job the output directory is the pod's `emptyDir`, which goes away with the pod.
+2. **Treat notification files as one-time secrets in transit** — read them, deliver them to wherever they need to go, then delete them. Each run keeps its own file, so in a persistent output directory (e.g. a bind-mounted `reports/`) the last `notifications.keepRuns` (default 20) of them stay around until pruned: delete them after delivery, or lower `keepRuns`. In a Kubernetes Job the output directory is the pod's `emptyDir`, which goes away with the pod.
 3. **Rotate credentials** regularly by adding an `ALTER USER` DCL migration — that always produces a `password_changed` event regardless of whether the account already existed.
 4. **Idempotency** — the checksum is computed from the original file (with `CHANGE_ME_ON_FIRST_LOGIN` intact), so password rotation does **not** trigger a re-run automatically.
 5. **Run `dcl:verify` / `dcl:verify-all` / `test-all` against a scratch database.** They really execute the files (twice) to check idempotency, without recording checksums or writing an email. Accounts they create get a throwaway random password that nobody sees — so a later `dcl` run reports them as "already existed, password unchanged". If you did verify against a real database, rotate those accounts afterwards. (Previously the placeholder wasn't resolved on MariaDB, and such accounts ended up with the literal password `CHANGE_ME_ON_FIRST_LOGIN`.)

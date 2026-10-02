@@ -23,6 +23,7 @@ import path from 'path';
 import crypto from 'crypto';
 import os from 'os';
 import { maskComments } from './source-scan.js';
+import { listMigrationFiles } from './migration-dirs.js';
 
 /**
  * Built-in helpers passed as the third argument to MongoDB DCL up(db, client, helpers).
@@ -80,18 +81,15 @@ export class RepeatableRunner {
 
   /**
    * Get all repeatable migration files
-   * @param {string} migrationsDir - Migrations directory
+   * @param {string|string[]} migrationsDir - Migrations directory, or several (merged by file name, see migration-dirs.js)
    * @returns {Promise<Array<{fileName: string, filePath: string, content: string, checksum: string, annotations: Object}>>}
    */
   async getRepeatableFiles(migrationsDir) {
-    const files = await fs.readdir(migrationsDir);
-    const repeatableFiles = files
-      .filter(f => f.startsWith('R__') && (f.endsWith('.sql') || f.endsWith('.js')))
-      .sort();
+    const repeatableFiles = await listMigrationFiles(migrationsDir,
+      f => f.startsWith('R__') && (f.endsWith('.sql') || f.endsWith('.js')));
 
     const result = [];
-    for (const fileName of repeatableFiles) {
-      const filePath = path.join(migrationsDir, fileName);
+    for (const { fileName, filePath } of repeatableFiles) {
       const content = await fs.readFile(filePath, 'utf-8');
       const checksum = this.calculateChecksum(content);
       const annotations = this.parseFileAnnotations(content, fileName);
@@ -546,7 +544,8 @@ export class RepeatableRunner {
    * @param {Object} connection - Database connection
    * @returns {Promise<Map<string, {checksum: string, appliedAt: Date}>>}
    */
-  async getStoredChecksumsMariaDB(connection) {
+  async getStoredChecksumsMariaDB(connection, { readOnly = false } = {}) {
+    if (readOnly) return this.readStoredChecksumsMariaDB(connection);
     // Ensure checksum table exists
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS ${this.checksumTable} (
@@ -567,6 +566,32 @@ export class RepeatableRunner {
     );
 
     const checksums = new Map();
+    for (const row of rows) {
+      checksums.set(row.id, {
+        checksum: row.checksum,
+        appliedAt: row.applied_epoch != null ? new Date(Number(row.applied_epoch) * 1000) : row.applied_at,
+        content: row.content ?? null
+      });
+    }
+    return checksums;
+  }
+
+  /**
+   * getStoredChecksumsMariaDB() without creating or altering the table — for
+   * read-only commands (dcl:status, dcl --plan) run with a SELECT-only
+   * account. No table yet means nothing has been applied.
+   */
+  async readStoredChecksumsMariaDB(connection) {
+    const [cols] = await connection.execute(
+      'SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?',
+      [this.checksumTable]
+    );
+    const checksums = new Map();
+    if (cols.length === 0) return checksums;
+    const hasContent = cols.some(c => String(c.name).toLowerCase() === 'content');
+    const [rows] = await connection.execute(
+      `SELECT id, checksum, applied_at, UNIX_TIMESTAMP(applied_at) AS applied_epoch, ${hasContent ? 'content' : 'NULL AS content'} FROM ${this.checksumTable}`
+    );
     for (const row of rows) {
       checksums.set(row.id, {
         checksum: row.checksum,
@@ -679,7 +704,8 @@ export class RepeatableRunner {
     
     let storedChecksums;
     if (dbType === 'mariadb') {
-      storedChecksums = await this.getStoredChecksumsMariaDB(context.connection);
+      // status() only reads: never create the checksum table from here
+      storedChecksums = await this.getStoredChecksumsMariaDB(context.connection, { readOnly: true });
     } else if (dbType === 'mongodb') {
       storedChecksums = await this.getStoredChecksumsMongoDB(context.db);
     } else {
@@ -765,7 +791,8 @@ export class RepeatableRunner {
         const validateOptions = {
           allowDangerous: file.annotations.allowDangerous,
           allowForbidden: file.annotations.allowForbidden,
-          allowedCodes: file.annotations.allowedCodes
+          allowedCodes: file.annotations.allowedCodes,
+          approvedBy: context.approvedBy
         };
         
         const validationResult = validator.validateContent(file.content, file.fileName, validateOptions);
@@ -860,7 +887,8 @@ export class RepeatableRunner {
         const validateOptions = {
           allowDangerous: file.annotations.allowDangerous,
           allowForbidden: file.annotations.allowForbidden,
-          allowedCodes: file.annotations.allowedCodes
+          allowedCodes: file.annotations.allowedCodes,
+          approvedBy: context.approvedBy
         };
         
         const validationResult = validator.validateContent(file.content, file.fileName, validateOptions);

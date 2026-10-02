@@ -42,6 +42,8 @@ node src/cli.js -c test-fixtures/mariadb/test-success/ddl/config.js status
 node src/cli.js -c test-fixtures/mongodb/test-success/ddl/config.js status
 ```
 
+`status`, `status-all`, `up --dry-run`, `up-all --dry-run`, `dcl:status`, `dcl:status-all`, `dcl --plan` / `--dry-run` and `dcl-all --plan` / `--dry-run` are **read-only**: they never create the changelog or checksum table (or the database), and never backfill checksums. They work with an account that only has `SELECT` on the database (`SELECT` on `mysql.*` too for `dcl --plan`'s current-grants view on MariaDB); a database where nothing has been applied yet simply shows everything as pending. Commands that write still need the usual privileges.
+
 ### 2. Run Migrations (UP)
 
 ```bash
@@ -263,7 +265,7 @@ node src/cli.js up --dry-run -c <config>
 node src/cli.js sync --allow DROP_COLUMN -c <config>
 ```
 
-Every allowance used is printed in the run log (`⚠️ Allowed in <file> [CODE]: …`).
+Every allowance used is printed in the run log (`⚠️ Allowed in <file> [CODE]: …`). For a forbidden (🔴) operation, record who approved it — `-- @approved-by: <name>` in the file or `--approved-by <name>` for the run; the log line then ends with `— approved by <name>` and `sync`'s notification email lists it under **Approved exceptions**. With `validation.requireApprover: true` in the config, a forbidden allowance without an approver is refused (`APPROVER_REQUIRED`). See [VALIDATION-RULES-REFERENCE.md](VALIDATION-RULES-REFERENCE.md#recording-who-approved-a-forbidden-operation).
 
 ---
 
