@@ -7,6 +7,8 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import { extractChangelogSection } from '../scripts/changelog-section.mjs';
 
+const version = JSON.parse(fs.readFileSync('package.json', 'utf-8')).version;
+
 const sample = [
   '# Changelog', '', '## [Unreleased]', '', '- next thing', '',
   '## [3.0.0] - 2026-10-10', '', '### TL;DR', '- big change', '',
@@ -29,12 +31,15 @@ describe('extractChangelogSection', () => {
     const run = (v) => spawnSync(process.execPath, ['scripts/changelog-section.mjs', v], { encoding: 'utf-8' });
     expect(run('0.0.1').status).toBe(1);
     expect(run('0.0.1').stderr).toContain('has no "## [0.0.1]" section');
-    const unreleased = run('Unreleased');
-    expect(unreleased.status).toBe(0);
-    expect(unreleased.stdout).toContain('### Upgrade guide');
+    const current = run(version);
+    expect(current.status).toBe(0);
+    expect(current.stdout.trim()).not.toBe('');
   });
 
-  it('the repository CHANGELOG has a non-empty Unreleased section', () => {
-    expect(extractChangelogSection(fs.readFileSync('CHANGELOG.md', 'utf-8'), 'Unreleased')).not.toBe('');
+  // The release a vX.Y.Z tag would publish must have notes — catches a
+  // version bump without them here instead of at tag time.
+  it('CHANGELOG.md has non-empty notes for the version in package.json', () => {
+    const section = extractChangelogSection(fs.readFileSync('CHANGELOG.md', 'utf-8'), version);
+    expect(section, `CHANGELOG.md needs a "## [${version}]" section`).toBeTruthy();
   });
 });

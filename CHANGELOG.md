@@ -11,11 +11,14 @@ major version.
 
 ## [Unreleased]
 
-Everything since **2.0.0** (2026-07-23, commit `644fa86`), the version the team runs
-today. Contains breaking changes, so it should be released as **3.0.0**.
+## [3.0.0] - 2026-10-02
 
-> `package.json` has said `2.1.0` since 2026-09-29 (`07bd065`), in the middle of this
-> work. That number was never a release — compare against 2.0.0.
+Everything since **2.0.0** (2026-07-23, commit `644fa86`). Contains breaking changes —
+read the upgrade guide below before switching an environment over.
+
+> `package.json` said `2.1.0` from 2026-09-29 (`07bd065`) until this release, in the
+> middle of this work. That number was never a release — images built in that window
+> and tagged `2.1.0` are pre-release builds. Compare against 2.0.0.
 
 ### TL;DR
 

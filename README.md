@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.12-green.svg)](https://nodejs.org/)
-[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-3.0.0-blue.svg)](package.json)
 
 New to this tool? [QUICKSTART.md](QUICKSTART.md) is a task-oriented walkthrough ("I want to create a migration", "I want to add a DB account", …). This README is the reference: what the tool does, every command, every config shape, and where the deeper docs live.
 
@@ -90,7 +90,7 @@ Two things deliberately have **no** fallback:
 
 ### Upgrading from 2.0.0
 
-The full, step-by-step upgrade guide and release notes for the team are in **[CHANGELOG.md](CHANGELOG.md)** (`[Unreleased]` until the next release is tagged). In short, these used to be silent and now stop the run:
+The full, step-by-step upgrade guide and release notes for the team are in **[CHANGELOG.md](CHANGELOG.md)** (see `[3.0.0]`). In short, these used to be silent and now stop the run:
 
 | Before | Now |
 |---|---|

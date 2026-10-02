@@ -26,7 +26,7 @@ const program = new Command();
 program
   .name('db-migrate')
   .description('Unified database migration tool for MongoDB and MariaDB/MySQL (supports multiple instances, DDL versioned and DCL repeatable modes)')
-  .version('2.1.0')
+  .version('3.0.0')
   .option('-c, --config <path>', 'Path to config file')
   .option('-t, --type <type>', 'Database type (mongodb, mariadb)');
 
