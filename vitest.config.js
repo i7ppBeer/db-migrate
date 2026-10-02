@@ -7,7 +7,7 @@ export default defineConfig({
     ],
     // integration.test.js hits a real MariaDB (see vitest.integration.config.js
     // + `npm run test:integration`) — keep the default `npm test` fast/offline.
-    exclude: [...configDefaults.exclude, 'test/integration.test.js'],
+    exclude: [...configDefaults.exclude, 'test/integration.test.js', 'test/mysql-compat.test.js'],
     coverage: {
       provider: 'v8',
       include: [

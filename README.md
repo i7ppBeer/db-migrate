@@ -116,6 +116,18 @@ These used to be silent and now stop the run:
 | `DROP DATABASE` in Up was reported under two codes (`DROP_DATABASE` + `DROP_SCHEMA`, or `DROP_DATABASE` + `DROP_DATABASE_CMD` on MongoDB), so `@allow: DROP_DATABASE` was never enough | one code per form; `@allow: DROP_DATABASE` releases `DROP DATABASE` / `.dropDatabase()` |
 | Per-run notification copies (and `sync -o` reports) accumulated forever | only the newest `notifications.keepRuns` (default 20) of each name are kept; the latest copy always stays |
 
+#### The tool's own tables
+
+No new tables, no renamed ones, record keys unchanged — each gained one column, added automatically by the first **writing** command after upgrading (`up`, `sync`, `down`, `baseline`, `dcl` …; read-only ones like `status` and `--dry-run` never alter anything):
+
+| Table / collection (default name) | Added | Existing records |
+|---|---|---|
+| MariaDB/MySQL DDL `schema_migrations` | `checksum VARCHAR(64) NULL` | filled from the file **as it is on disk at that first run** (it becomes the baseline later edits are checked against — make sure the files match what was applied) |
+| MongoDB DDL `changelog` | `checksum` field | same |
+| DCL `dcl_repeatable_migrations` (both) | `content` (`MEDIUMTEXT NULL` / field) | stays empty until that script is applied again, so `dcl --plan` shows no diff for it until then |
+
+On MariaDB/MySQL the account needs `ALTER` on those tables for that first run. Older versions ignore the extra column, so going back is safe. (The DCL table always had `checksum`; the DDL changelog never did before.)
+
 ### Multi-Instance
 
 A config can declare an `instances: [...]` array instead of (or alongside) flat connection fields; every command has a `*-all` counterpart (`up-all`, `status-all`, `dcl-all`, `dcl:status-all`, `dcl:verify-all`, `test-instances`) that runs across all of them. See [docs/MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md).
@@ -384,7 +396,9 @@ Full rules: [docs/VALIDATION-RULES-REFERENCE.md](docs/VALIDATION-RULES-REFERENCE
 npm test                 # Unit tests (vitest)
 npm run test:coverage    # Unit tests + coverage; fails below the floors in vitest.config.js (CI runs this)
 npm run lint             # ESLint; any warning fails (--max-warnings 0)
-npm run test:integration # Integration tests against real DBs (vitest.integration.config.js); skips without a DB unless INTEGRATION_REQUIRE_DB=1
+npm run test:integration # Integration tests against real DBs (vitest.integration.config.js): MariaDB lock guard, plus the CLI against MySQL 8
+                         #   (test/mysql-compat.test.js, MYSQL_HOST/PORT, default localhost:3307); each skips without its DB unless
+                         #   INTEGRATION_REQUIRE_DB=1 / MYSQL_REQUIRE_DB=1 (CI sets both)
 npm run docker:test      # Full e2e: builds the image, brings up MongoDB + MariaDB, runs test-all
 ```
 

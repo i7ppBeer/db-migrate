@@ -24,6 +24,7 @@ import crypto from 'crypto';
 import os from 'os';
 import { maskComments } from './source-scan.js';
 import { listMigrationFiles } from './migration-dirs.js';
+import { addColumnIfMissing } from './sql-columns.js';
 
 /**
  * Built-in helpers passed as the third argument to MongoDB DCL up(db, client, helpers).
@@ -557,7 +558,7 @@ export class RepeatableRunner {
     `);
     // content: the file as last applied (placeholders, never passwords), so
     // `dcl --plan` can show what changed. Added to tables from before it existed.
-    await connection.execute(`ALTER TABLE ${this.checksumTable} ADD COLUMN IF NOT EXISTS content MEDIUMTEXT NULL`);
+    await addColumnIfMissing(connection, { table: this.checksumTable, tableName: this.checksumTable, column: 'content', definition: 'MEDIUMTEXT NULL' });
 
     // applied_at as a Unix epoch — the driver would read the server-time-zone
     // value as local time (same fix as the DDL changelog, mariadb-adapter status())

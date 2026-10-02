@@ -157,7 +157,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run integration tests (real MariaDB)
+      # MySQL for test/mysql-compat.test.js: the CLI against a real MySQL 8,
+      # so MariaDB-only SQL on the tool's own paths can't slip in unnoticed.
+      # The image's init runs a temporary server without networking; the
+      # loop waits for the real one (TCP inside the container).
+      - name: Start MySQL 8.4
+        run: |
+          docker run -d --name mysql-compat -p 3307:3306 -e MYSQL_ROOT_PASSWORD=rootpass mysql:8.4
+          for i in $(seq 1 60); do
+            docker exec mysql-compat mysql -h127.0.0.1 -uroot -prootpass -e 'SELECT 1' >/dev/null 2>&1 && exit 0
+            sleep 3
+          done
+          docker logs mysql-compat | tail -30
+          exit 1
+
+      - name: Run integration tests (real MariaDB + MySQL)
         run: npm run test:integration
         env:
           INTEGRATION_REQUIRE_DB: '1'
@@ -165,6 +179,11 @@ jobs:
           MARIADB_PORT: '3306'
           MARIADB_USER: root
           MARIADB_PASSWORD: rootpass
+          MYSQL_REQUIRE_DB: '1'
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: '3307'
+          MYSQL_USER: root
+          MYSQL_PASSWORD: rootpass
 
       - name: Upload test-all reports
         if: always()

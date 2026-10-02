@@ -1185,7 +1185,8 @@ program
     let adapter;
     
     try {
-      adapter = await getAdapter(options);
+      // --dry-run only lists what would be marked: read-only, like the other previews
+      adapter = await getAdapter(options, { readOnly: Boolean(options.dryRun) });
       await adapter.connect();
       
       console.log(chalk.blue(`\n[BASELINE] Marking existing migrations as applied (${adapter.dbType})...`));

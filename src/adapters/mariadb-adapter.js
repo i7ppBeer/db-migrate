@@ -6,6 +6,7 @@
 import { BaseAdapter, isRepeatableMigrationFile, selectPendingMigrations } from '../core/base-adapter.js';
 import { SanityChecker, SQLChecks } from '../core/sanity-checker.js';
 import { listMigrationFiles, pickDir, findExisting } from '../core/migration-dirs.js';
+import { addColumnIfMissing } from '../core/sql-columns.js';
 import mysql from 'mysql2/promise';
 import fs from 'fs/promises';
 import path from 'path';
@@ -454,10 +455,11 @@ export class MariaDBAdapter extends BaseAdapter {
     `);
     // Self-heal for changelog tables created before checksum tracking existed —
     // CREATE TABLE IF NOT EXISTS above is a no-op against them, so the column
-    // needs adding explicitly. IF NOT EXISTS makes this a cheap no-op once done.
-    await this.connection.execute(
-      `ALTER TABLE ${qualifiedTable} ADD COLUMN IF NOT EXISTS checksum VARCHAR(64) NULL`
-    );
+    // needs adding explicitly (a cheap lookup once it's there; MySQL-safe).
+    await addColumnIfMissing(this.connection, {
+      table: qualifiedTable, tableName: this.changelogTable, schema: dbName || null,
+      column: 'checksum', definition: 'VARCHAR(64) NULL'
+    });
   }
 
   /**

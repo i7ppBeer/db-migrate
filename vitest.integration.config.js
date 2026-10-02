@@ -5,7 +5,7 @@ import { defineConfig } from 'vitest/config';
 // `npm run test:integration` points here instead, which does NOT exclude it.
 export default defineConfig({
   test: {
-    include: ['test/integration.test.js'],
+    include: ['test/integration.test.js', 'test/mysql-compat.test.js'],
     testTimeout: 30000,
     hookTimeout: 30000,
   },
