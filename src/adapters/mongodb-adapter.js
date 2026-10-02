@@ -8,7 +8,7 @@ import { BaseAdapter, isRepeatableMigrationFile, selectPendingMigrations } from 
 import { listMigrationFiles, pickDir, findExisting } from '../core/migration-dirs.js';
 import { SanityChecker, MongoDBChecks } from '../core/sanity-checker.js';
 import migrateMongo from 'migrate-mongo';
-import { MongoClient, MongoOperationTimeoutError } from 'mongodb';
+import { MongoOperationTimeoutError } from 'mongodb';
 import { maskComments, findMatchingBrace } from '../core/source-scan.js';
 import fs from 'fs/promises';
 import path from 'path';
@@ -1197,7 +1197,7 @@ export async function down(db, client) {
    * @param {string} fileName - File name
    * @returns {Object} annotations
    */
-  parseFileAnnotations(content, fileName) {
+  parseFileAnnotations(content, _fileName) {
     const annotations = {
       allowDangerous: false,
       allowForbidden: false,
@@ -1255,7 +1255,7 @@ export async function down(db, client) {
    * @param {string} fileName
    * @returns {{errors: Array, warnings: Array}}
    */
-  validateJSSyntax(content, fileName) {
+  validateJSSyntax(content, _fileName) {
     const errors = [];
     const warnings = [];
 
@@ -1271,7 +1271,6 @@ export async function down(db, client) {
       .replace(/^\s*export\s*\{\s*[^}]+\s*\};?\s*$/gm, '');
 
     try {
-      // eslint-disable-next-line no-new-func
       new Function(parseTarget);
     } catch (error) {
       errors.push({
@@ -1808,7 +1807,7 @@ export async function down(db, client) {
    * @param {string} fileName - File name for context
    * @returns {Object} - Performance analysis result
    */
-  checkPerformanceIssues(js, fileName = '') {
+  checkPerformanceIssues(js, _fileName = '') {
     const rules = this.getValidationRules();
     const thresholds = rules.performance.thresholds;
     const messages = rules.performance.messages;

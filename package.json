@@ -16,8 +16,9 @@
     "test:migration": "node src/cli.js test",
     "test:all": "node src/cli.js test-all",
     "test": "vitest",
+    "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run --config vitest.integration.config.js",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "docker:up": "docker compose up -d mongodb mariadb",
     "docker:down": "docker compose down",
     "docker:test": "docker compose run --rm test-all",
@@ -46,6 +47,7 @@
     "node-sql-parser": "^5.4.0"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^9.15.0",
     "vitest": "^4.1.11"
   },

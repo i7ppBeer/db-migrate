@@ -18,4 +18,13 @@ export default [
       'no-var': 'error',
     },
   },
+  {
+    // Migration files and templates: up(db, client) / down(db, client) is the
+    // signature the runner calls, so an unused parameter there documents the
+    // API rather than being dead code.
+    files: ['test-fixtures/**/*.js', 'templates/**/*.js'],
+    rules: {
+      'no-unused-vars': ['warn', { args: 'none' }],
+    },
+  },
 ];

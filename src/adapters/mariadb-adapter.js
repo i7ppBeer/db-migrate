@@ -1576,7 +1576,7 @@ export class MariaDBAdapter extends BaseAdapter {
    * @param {string} fileName - File name
    * @returns {Object} annotations
    */
-  parseFileAnnotations(content, fileName) {
+  parseFileAnnotations(content, _fileName) {
     const annotations = {
       allowDangerous: false,
       allowForbidden: false,
@@ -1630,7 +1630,7 @@ export class MariaDBAdapter extends BaseAdapter {
    * @param {string} fileName File name for error messages
    * @returns {{ errors: Array, warnings: Array }}
    */
-  validateSQLSyntax(content, fileName) {
+  validateSQLSyntax(content, _fileName) {
     const errors = [];
     const warnings = [];
 
@@ -2544,7 +2544,7 @@ export class MariaDBAdapter extends BaseAdapter {
    * @param {string} fileName - File name for context
    * @returns {Object} - Performance analysis result
    */
-  checkPerformanceIssues(sql, fileName = '') {
+  checkPerformanceIssues(sql, _fileName = '') {
     const rules = this.getValidationRules();
     const thresholds = rules.performance.thresholds;
     const messages = rules.performance.messages;

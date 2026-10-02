@@ -112,7 +112,7 @@ export async function down(db, client) {
   // Drop the phone index first
   try {
     await db.collection('users').dropIndex('idx_users_phone');
-  } catch (err) {
+  } catch {
     // Index might not exist
     console.log('Index idx_users_phone not found, skipping drop');
   }

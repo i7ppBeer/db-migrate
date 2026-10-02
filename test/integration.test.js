@@ -83,7 +83,6 @@ if (!dbAvailable && process.env.INTEGRATION_REQUIRE_DB === '1') {
 }
 
 if (!dbAvailable) {
-  // eslint-disable-next-line no-console
   console.warn(
     `\n⚠️  Skipping lock-guard e2e suite: no MariaDB reachable at ${HOST}:${PORT}.\n` +
     '   Run `docker compose up -d mariadb` (or set MARIADB_HOST/PORT) and re-run `npm run test:integration`.\n'

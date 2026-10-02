@@ -9,7 +9,7 @@
  */
 
 export async function up(db, client) {
-  const adminDb = client.db('admin');
+  // const adminDb = client.db('admin');
   
   // Example: Create user if not exists
   // try {

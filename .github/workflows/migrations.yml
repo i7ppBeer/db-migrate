@@ -102,8 +102,10 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Run Tests
-        run: npm test
+      # Unit tests with coverage; fails if coverage drops below the floors in
+      # vitest.config.js (coverage.thresholds)
+      - name: Run Tests (with coverage thresholds)
+        run: npm run test:coverage
 
       - name: Validate Migrations
         run: |

@@ -101,7 +101,6 @@ export class SanityChecker {
     }
 
     const startTime = Date.now();
-    let migrationExecuted = false;
     
     try {
       // ═══════════════════════════════════════════════════════════
@@ -151,7 +150,6 @@ export class SanityChecker {
       this.log('═'.repeat(60));
 
       await up(context.db, context.client);
-      migrationExecuted = true;
       this.results.migration = { success: true };
       
       this.log('✅ Migration Executed');
@@ -353,7 +351,7 @@ export const MongoDBChecks = {
    * Create a pre-check for collection existence
    */
   createCollectionExistsCheck(collectionName, shouldExist = true) {
-    return async (db, client) => {
+    return async (db) => {
       const exists = await this.collectionExists(db, collectionName);
       if (shouldExist && !exists) {
         return { success: false, error: `Collection '${collectionName}' does not exist` };
@@ -369,7 +367,7 @@ export const MongoDBChecks = {
    * Create a post-check for field existence on all documents
    */
   createFieldExistsCheck(collectionName, fieldName) {
-    return async (db, client) => {
+    return async (db) => {
       const result = await this.allDocumentsHaveField(db, collectionName, fieldName);
       if (!result.success) {
         return { 

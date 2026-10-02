@@ -1743,8 +1743,6 @@ DROP TABLE orders;
   // ─────────────────────────────────────────────────────────────────────────
   describe('validate() — FK integration', () => {
     it('cross-file FK error is merged into correct file result and marks results.valid false', async () => {
-      const mockFs = await import('fs/promises');
-      const originalReaddir = mockFs.default?.readdir;
 
       // Directly test via validateCrossFileFKDependencies + validate() result structure
       // by simulating what validate() does with real filesData

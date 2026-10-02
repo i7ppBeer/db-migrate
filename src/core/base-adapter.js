@@ -335,7 +335,7 @@ export class BaseAdapter {
    * @param {number} count - Number of migrations to rollback
    * @returns {Promise<{rolledBack: Array, errors: Array}>}
    */
-  async down(count = 1) {
+  async down(_count = 1) {
     throw new Error('down() must be implemented by subclass');
   }
 
@@ -344,7 +344,7 @@ export class BaseAdapter {
    * @param {string} name - Migration name
    * @returns {Promise<string>} - Created file path
    */
-  async create(name) {
+  async create(_name) {
     throw new Error('create() must be implemented by subclass');
   }
 

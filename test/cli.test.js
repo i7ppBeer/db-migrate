@@ -3,7 +3,7 @@
  * 測試 CLI 的 Sanity Check 選項
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { Command } from 'commander';
 
 describe('CLI Sanity Check Options', () => {

@@ -210,7 +210,7 @@ GRANT ${priv} ON mydb.* TO 'user'@'%';
       { name: 'wipe_cache', keyword: 'wipe' }
     ];
 
-    newKeywords.forEach(({ name, keyword }) => {
+    newKeywords.forEach(({ name }) => {
       it(`should detect suspicious table name: ${name}`, () => {
         const sql = `CREATE TABLE \`${name}\` (id INT);`;
         const warnings = adapter.checkSuspiciousNames(sql);
