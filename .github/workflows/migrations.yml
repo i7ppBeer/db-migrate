@@ -31,11 +31,20 @@ on:
     # Release tags (v2.2.0) build the image with version tags 2.2.0 and 2.2;
     # GitHub doesn't apply the paths filter below to tag pushes.
     tags: ['v*']
+    # Anything that can change the CI result or the image: code, tests and
+    # fixtures, test/lint config, the image's own files, and this workflow.
+    # Docs-only commits don't trigger a run.
     paths:
       - 'migrations/**'
       - 'src/**'
+      - 'test/**'
+      - 'test-fixtures/**'
       - 'Dockerfile*'
+      - 'docker/**'
+      - 'docker-compose.yml'
       - 'package*.json'
+      - '*.config.js'
+      - '.github/workflows/**'
   pull_request:
     branches: [main]
   workflow_dispatch:
