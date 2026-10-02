@@ -221,9 +221,31 @@ the only headroom signal. MongoDB — filesystem usage from `dbStats`
 (`fsUsedSize`/`fsTotalSize`) over `runtimeGates.diskUsageWarnPercent` (default 90).
 Runs with R2 (DDL commands only).
 
+**MongoDB — large collections.** For the migrations about to run (`up`, `sync`, `up-all`,
+and their `--dry-run`), each `up()` is scanned for operations whose run time grows with
+the collection — `createIndex`, `createIndexes`, `updateMany`, `deleteMany`, `bulkWrite`
+— on a named collection (`db.collection('orders').createIndex(…)`, or
+`const orders = db.collection('orders')` then `orders.createIndex(…)`). If that
+collection has `runtimeGates.largeCollectionDocs` documents or more (default 1,000,000;
+`0` turns this off), a warning names the file, the operation, the collection and its
+size, and the operation time limit that will apply to that file — or that none does,
+with how to set one (`ddlSafety.operationTimeoutMs` / `// @operation-timeout-ms:`, see
+R5):
+
+```
+⚠️  20260101000001-index-orders.js: createIndex on 'orders' (2,500,000 documents, over runtimeGates.largeCollectionDocs = 1,000,000)
+    may run for a long time and load the server; no operation time limit applies — set ddlSafety.operationTimeoutMs,
+    or "// @operation-timeout-ms: <ms>" in this file, to bound it. Consider running it off-peak.
+```
+
+Never blocks. Sizes come from `estimatedDocumentCount()` (collection metadata — cheap,
+no extra privilege); each collection is counted once per run. Collection names built at
+runtime, and collections in another database reached through `client.db(…)`, are not
+seen. A file that can't be read or counted is listed as skipped.
+
 ```javascript
 // config.js — all optional
-runtimeGates: { longTransactionSec: 60, replicationLagWarnSec: 30, binlogWarnMb: 10240, diskUsageWarnPercent: 90 }
+runtimeGates: { longTransactionSec: 60, replicationLagWarnSec: 30, binlogWarnMb: 10240, diskUsageWarnPercent: 90, largeCollectionDocs: 1000000 }
 ```
 
 ---

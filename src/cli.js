@@ -342,16 +342,24 @@ async function enforceValidationGate(adapter, status, options, { report = false 
  *   R2 — long-open transactions / metadata-lock waits on this database:
  *        refuses unless --allow-open-transactions (logged with a timestamp)
  *   R3 — read-only target: refuses, no override (connect to the primary)
- *   R4 — disk/binlog headroom, replication lag: warnings only
+ *   R4 — disk/binlog headroom, replication lag, and (MongoDB, for `files`)
+ *        index builds / bulk writes on large collections: warnings only
  * Checks that couldn't run (privileges, server type) are listed as skipped.
  *
  * @param {{ locks?: boolean, disk?: boolean, report?: boolean }} [opts] -
  *   locks/disk: run R2/R4 (DDL commands; `dcl` only needs R3);
  *   report: dry-run — print, set a failing exit code, don't throw
  */
-async function enforceRuntimeGates(adapter, options, { locks = true, disk = true, report = false } = {}) {
+async function enforceRuntimeGates(adapter, options, { locks = true, disk = true, report = false, files = [] } = {}) {
   if (typeof adapter.runtimePreflight !== 'function') return;
   const r = await adapter.runtimePreflight({ locks, disk });
+  // MongoDB: index builds / bulk writes on large collections among the
+  // migrations about to run (advisory)
+  if (typeof adapter.largeCollectionWarnings === 'function' && files.length > 0) {
+    const large = await adapter.largeCollectionWarnings(files);
+    r.warnings.push(...large.warnings);
+    r.skipped.push(...large.skipped);
+  }
 
   for (const sk of r.skipped) console.log(chalk.gray(`   ℹ️  Skipped ${sk}`));
   for (const w of r.warnings) console.log(chalk.yellow(`   ⚠️  ${w}`));
@@ -780,16 +788,16 @@ addAllowOptions(upCommand)
         printChecksumBaseline(status);
         printChecksumMismatches(status);
         printChangelogConsistency(status);
-        await enforceValidationGate(adapter, status, options, { report: true });
-        await enforceRuntimeGates(adapter, options, { report: true });
+        const gate = await enforceValidationGate(adapter, status, options, { report: true });
+        await enforceRuntimeGates(adapter, options, { report: true, files: gate.files });
         return;
       }
 
       const preflightStatus = await adapter.status();
       enforceChangelogConsistencyGate(preflightStatus);
       await enforceChecksumGate(preflightStatus, adapter, options);
-      await enforceValidationGate(adapter, preflightStatus, options);
-      if (preflightStatus.pending.length > 0) await enforceRuntimeGates(adapter, options);
+      const gate = await enforceValidationGate(adapter, preflightStatus, options);
+      if (preflightStatus.pending.length > 0) await enforceRuntimeGates(adapter, options, { files: gate.files });
 
       console.log(chalk.blue(`\n[UP] Running migrations (${adapter.dbType})...`));
       
@@ -949,7 +957,7 @@ addAllowOptions(syncCommand)
       // Forbidden operations this run was allowed to execute, and who
       // approved each — the email's "Approved exceptions" section
       const approvals = gate.allowed.filter(a => a.forbidden).map(a => ({ file: a.file, code: a.code, approvedBy: a.approvedBy }));
-      await enforceRuntimeGates(adapter, options);
+      await enforceRuntimeGates(adapter, options, { files: gate.files });
 
       // Snapshot before applying anything, so the schema section afterward
       // can show what actually changed instead of just the final state.
@@ -2054,15 +2062,15 @@ addAllowOptions(upAllCommand)
             console.log(chalk.gray(`   - ${p}`));
           }
           printChangelogConsistency(status);
-          await enforceValidationGate(adapter, status, options, { report: true });
-          await enforceRuntimeGates(adapter, options, { report: true });
+          const gate = await enforceValidationGate(adapter, status, options, { report: true });
+          await enforceRuntimeGates(adapter, options, { report: true, files: gate.files });
         } else {
           console.log(chalk.blue(`\n[${name}] ${resolveTargetLabel(adapter)} — running migrations...`));
           // Same pre-run gates as single-instance `up`
           enforceChangelogConsistencyGate(status);
           await enforceChecksumGate(status, adapter, options);
-          await enforceValidationGate(adapter, status, options);
-          if (status.pending.length > 0) await enforceRuntimeGates(adapter, options);
+          const gate = await enforceValidationGate(adapter, status, options);
+          if (status.pending.length > 0) await enforceRuntimeGates(adapter, options, { files: gate.files });
           const result = await adapter.up();
           
           if (result.applied.length > 0) {

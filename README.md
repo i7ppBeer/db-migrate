@@ -237,6 +237,8 @@ export default {
 
 One known-slow migration (e.g. a large index build) can get its own limit without loosening the rest — `// @operation-timeout-ms: 600000` at the top of the file (`0` = no limit for that file).
 
+Before `up`/`sync`/`up-all` run, a pending MongoDB migration that builds an index or runs `updateMany`/`deleteMany`/`bulkWrite` on a collection with 1,000,000+ documents gets a warning naming the collection's size and the time limit that will apply (`runtimeGates.largeCollectionDocs` to change the threshold, `0` to turn it off). It never blocks.
+
 See Gate R5 in [docs/RUNTIME-GATE-PLAN.md](docs/RUNTIME-GATE-PLAN.md).
 
 ### MongoDB DCL

@@ -56,7 +56,11 @@ export const RUNTIME_GATE_DEFAULTS = {
   // R4: binary logs larger than this in total are reported (MariaDB, never blocks)
   binlogWarnMb: 10240,
   // R4: filesystem usage above this is reported (MongoDB, never blocks)
-  diskUsageWarnPercent: 90
+  diskUsageWarnPercent: 90,
+  // R4: a pending MongoDB migration running an index build or a bulk
+  // update/delete on a collection with at least this many documents is
+  // reported (never blocks); 0 turns the check off
+  largeCollectionDocs: 1000000
 };
 
 /** Never relaxable via validation.rules: the file couldn't run at all. */

@@ -14,6 +14,9 @@ import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
 
+// Collection operations whose run time grows with the collection (see findHeavyOperations())
+const HEAVY_COLLECTION_OPS = ['createIndex', 'createIndexes', 'updateMany', 'deleteMany', 'bulkWrite'];
+
 /** "600000" → 600000, "0" → 0, anything else → null. */
 function parseOperationTimeoutAnnotation(raw) {
   return /^\d+$/.test(String(raw).trim()) ? Number(String(raw).trim()) : null;
@@ -688,6 +691,71 @@ export class MongoDBAdapter extends BaseAdapter {
         }
       } catch (error) {
         out.skipped.push(`R4 disk usage (dbStats): ${error.message}`);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Collections a migration's up() runs a potentially long operation on —
+   * index builds and bulk updates/deletes, whose run time grows with the
+   * collection. Finds db.collection('x').op(…) and, for
+   * `const c = db.collection('x')`, c.op(…). Names built at runtime are not
+   * seen.
+   * @returns {Array<{collection: string, ops: string[]}>}
+   */
+  findHeavyOperations(content) {
+    const body = maskComments(this.extractFunctionBody(content, 'up') || '', 'js');
+    const opAlt = HEAVY_COLLECTION_OPS.join('|');
+    const found = new Map();
+    const add = (collection, op) => {
+      if (!found.has(collection)) found.set(collection, new Set());
+      found.get(collection).add(op);
+    };
+    for (const m of body.matchAll(new RegExp(`\\.collection\\s*\\(\\s*(['"\`])([^'"\`]+)\\1\\s*\\)\\s*\\.\\s*(${opAlt})\\s*\\(`, 'g'))) {
+      add(m[2], m[3]);
+    }
+    const vars = new Map();
+    for (const m of body.matchAll(/\b(?:const|let|var)\s+(\w+)\s*=\s*(?:await\s+)?[\w.]*\.collection\s*\(\s*(['"`])([^'"`]+)\2\s*\)/g)) {
+      vars.set(m[1], m[3]);
+    }
+    for (const m of body.matchAll(new RegExp(`\\b(\\w+)\\s*\\.\\s*(${opAlt})\\s*\\(`, 'g'))) {
+      if (vars.has(m[1])) add(vars.get(m[1]), m[2]);
+    }
+    return [...found].map(([collection, ops]) => ({ collection, ops: [...ops] }));
+  }
+
+  /**
+   * Gate R4 (advisory) for the migrations about to run: an index build or
+   * bulk update/delete on a collection of runtimeGates.largeCollectionDocs
+   * documents or more can run for a long time and load the server — said
+   * before it starts, with the time limit that will (or won't) apply.
+   * Read-only: estimatedDocumentCount() reads collection metadata.
+   *
+   * @param {string[]} files - pending migrations, in run order
+   * @returns {Promise<{warnings: string[], skipped: string[]}>}
+   */
+  async largeCollectionWarnings(files) {
+    const out = { warnings: [], skipped: [] };
+    const threshold = this.getRuntimeGateConfig().largeCollectionDocs;
+    if (!threshold || !files || files.length === 0) return out;
+    const counts = new Map();
+    for (const fileName of files) {
+      try {
+        const content = await fs.readFile(path.join(this.config.migrationsDir, fileName), 'utf-8');
+        for (const { collection, ops } of this.findHeavyOperations(content)) {
+          if (!counts.has(collection)) counts.set(collection, await this.db.collection(collection).estimatedDocumentCount());
+          const docs = counts.get(collection);
+          if (docs < threshold) continue;
+          const { timeoutMS, source } = this.resolveOperationTimeout(content);
+          const limit = timeoutMS
+            ? `each operation is stopped after ${timeoutMS} ms (${source}) — check that's enough at this size, or the migration fails partway`
+            : 'no operation time limit applies — set ddlSafety.operationTimeoutMs, or "// @operation-timeout-ms: <ms>" in this file, to bound it';
+          out.warnings.push(`${fileName}: ${ops.join(', ')} on '${collection}' (${docs.toLocaleString('en-US')} documents, over runtimeGates.largeCollectionDocs = ${threshold.toLocaleString('en-US')}) ` +
+            `may run for a long time and load the server; ${limit}. Consider running it off-peak.`);
+        }
+      } catch (error) {
+        out.skipped.push(`R4 large-collection check for ${fileName}: ${error.message}`);
       }
     }
     return out;
