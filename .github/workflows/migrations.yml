@@ -28,6 +28,9 @@ name: Build and Deploy Migrations
 on:
   push:
     branches: [main, release/*]
+    # Release tags (v2.2.0) build the image with version tags 2.2.0 and 2.2;
+    # GitHub doesn't apply the paths filter below to tag pushes.
+    tags: ['v*']
     paths:
       - 'migrations/**'
       - 'src/**'
@@ -184,6 +187,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # A release tag must match package.json's version, or the image would
+      # be published under a version number the code doesn't report.
+      - name: Check release tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${pkg} — bump package.json (and the CLI's .version()) first, or tag v${pkg}."
+            exit 1
+          fi
+
       - name: Login to Container Registry
         uses: docker/login-action@v4
         with:
@@ -196,9 +211,13 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # main/release branches: branch name + commit SHA (+ latest on main).
+          # Release tags vX.Y.Z: X.Y.Z and X.Y — fixed version tags to pin
+          # deployments to (never moved by later main builds).
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
 

@@ -388,7 +388,7 @@ npm run test:integration # Integration tests against real DBs (vitest.integratio
 npm run docker:test      # Full e2e: builds the image, brings up MongoDB + MariaDB, runs test-all
 ```
 
-Coverage floors (`coverage.thresholds` in `vitest.config.js`) sit just under what the unit tests reach today, so coverage can't quietly slide; `src/cli.js` counts as 0% there because it's exercised by `docker:test` and the integration suite instead. Raise the floors as coverage improves. The CI image build pushes `ghcr.io/<owner>/db-migrate/db-migrate` with tags `latest`, the branch name and the commit SHA.
+Coverage floors (`coverage.thresholds` in `vitest.config.js`) sit just under what the unit tests reach today, so coverage can't quietly slide; `src/cli.js` counts as 0% there because it's exercised by `docker:test` and the integration suite instead. Raise the floors as coverage improves. The CI image build pushes `ghcr.io/<owner>/db-migrate/db-migrate` with tags `latest`, the branch name and the commit SHA, plus `X.Y.Z` / `X.Y` for a `vX.Y.Z` release tag (which must match `package.json`) — see [docs/BUILD-IMAGE-GUIDE.md](docs/BUILD-IMAGE-GUIDE.md#image-tags-ghcr).
 
 `docker:test` is the most representative check — it's the same `test-all` command a CI pipeline runs, against real containers, producing the same JSON/HTML report. See [docs/TESTING-GUIDE.md](docs/TESTING-GUIDE.md) and [docs/CI-MIGRATION-TEST-GUIDE.md](docs/CI-MIGRATION-TEST-GUIDE.md).
 
