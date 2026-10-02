@@ -688,7 +688,7 @@ chmod +x full-migration-test.sh
 
 | Operation | Command |
 |------|------|
-| Create a DCL file | `node src/cli.js create-dcl <name> -c <config>` |
+| Create a DCL file | `node src/cli.js create-dcl <name> -c <config>` (add `--dir <dir>` when `migrationsDir` lists several directories) |
 | Run DCL | `node src/cli.js dcl -c <config>` |
 | Check DCL status | `node src/cli.js dcl:status -c <config>` |
 | Validate idempotency | `node src/cli.js dcl:verify -c <config>` |

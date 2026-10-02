@@ -17,7 +17,7 @@ import { DCLIdempotentChecker } from './core/dcl-idempotent-checker.js';
 import { checkMigrationsToRun, describeValidationFailures, allowHintForFailures } from './core/validation-gate.js';
 import { parseExpectedErrors, checkFileExpectation, parseExpectedSanity, checkSanityExpectation } from './core/fixture-expectations.js';
 import { buildDCLPlan } from './core/dcl-plan.js';
-import { resolveDirs, describeDirs } from './core/migration-dirs.js';
+import { resolveDirs, describeDirs, pickDir } from './core/migration-dirs.js';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -589,6 +589,13 @@ function assertUniqueInstanceNames(adapters) {
   }
 }
 
+/** Forbidden operations a DCL run let through (dcl --validate), with who approved each. */
+function printDCLApprovals(approvals, indent = '   ') {
+  for (const a of approvals || []) {
+    console.log(chalk.yellow(`${indent}⚠️  Allowed in ${a.file} [${a.code}] — approved by ${a.approvedBy || '(nobody recorded)'}`));
+  }
+}
+
 /** saveNotificationEmail() options from config (notifications.keepRuns). */
 function notificationOptions(config, extra = {}) {
   return { keepRuns: config?.notifications?.keepRuns, ...extra };
@@ -1060,7 +1067,7 @@ program
     let adapter;
     
     try {
-      adapter = await getAdapter(options);
+      adapter = await getAdapter(options, { readOnly: Boolean(options.dryRun) });
       await adapter.connect();
       
       const count = parseInt(options.count, 10);
@@ -1325,6 +1332,7 @@ program
   .command('create-dcl <name>')
   .description('Create a new DCL (repeatable) migration file with R__ prefix')
   .option('-n, --number <num>', 'Sequence number (e.g., 001, 002)', '')
+  .option('--dir <dir>', "Which directory to create it in, when migrationsDir lists several (e.g. 'shared' or 'prod-tw')")
   .action(async (name, cmdOptions, cmd) => {
     const options = { ...cmd.parent.opts(), ...cmdOptions };
     let adapter;
@@ -1332,8 +1340,8 @@ program
     try {
       adapter = await getAdapter(options);
       
-      const fileName = await adapter.createDCL(name, options.number);
-      console.log(chalk.green(`\n✅ Created: ${fileName}`));
+      const fileName = await adapter.createDCL(name, options.number, { dir: options.dir });
+      console.log(chalk.green(`\n✅ Created: ${path.join(pickDir(adapter.config.migrationsDir, options.dir), fileName)}`));
       console.log(chalk.gray('\nRemember:'));
       console.log(chalk.yellow('⚠️  DCL scripts must be IDEMPOTENT (safe to run multiple times)'));
       console.log('1. Use IF NOT EXISTS / IF EXISTS patterns');
@@ -1355,7 +1363,7 @@ addAllowOptions(validateCommand)
     let adapter;
     
     try {
-      adapter = await getAdapter(options);
+      adapter = await getAdapter(options, { readOnly: true });
       
       // Build validation options
       const validateOptions = {
@@ -2638,6 +2646,8 @@ program
         }
       }
 
+      printDCLApprovals(result.approvals);
+
       if (result.errors.length > 0) {
         console.error(chalk.red('\n❌ Errors:'));
         for (const e of result.errors) {
@@ -2675,7 +2685,8 @@ program
               events,
               errors: result.errors.length > 0 ? result.errors : undefined,
               skipped: hasSkipped ? result.skipped : undefined
-            }
+            },
+            approvals: result.approvals
           });
           const saved = await saveNotificationEmail(options.output, notificationEmailToHTML(report), undefined, notificationOptions(config));
           console.log(chalk.gray(`\n   📧 Notification email written to ${saved.path} (latest copy: ${saved.latestPath})`));
@@ -2900,6 +2911,7 @@ program
           if (result.skipped && result.skipped.length > 0) {
             console.log(chalk.yellow(`   ⏭️  Skipped ${result.skipped.length} migration(s) due to validation`));
           }
+          printDCLApprovals(result.approvals, '      ');
           
           if (result.errors.length > 0) {
             hasErrors = true;
@@ -2930,7 +2942,8 @@ program
                 events: summary.events,
                 errors: result.errors.length > 0 ? result.errors : undefined,
                 skipped: hasSkipped ? result.skipped : undefined
-              }
+              },
+              approvals: result.approvals
             });
             const saved = await saveNotificationEmail(options.output, notificationEmailToHTML(report), instanceNotificationFileName(name), notificationOptions(instanceConfig, { runId }));
             summary.notificationFile = saved.path;

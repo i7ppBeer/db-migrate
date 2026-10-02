@@ -118,6 +118,8 @@ dcl/
 
 prod-tw ends up with `readonly_report` and `tw_app`, prod-jp with `readonly_report` and `jp_app`. The files of all listed directories are merged and run in file-name order, exactly as if they were in one directory. A file name is what the checksum record is keyed by, so **the same file name in two of the listed directories is rejected** (nothing runs) — rename one. The top-level `migrationsDir` (and `dcl`, `dcl:status`, `dcl --plan`, `dcl:verify` for a single-instance config) accepts a list the same way.
 
+To add a script, say which directory it goes into: `create-dcl tw-reporting -n 003 --dir prod-tw -c dcl/config.js` (without `--dir`, a multi-directory config is refused with the list of directories). A name already used in any of the listed directories is refused, so the clash is caught when the file is created rather than at the next run.
+
 DDL configs still take exactly **one** directory: a list is rejected, since a versioned changelog has to come from one ordered place.
 
 `dcl-all -c dcl/config.js` then writes, under `reports/` (or `-o <dir>`):

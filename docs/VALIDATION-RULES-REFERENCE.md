@@ -69,7 +69,8 @@ node src/cli.js sync -c <config> --allow-forbidden --approved-by "Alice (CAB-104
 
 The file's `@approved-by` wins over `--approved-by`. The approver is printed next to
 each allowance in the run log (`Allowed in <file> [DROP_DATABASE]: … — approved by
-Alice (CAB-1042)`, or `(nobody recorded)`), and `sync`'s notification email gets an
+Alice (CAB-1042)`, or `(nobody recorded)`), and the notification email of `sync` — and
+of `dcl` / `dcl-all` run with `--validate` (e.g. an approved `DROP USER`) — gets an
 **Approved exceptions** section listing each released forbidden operation and who
 approved it. `--approved-by` is accepted by `validate`, `validate-all`, `up`, `up-all`,
 `sync`, and by `dcl` / `dcl-all` together with `--validate`.

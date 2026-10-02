@@ -773,7 +773,7 @@ export class RepeatableRunner {
    */
   async runMariaDB(context) {
     const { connection, migrationsDir, validator } = context;
-    const result = { applied: [], errors: [], skipped: [] };
+    const result = { applied: [], errors: [], skipped: [], approvals: [] };
 
     const files = await this.getRepeatableFiles(migrationsDir);
     const storedChecksums = await this.getStoredChecksumsMariaDB(connection);
@@ -812,6 +812,13 @@ export class RepeatableRunner {
           // Other validation errors
           result.errors.push(`${file.fileName}: Validation failed - ${validationResult.errors.map(e => e.message).join('; ')}`);
           break;
+        }
+        // Forbidden operations this file was allowed to run, and who approved
+        // them — for the run log and the notification email
+        if (validationResult.approval) {
+          for (const code of validationResult.approval.codes) {
+            result.approvals.push({ file: file.fileName, code, approvedBy: validationResult.approval.approvedBy });
+          }
         }
       }
 
@@ -869,7 +876,7 @@ export class RepeatableRunner {
    */
   async runMongoDB(context) {
     const { db, client, migrationsDir, validator } = context;
-    const result = { applied: [], errors: [], skipped: [] };
+    const result = { applied: [], errors: [], skipped: [], approvals: [] };
 
     const files = await this.getRepeatableFiles(migrationsDir);
     const storedChecksums = await this.getStoredChecksumsMongoDB(db);
@@ -908,6 +915,13 @@ export class RepeatableRunner {
           // Other validation errors
           result.errors.push(`${file.fileName}: Validation failed - ${validationResult.errors.map(e => e.message).join('; ')}`);
           break;
+        }
+        // Forbidden operations this file was allowed to run, and who approved
+        // them — for the run log and the notification email
+        if (validationResult.approval) {
+          for (const code of validationResult.approval.codes) {
+            result.approvals.push({ file: file.fileName, code, approvedBy: validationResult.approval.approvedBy });
+          }
         }
       }
 

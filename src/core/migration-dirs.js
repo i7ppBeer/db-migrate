@@ -62,3 +62,37 @@ export async function listMigrationFiles(migrationsDir, predicate) {
   }
   return [...seen.values()].sort((a, b) => (a.fileName < b.fileName ? -1 : a.fileName > b.fileName ? 1 : 0));
 }
+
+/**
+ * The one directory a new file goes into. With a single directory that's
+ * it; with a list, `wanted` (create-dcl --dir) must name one of them — by
+ * path or by its last segment, e.g. 'prod-tw' for /…/dcl/prod-tw.
+ */
+export function pickDir(migrationsDir, wanted) {
+  const dirs = toDirList(migrationsDir);
+  if (dirs.length === 0) throw new Error('migrationsDir is not set in the config.');
+  const listed = dirs.map(d => path.basename(d)).join(', ');
+  if (!wanted) {
+    if (dirs.length === 1) return dirs[0];
+    throw new Error(`migrationsDir lists ${dirs.length} directories (${listed}) — say which one the new file goes into with --dir <name>.`);
+  }
+  const resolved = path.resolve(wanted);
+  const trimmed = String(wanted).replace(/[\\/]+$/, '');
+  const matches = dirs.filter(d => d === resolved || path.basename(d) === trimmed || d.endsWith(path.sep + path.normalize(trimmed).replace(/^\.[\\/]/, '')));
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) throw new Error(`--dir ${wanted} is not one of migrationsDir's directories (${listed}).`);
+  throw new Error(`--dir ${wanted} matches more than one directory (${matches.join(', ')}) — give the full path.`);
+}
+
+/** The directory (if any) in the list that already has this file name. */
+export async function findExisting(migrationsDir, fileName) {
+  for (const dir of toDirList(migrationsDir)) {
+    try {
+      await fs.access(path.join(dir, fileName));
+      return dir;
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+  }
+  return null;
+}

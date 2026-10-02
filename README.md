@@ -136,7 +136,7 @@ docker compose run --rm migrate <command> [options] -c /app/test-fixtures/<db-ty
 
 | Command | What it does |
 |---|---|
-| `status` | Show applied vs. pending migrations. Read-only: works with a `SELECT`-only account, creates nothing (same for `up --dry-run`, `dcl:status`, `dcl --plan`) |
+| `status` | Show applied vs. pending migrations. Read-only: works with a `SELECT`-only account, creates nothing (same for `up`/`down --dry-run`, `validate --pending-only`, `dcl:status`, `dcl --plan`) |
 | `up [--dry-run] [--sanity-check] [--no-auto-rollback] [--target <m>] [--only <m>] [--instance <n>] [--allow-checksum-drift] [--allow-*] [--allow-open-transactions]` | Apply pending migrations. **Validates the migrations about to run first and refuses (nothing applied) if any fails** — same rules and `--allow-*` escape hatches as `validate`. Also refuses if an already-applied file's content no longer matches its recorded checksum — see below |
 | `sync [--sanity-check] [--target <m>] [--only <m>] [-o <dir>] [--allow-checksum-drift] [--allow-*] [--allow-open-transactions]` | `status` → validate → `up` → diff → real current schema, plus a run notification email (`reports/notification.html`). **Errors (non-zero exit) if nothing was pending**, same validation and checksum refusals as `up` — see [docs/DDL-PRODUCTION-SAFETY.md](docs/DDL-PRODUCTION-SAFETY.md) |
 | `down -n <N> [--target <m>] [--dry-run] [--yes] [--allow-checksum-drift] [--instance <n>] [--allow-open-transactions]` | Rollback the last N migrations (or down to and including `--target`). Shows the plan and asks you to type `yes`; outside a terminal it needs `--yes`. Refuses if a file to roll back was edited after being applied |
@@ -162,7 +162,7 @@ docker compose run --rm migrate <command> [options] -c /app/test-fixtures/<db-ty
 | `dcl [--plan] [--dry-run] [--validate] [--allow-dangerous] [--allow-forbidden] [--approved-by <name>] [--accept-removed-dcl] [-o <dir>]` | Run pending/changed repeatable scripts, then print an account/permission before/after diff and write the run notification email (`<dir>/notification.html`, default `reports/`). `--plan` previews the run (script diffs, affected accounts and their grants, passwords to be generated) without executing |
 | `dcl:status` | Show which `R__*` scripts are applied and whether their checksum still matches |
 | `dcl:verify` | Run each script twice and diff state to confirm idempotency, without leaving changes applied for real use |
-| `create-dcl <name> [-n <seq>]` | Scaffold a new `R__` DCL migration file |
+| `create-dcl <name> [-n <seq>] [--dir <dir>]` | Scaffold a new `R__` DCL migration file. When `migrationsDir` lists several directories, `--dir` (e.g. `shared`, `prod-tw`) says which one; a name already used in any listed directory is refused |
 
 ### DCL — multi-instance
 
@@ -234,6 +234,8 @@ export default {
   ddlSafety: { operationTimeoutMs: 60000 }   // an operation running longer is stopped and the run fails
 };
 ```
+
+One known-slow migration (e.g. a large index build) can get its own limit without loosening the rest — `// @operation-timeout-ms: 600000` at the top of the file (`0` = no limit for that file).
 
 See Gate R5 in [docs/RUNTIME-GATE-PLAN.md](docs/RUNTIME-GATE-PLAN.md).
 
@@ -338,7 +340,7 @@ node src/cli.js validate --allow TRUNCATE_TABLE,DROP_INDEX -c <config>
 
 The same flags work on `up`/`sync`/`up-all`. Every allowance actually used (flag or annotation) is printed in the run log, so the approval is visible there too.
 
-For forbidden (🔴) operations, record **who** approved it: `-- @approved-by: Alice (CAB-1042)` in the file, or `--approved-by "Alice (CAB-1042)"` for the run. The approver is printed with each allowance and listed under **Approved exceptions** in `sync`'s notification email. `validation: { requireApprover: true }` makes it mandatory — a forbidden allowance without an approver is refused (`APPROVER_REQUIRED`).
+For forbidden (🔴) operations, record **who** approved it: `-- @approved-by: Alice (CAB-1042)` in the file, or `--approved-by "Alice (CAB-1042)"` for the run. The approver is printed with each allowance and listed under **Approved exceptions** in the notification email of `sync`, and of `dcl` / `dcl-all` run with `--validate`. `validation: { requireApprover: true }` makes it mandatory — a forbidden allowance without an approver is refused (`APPROVER_REQUIRED`).
 
 Some failures can't be allowed, only fixed in the file — e.g. a syntax error, a missing Up/Down section, or schema DDL inside a DCL file. The refusal message says which.
 

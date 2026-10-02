@@ -5,7 +5,7 @@
  */
 
 import { BaseAdapter, isRepeatableMigrationFile, selectPendingMigrations } from '../core/base-adapter.js';
-import { listMigrationFiles } from '../core/migration-dirs.js';
+import { listMigrationFiles, pickDir, findExisting } from '../core/migration-dirs.js';
 import { SanityChecker, MongoDBChecks } from '../core/sanity-checker.js';
 import migrateMongo from 'migrate-mongo';
 import { MongoClient, MongoOperationTimeoutError } from 'mongodb';
@@ -13,6 +13,11 @@ import { maskComments, findMatchingBrace } from '../core/source-scan.js';
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
+
+/** "600000" → 600000, "0" → 0, anything else → null. */
+function parseOperationTimeoutAnnotation(raw) {
+  return /^\d+$/.test(String(raw).trim()) ? Number(String(raw).trim()) : null;
+}
 
 export class MongoDBAdapter extends BaseAdapter {
   constructor(config) {
@@ -432,9 +437,9 @@ export class MongoDBAdapter extends BaseAdapter {
    * another lock hanging the whole run.
    * @private
    */
-  _migrationHandles() {
-    const timeoutMS = this.getOperationTimeoutMs();
-    if (!timeoutMS) return { db: this.db, client: this.client, timeoutMS: null };
+  _migrationHandles(content = '') {
+    const { timeoutMS, source } = this.resolveOperationTimeout(content);
+    if (!timeoutMS) return { db: this.db, client: this.client, timeoutMS: null, source };
     const db = this.client.db(this.db.databaseName, { timeoutMS });
     const client = new Proxy(this.client, {
       get(target, prop) {
@@ -443,7 +448,24 @@ export class MongoDBAdapter extends BaseAdapter {
         return typeof value === 'function' ? value.bind(target) : value;
       }
     });
-    return { db, client, timeoutMS };
+    return { db, client, timeoutMS, source };
+  }
+
+  /**
+   * The limit for one migration file: its own `// @operation-timeout-ms: N`
+   * annotation (0 = no limit for this file) wins over ddlSafety.operationTimeoutMs
+   * — so one known-slow migration (a large index build) can get more time
+   * without loosening every other one.
+   * @returns {{ timeoutMS: number|null, source: string }}
+   */
+  resolveOperationTimeout(content = '') {
+    const raw = this.parseFileAnnotations(content).operationTimeoutMs;
+    if (raw != null) {
+      const value = parseOperationTimeoutAnnotation(raw);
+      if (value === null) throw new Error(`@operation-timeout-ms must be a whole number of milliseconds (0 = no limit for this file), got: ${raw}`);
+      return { timeoutMS: value || null, source: '@operation-timeout-ms' };
+    }
+    return { timeoutMS: this.getOperationTimeoutMs(), source: 'ddlSafety.operationTimeoutMs' };
   }
 
   /**
@@ -451,15 +473,17 @@ export class MongoDBAdapter extends BaseAdapter {
    * reported against the setting that caused it (callers prefix the file name).
    * @private
    */
-  async _runMigrationFunction(fn) {
-    const { db, client, timeoutMS } = this._migrationHandles();
+  async _runMigrationFunction(fn, content = '') {
+    const { db, client, timeoutMS, source } = this._migrationHandles(content);
     try {
       await fn(db, client);
     } catch (error) {
       const timedOut = error instanceof MongoOperationTimeoutError || error?.code === 50 || error?.codeName === 'MaxTimeMSExpired';
       if (timeoutMS && timedOut) {
-        throw new Error(`An operation ran longer than ddlSafety.operationTimeoutMs (${timeoutMS} ms) and was stopped (${error.message}). ` +
-          'If this migration is expected to be slow (e.g. a large index build), raise the limit for it or run it off-peak.');
+        const hint = source === '@operation-timeout-ms'
+          ? 'If this migration needs longer, raise the value in its "// @operation-timeout-ms:" line (0 = no limit), or run it off-peak.'
+          : 'If this migration is expected to be slow (e.g. a large index build), give just this file more time with "// @operation-timeout-ms: <ms>" at the top (0 = no limit), or run it off-peak.';
+        throw new Error(`An operation ran longer than ${source} (${timeoutMS} ms) and was stopped (${error.message}). ${hint}`);
       }
       throw error;
     }
@@ -472,7 +496,7 @@ export class MongoDBAdapter extends BaseAdapter {
   async _applyOne(fileName) {
     const { module, content } = await this._loadMigration(fileName);
     if (typeof module.up !== 'function') throw new Error('Migration must export an "up" function');
-    await this._runMigrationFunction(module.up);
+    await this._runMigrationFunction(module.up, content);
     await this.db.collection(this.changelogCollection).insertOne({
       fileName,
       appliedAt: new Date(),
@@ -485,9 +509,9 @@ export class MongoDBAdapter extends BaseAdapter {
    * @private
    */
   async _rollbackOne(fileName) {
-    const { module } = await this._loadMigration(fileName);
+    const { module, content } = await this._loadMigration(fileName);
     if (typeof module.down !== 'function') throw new Error('Migration must export a "down" function');
-    await this._runMigrationFunction(module.down);
+    await this._runMigrationFunction(module.down, content);
     await this.db.collection(this.changelogCollection).deleteOne({ fileName });
   }
 
@@ -953,20 +977,21 @@ export async function down(db, client) {
    * @param {string} sequenceNumber - Optional sequence number (e.g., '001', '002')
    * @returns {Promise<string>} - Created file name
    */
-  async createDCL(name, sequenceNumber = '') {
+  /**
+   * @param {Object} [opts]
+   * @param {string} [opts.dir] - which of a multi-directory migrationsDir to create it in (see pickDir())
+   */
+  async createDCL(name, sequenceNumber = '', { dir } = {}) {
     // Generate filename: R__001_name.js or R__name.js
     const sanitizedName = name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
     const prefix = sequenceNumber ? `R__${sequenceNumber}_` : 'R__';
     const fileName = `${prefix}${sanitizedName}.js`;
-    const filePath = path.join(this.config.migrationsDir, fileName);
+    const filePath = path.join(pickDir(this.config.migrationsDir, dir), fileName);
 
-    // Check if file already exists
-    try {
-      await fs.access(filePath);
-      throw new Error(`DCL migration file already exists: ${fileName}`);
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err;
-    }
+    // Already there — in this directory or, with several, in any of them
+    // (the same name in two directories is rejected when DCL runs)
+    const existingIn = await findExisting(this.config.migrationsDir, fileName);
+    if (existingIn) throw new Error(`DCL migration file already exists: ${path.join(existingIn, fileName)}`);
 
     const dbName = this.config.mongodb?.database || 'mydb';
     const template = `/**
@@ -1109,7 +1134,8 @@ export async function down(db, client) {
       allowDangerous: false,
       allowForbidden: false,
       allowedCodes: [],
-      approvedBy: null
+      approvedBy: null,
+      operationTimeoutMs: null
     };
     for (const line of content.split('\n')) {
       const t = line.trim();
@@ -1125,6 +1151,8 @@ export async function down(db, client) {
         const v = forbiddenMatch[1].trim().toLowerCase();
         annotations.allowForbidden = ['true', 'yes', '1'].includes(v);
       }
+      const timeoutMatch = t.match(/\/\/\s*@operation-timeout-ms\s*:\s*(.+)/i);
+      if (timeoutMatch) annotations.operationTimeoutMs = timeoutMatch[1].trim();
       const approvedMatch = t.match(/\/\/\s*@approved-by\s*:\s*(.+)/i);
       if (approvedMatch && approvedMatch[1].trim()) annotations.approvedBy = approvedMatch[1].trim();
       const allowMatch = t.match(/\/\/\s*@allow\s*:\s*(.+)/i);
@@ -1242,6 +1270,13 @@ export async function down(db, client) {
 
     const syntaxResult = this.validateJSSyntax(content, fileName);
     const errors = [...syntaxResult.errors];
+    if (fileAnnotations.operationTimeoutMs != null && parseOperationTimeoutAnnotation(fileAnnotations.operationTimeoutMs) === null) {
+      errors.push({
+        type: 'invalid-annotation',
+        code: 'INVALID_OPERATION_TIMEOUT',
+        message: `🔴 @operation-timeout-ms must be a whole number of milliseconds (0 = no limit for this file), got: ${fileAnnotations.operationTimeoutMs}`
+      });
+    }
     const warnings = [...syntaxResult.warnings];
     const dangerousOps = [];
     const forbiddenOps = [];

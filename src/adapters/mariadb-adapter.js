@@ -5,7 +5,7 @@
 
 import { BaseAdapter, isRepeatableMigrationFile, selectPendingMigrations } from '../core/base-adapter.js';
 import { SanityChecker, SQLChecks } from '../core/sanity-checker.js';
-import { listMigrationFiles } from '../core/migration-dirs.js';
+import { listMigrationFiles, pickDir, findExisting } from '../core/migration-dirs.js';
 import mysql from 'mysql2/promise';
 import fs from 'fs/promises';
 import path from 'path';
@@ -1441,20 +1441,21 @@ export class MariaDBAdapter extends BaseAdapter {
    * @param {string} sequenceNumber - Optional sequence number (e.g., '001', '002')
    * @returns {Promise<string>} - Created file name
    */
-  async createDCL(name, sequenceNumber = '') {
+  /**
+   * @param {Object} [opts]
+   * @param {string} [opts.dir] - which of a multi-directory migrationsDir to create it in (see pickDir())
+   */
+  async createDCL(name, sequenceNumber = '', { dir } = {}) {
     // Generate filename: R__001_name.sql or R__name.sql
     const sanitizedName = name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
     const prefix = sequenceNumber ? `R__${sequenceNumber}_` : 'R__';
     const fileName = `${prefix}${sanitizedName}.sql`;
-    const filePath = path.join(this.config.migrationsDir, fileName);
+    const filePath = path.join(pickDir(this.config.migrationsDir, dir), fileName);
 
-    // Check if file already exists
-    try {
-      await fs.access(filePath);
-      throw new Error(`DCL migration file already exists: ${fileName}`);
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err;
-    }
+    // Already there — in this directory or, with several, in any of them
+    // (the same name in two directories is rejected when DCL runs)
+    const existingIn = await findExisting(this.config.migrationsDir, fileName);
+    if (existingIn) throw new Error(`DCL migration file already exists: ${path.join(existingIn, fileName)}`);
 
     const template = `-- DCL Repeatable Migration: ${name}
 -- File: ${fileName}

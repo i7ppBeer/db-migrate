@@ -257,6 +257,18 @@ If this migration is expected to be slow (e.g. a large index build), raise the l
 ddlSafety: { operationTimeoutMs: 60000 }
 ```
 
+A single migration can override it with an annotation at the top of the file — for
+the one known-slow migration, without loosening every other one:
+
+```javascript
+// @operation-timeout-ms: 600000      (0 = no limit for this file)
+export async function up(db) { … }
+```
+
+The annotation applies even when the project setting is off. A value that isn't a
+whole number fails validation (`INVALID_OPERATION_TIMEOUT`) before anything runs, and
+the timeout error names whichever of the two applied and how to give that file more time.
+
 Off by default because a sensible limit depends on the data: a legitimate index build
 on a large collection can take minutes. It bounds single operations, not the whole
 migration — many fast operations never trip it. Verified against a real MongoDB 7: a
