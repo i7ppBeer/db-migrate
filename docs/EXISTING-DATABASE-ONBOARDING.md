@@ -20,9 +20,17 @@ This document explains how to onboard an **existing database** (one that already
 
 ## 1. Onboarding Flow Overview
 
-![Onboarding Flow Overview](images/onboarding-flow.drawio.svg)
-
-> 💡 **Tip**: This diagram can be edited directly using VS Code's [Draw.io Integration](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio) extension.
+```mermaid
+flowchart TD
+  A["📦 Existing database<br/>tables, indexes, views, procedures, users"] --> S1
+  S1["Step 1 — Environment setup<br/>project directory, DDL and DCL config.js"] --> S2
+  S2["Step 2 — Export the schema<br/>mysqldump --no-data / mongosh (indexes, validators)"] --> S3
+  S3["Step 3 — Baseline migration<br/>20250101000000-baseline.sql / .js"] --> S4
+  S4["Step 4 — DCL scripts<br/>R__001_users.sql / .js"] --> S5
+  S5["Step 5 — Run baseline<br/>baseline --all (marks as applied, nothing executes), then dcl"] --> S6
+  S6["Step 6 — Verify<br/>status, dcl:status"] --> D
+  D["Normal development<br/>create &lt;name&gt; → validate → up / sync<br/>new R__ scripts → dcl"]
+```
 
 ---
 

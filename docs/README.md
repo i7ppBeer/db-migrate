@@ -47,6 +47,3 @@ deeper, grouped by what you're trying to do.
 | [TESTING-GUIDE.md](TESTING-GUIDE.md) | Running tests locally, `test-all`, fixture expectations (`@expect-error`, `@expect-sanity`), what runs against real databases in CI |
 | [CI-MIGRATION-TEST-GUIDE.md](CI-MIGRATION-TEST-GUIDE.md) | `scripts/ci-migration-test.sh`, an alternative driver for CI systems other than this repo's GitHub Actions |
 
-## Archive
-
-[archive/](archive/README.md) — superseded or never-implemented documents, kept for history only.

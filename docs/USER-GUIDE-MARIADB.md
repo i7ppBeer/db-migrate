@@ -1,6 +1,6 @@
 # MariaDB/MySQL DDL/DCL Writing Guide
 
-> ⚠️ **Not fully verified (audited 2026-09-11)**: This document was written in the same batch as `MIGRATION-MANAGEMENT-GUIDE.md`, which has already been confirmed outdated. Spot-checking keywords turned up no broken flags/code, but it has not been checked line-by-line against the source — this counts as "no obvious errors found," not "verified correct." For rule details, defer to [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md).
+> ⚠️ **Not fully verified (audited 2026-09-11)**: This document was written in the same early batch as a planning guide that has since been removed as outdated. Spot-checking keywords turned up no broken flags/code, but it has not been checked line-by-line against the source — this counts as "no obvious errors found," not "verified correct." For rule details, defer to [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md).
 >
 > **Current behavior that affects how you write files (2026-10-01):** `up`/`sync` validate pending files before running them and refuse on failure; a file needs a `-- +migrate Up` section or it's rejected (`MISSING_UP_MARKER`); `R__` files in a DDL directory are ignored. Rules can be tuned per project — see [VALIDATION-RULES-REFERENCE.md](./VALIDATION-RULES-REFERENCE.md#project-policy-turning-rules-off-down-or-up-and-adding-your-own).
 
@@ -181,9 +181,33 @@ DROP TABLE ...
 
 ### 3.3 Execution Flow
 
-![MariaDB execution flow](images/mariadb-execution-flow.drawio.svg)
+```mermaid
+flowchart TD
+  A["up / sync"] --> B["Connect — R0: the database exists and the connection points at it"]
+  B --> C["status — R1: changelog consistency, checksums of applied files"]
+  C --> D{"Validation gate<br/>(pending migrations only)"}
+  D -- fails --> X1["❌ Refused — nothing applied"]
+  D -- passes --> E{"Runtime gates R2–R4<br/>open transactions, read-only target, headroom"}
+  E -- blocked --> X1
+  E -- ok --> F["Next pending migration"]
+  F --> G{"--sanity-check and<br/>a PreCheck section?"}
+  G -- yes --> H{"PreCheck passes?"}
+  H -- no --> X2["❌ Stop — this migration is not run"]
+  H -- yes --> I
+  G -- no --> I["Run the Up section<br/>(Lock Guard: bounded lock wait + retry)"]
+  I -- error --> X3["❌ Stop — may be partly applied, not recorded"]
+  I -- ok --> J{"--sanity-check and<br/>a PostCheck section?"}
+  J -- no --> K["Record in the changelog, with checksum"]
+  J -- yes --> L{"PostCheck passes?"}
+  L -- yes --> K
+  L -- no --> M["Run the Down section<br/>(auto-rollback, unless --no-auto-rollback)"]
+  M --> X4["❌ Stop — rolled back, still pending"]
+  K --> N{"More pending?"}
+  N -- yes --> F
+  N -- no --> O["✅ Done"]
+```
 
-> 💡 **Tip**: This diagram can be edited directly with VS Code's [Draw.io Integration](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio) extension.
+`--dry-run` stops after the gates and reports what would run or be refused. Details: [RUNTIME-GATE-PLAN.md](RUNTIME-GATE-PLAN.md), [LOCK-GUARD.md](LOCK-GUARD.md).
 
 ### 3.4 Basic Example (Up/Down Only)
 
@@ -1021,4 +1045,3 @@ FLUSH PRIVILEGES;
 
 - [CLI Usage Guide](CLI-USAGE-GUIDE.md)
 - [Docker Compose User Guide](DOCKER-COMPOSE-USER-GUIDE.md)
-- [Migration Management Guide](archive/MIGRATION-MANAGEMENT-GUIDE.md)

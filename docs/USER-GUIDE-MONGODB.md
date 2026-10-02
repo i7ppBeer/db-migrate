@@ -1,6 +1,6 @@
 # MongoDB DDL/DCL Migration Guide
 
-> ⚠️ **Not fully verified (2026-09-11 audit)**: This document was written in the same batch as `MIGRATION-MANAGEMENT-GUIDE.md`, which has already been confirmed outdated. A keyword spot-check found no broken flags/code, but there was no line-by-line comparison against the source code — this is not "verified correct," only "no obvious errors found in the sample." For rule details, treat [VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) as authoritative.
+> ⚠️ **Not fully verified (2026-09-11 audit)**: This document was written in the same early batch as a planning guide that has since been removed as outdated. A keyword spot-check found no broken flags/code, but there was no line-by-line comparison against the source code — this is not "verified correct," only "no obvious errors found in the sample." For rule details, treat [VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) as authoritative.
 >
 > **Current behavior that affects how you write files (2026-10-01):** `up`/`sync` validate pending files before running them and refuse on failure; migrations must be ES modules (`export async function up…` — CommonJS `module.exports` can't be loaded); `R__` files in a DDL directory are ignored; `dropDatabase()` always needs explicit approval, also in `down()`. Rules can be tuned per project — see [VALIDATION-RULES-REFERENCE.md](./VALIDATION-RULES-REFERENCE.md#project-policy-turning-rules-off-down-or-up-and-adding-your-own).
 
@@ -213,9 +213,33 @@ export async function down(db, client) { // DOWN function starts
 
 ### 3.3 Execution Flow
 
-![MongoDB Execution Flow](images/mongodb-execution-flow.drawio.svg)
+```mermaid
+flowchart TD
+  A["up / sync"] --> B["Connect — R0: the database exists"]
+  B --> C["status — R1: changelog consistency, checksums of applied files"]
+  C --> D{"Validation gate<br/>(pending migrations only)"}
+  D -- fails --> X1["❌ Refused — nothing applied"]
+  D -- passes --> E{"Runtime gates R2–R4<br/>long operations, writable primary, disk;<br/>large-collection warning"}
+  E -- blocked --> X1
+  E -- ok --> F["Next pending migration"]
+  F --> G{"--sanity-check and<br/>an exported preCheck()?"}
+  G -- yes --> H{"preCheck() passes?"}
+  H -- no --> X2["❌ Stop — this migration is not run"]
+  H -- yes --> I
+  G -- no --> I["Run up(db, client)<br/>(each operation bounded by operationTimeoutMs, if set)"]
+  I -- error --> X3["❌ Stop — may be partly applied, not recorded"]
+  I -- ok --> J{"--sanity-check and<br/>an exported postCheck()?"}
+  J -- no --> K["Record in the changelog, with checksum"]
+  J -- yes --> L{"postCheck() passes?"}
+  L -- yes --> K
+  L -- no --> M["Run down(db, client)<br/>(auto-rollback, unless --no-auto-rollback)"]
+  M --> X4["❌ Stop — rolled back, still pending"]
+  K --> N{"More pending?"}
+  N -- yes --> F
+  N -- no --> O["✅ Done"]
+```
 
-> 💡 **Tip**: This diagram can be edited directly using the [Draw.io Integration](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio) extension for VS Code.
+Automatic rollback applies to the exported `preCheck(db, client)` / `postCheck(db, client)` functions run by `--sanity-check` (see [`templates/mongodb/ddl/TEMPLATE-with-sanity-check.js`](../templates/mongodb/ddl/TEMPLATE-with-sanity-check.js)). A check written inside `up()` that throws only fails the migration — nothing rolls back what `up()` already did. `--dry-run` stops after the gates. Details: [RUNTIME-GATE-PLAN.md](RUNTIME-GATE-PLAN.md).
 
 ### 3.4 Basic Example (up/down only)
 
@@ -1700,4 +1724,3 @@ export async function down(db, client) {
 
 - [CLI Usage Guide](CLI-USAGE-GUIDE.md)
 - [Docker Compose User Guide](DOCKER-COMPOSE-USER-GUIDE.md)
-- [Migration Management Guide](archive/MIGRATION-MANAGEMENT-GUIDE.md)
