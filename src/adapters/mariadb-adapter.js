@@ -1750,18 +1750,21 @@ export class MariaDBAdapter extends BaseAdapter {
       const sanityBody = this.extractSanitySection(content, section);
       if (!sanityBody) continue;
 
-      // Collect SQL statements from the sanity section:
-      // - Legacy: -- EXPECT_ROWS: <sql> / -- EXPECT_NO_ROWS: <sql>
+      // Collect SQL statements from the sanity section, the same way
+      // executeSanityCheck() runs them:
+      // - Directive: -- EXPECT_ROWS: <sql> / -- EXPECT_NO_ROWS: <sql> — one
+      //   statement each (they have no ';' between them, so they must not be
+      //   joined with the raw lines and re-split)
       // - Raw: bare SQL split by ';'
+      const statements = [];
       const rawBuf = [];
       for (const line of sanityBody.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed) continue;
 
-        // Legacy directive → extract the SQL part
         const expectMatch = trimmed.match(/^--\s*EXPECT_(?:NO_)?ROWS:\s*(.+)$/i);
         if (expectMatch) {
-          rawBuf.push(expectMatch[1].trim().replace(/;$/, ''));
+          statements.push(expectMatch[1].trim().replace(/;$/, ''));
           continue;
         }
         // Skip pure comments
@@ -1769,11 +1772,9 @@ export class MariaDBAdapter extends BaseAdapter {
         // Raw SQL line
         rawBuf.push(line);
       }
+      statements.push(...rawBuf.join('\n').split(';').map(s => s.trim()).filter(s => s.length > 0));
 
-      if (rawBuf.length === 0) continue;
-
-      // Split collected lines by ';' into individual statements
-      const statements = rawBuf.join('\n').split(';').map(s => s.trim()).filter(s => s.length > 0);
+      if (statements.length === 0) continue;
 
       for (const stmt of statements) {
         // Skip statements using DATABASE() — not supported by node-sql-parser

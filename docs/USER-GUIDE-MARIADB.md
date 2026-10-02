@@ -1,8 +1,8 @@
 # MariaDB/MySQL DDL/DCL Writing Guide
 
-> ⚠️ **Not fully verified (audited 2026-09-11)**: This document was written in the same early batch as a planning guide that has since been removed as outdated. Spot-checking keywords turned up no broken flags/code, but it has not been checked line-by-line against the source — this counts as "no obvious errors found," not "verified correct." For rule details, defer to [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md).
+> **Verified against the source on 2026-10-02.** Every complete example below passes `validate` unless it says otherwise, and the stored-procedure and permission examples were run against a real MariaDB. The full rule list lives in [VALIDATION-RULES-MARIADB.md](./VALIDATION-RULES-MARIADB.md).
 >
-> **Current behavior that affects how you write files (2026-10-01):** `up`/`sync` validate pending files before running them and refuse on failure; a file needs a `-- +migrate Up` section or it's rejected (`MISSING_UP_MARKER`); `R__` files in a DDL directory are ignored. Rules can be tuned per project — see [VALIDATION-RULES-REFERENCE.md](./VALIDATION-RULES-REFERENCE.md#project-policy-turning-rules-off-down-or-up-and-adding-your-own).
+> `up`/`sync` validate pending files before running them and refuse on failure; a DDL file needs a `-- +migrate Up` section (`MISSING_UP_MARKER`); `R__` files in a DDL directory are ignored. Rules can be tuned per project — see [VALIDATION-RULES-REFERENCE.md](./VALIDATION-RULES-REFERENCE.md#project-policy-turning-rules-off-down-or-up-and-adding-your-own).
 
 > This guide explains how to write DDL (Data Definition Language) and DCL (Data Control Language) migration files for MariaDB/MySQL.
 
@@ -31,8 +31,9 @@
 
 ### DCL (Repeatable Migration)
 - **Purpose**: Permission management (users, roles, grants)
-- **Filename format**: `R__NNN_description.sql`
+- **Filename format**: `R__<name>.sql` — by convention `R__NNN_description.sql`; files run in file-name order
 - **Characteristics**: Re-runs whenever its checksum changes; must be idempotent
+- **Lives in**: a separate project with `mode: 'repeatable'` in its config (see [§7.2](#72-local-environment-setup))
 - **Example**: `R__001_create_app_user.sql`
 
 ---
@@ -46,7 +47,8 @@
 | Create a table | `CREATE TABLE users (...)` | ✅ Standard usage |
 | Alter a table | `ALTER TABLE users ADD COLUMN email VARCHAR(255)` | ✅ Standard usage |
 | Create an index | `CREATE INDEX idx_email ON users(email)` | ✅ Standard usage |
-| Drop a table | `DROP TABLE IF EXISTS temp_table` | ⚠️ Belongs in the DOWN block |
+| Drop a table | `DROP TABLE IF EXISTS temp_table` | ⚠️ Fine in Down when Up created it; in Up, dropping an existing table is `DROP_TABLE` (dangerous) |
+| Stored procedure / function | `CREATE PROCEDURE … BEGIN … END;` | ✅ DDL only — see [§3.6](#36-stored-procedures-and-functions) |
 | Add a foreign key | `ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users(id)` | ✅ Standard usage |
 | Modify a column | `ALTER TABLE users MODIFY COLUMN name VARCHAR(500)` | ⚠️ May affect existing data |
 
@@ -67,21 +69,20 @@ DROP TABLE IF EXISTS users;
 
 | Operation Type | Syntax Example | Notes |
 |---------|---------|------|
-| Create a user | `CREATE USER IF NOT EXISTS 'app'@'%'` | ✅ Must be idempotent |
-| Drop a user | `DROP USER IF EXISTS 'old_user'@'%'` | ✅ Must be idempotent |
+| Create a user | `CREATE USER IF NOT EXISTS 'app'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'` | ✅ The placeholder gets a generated password ([DCL-PASSWORD.md](DCL-PASSWORD.md)) |
 | Grant | `GRANT SELECT ON db.* TO 'app'@'%'` | ✅ Naturally idempotent |
-| Revoke | `REVOKE ALL ON db.* FROM 'app'@'%'` | ✅ Naturally idempotent |
 | Flush privileges | `FLUSH PRIVILEGES` | ✅ Naturally idempotent |
-| Stored procedure | `DROP PROCEDURE IF EXISTS ... CREATE PROCEDURE ...` | ✅ Requires DELIMITER |
-| Function | `DROP FUNCTION IF EXISTS ... CREATE FUNCTION ...` | ✅ Requires DELIMITER |
+| Drop a user | `DROP USER IF EXISTS 'old_user'@'%'` | 🔴 `DROP_USER` — needs `-- @allow-forbidden: true` |
+| Revoke | `REVOKE INSERT ON db.* FROM 'app'@'%'` | 🔴 `REVOKE` — needs `-- @allow-forbidden: true`; errors (1147) if that exact grant doesn't exist |
+| Change a password | `ALTER USER 'app'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'` | 🔴 `ALTER_USER` — needs `-- @allow-forbidden: true` (see the rotate-password template) |
+| Tables, views, indexes, procedures, triggers | `CREATE TABLE …`, `CREATE PROCEDURE …` | ⛔ Never allowed in DCL (`*_IN_DCL`, can't be overridden) — put them in the DDL project |
 
-**File structure:**
+**File structure** (same as [`templates/mariadb/dcl/TEMPLATE-create-user-readonly.sql`](../templates/mariadb/dcl/TEMPLATE-create-user-readonly.sql)):
 ```sql
--- @description: Application users management
--- @type: dcl
--- @allow-dangerous: true
+-- Read-only account for reporting
 
-CREATE USER IF NOT EXISTS 'app_readonly'@'%' IDENTIFIED BY 'password';
+CREATE USER IF NOT EXISTS 'app_readonly'@'%'
+  IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';
 GRANT SELECT ON mydb.* TO 'app_readonly'@'%';
 FLUSH PRIVILEGES;
 ```
@@ -98,9 +99,11 @@ FLUSH PRIVILEGES;
 > Metadata settings at the top of the file
 
 ```sql
--- @description: Describes what this migration does
--- @allow-dangerous: true
+-- @allow: DROP_COLUMN
+-- @approved-by: Alice (CAB-1042)
 ```
+
+Annotations are read from the leading comment block only — see [§5](#5-how-to-allow-dangerous-commands).
 
 ---
 
@@ -138,8 +141,8 @@ CREATE INDEX idx_phone ON users(phone);
 
 ---
 
-**🔴 DOWN block** *(recommended)*
-> Marker: `-- +migrate Down`
+**🔴 DOWN block** *(required when Up changes anything)*
+> Marker: `-- +migrate Down` — an empty Down after a real Up fails validation (`MISSING_DOWN`), and `down` refuses a file without one
 
 ```sql
 DROP INDEX idx_phone ON users;
@@ -151,8 +154,7 @@ ALTER TABLE users DROP COLUMN phone;
 #### Complete Example Structure
 
 ```sql
--- @description: ...        -- ANNOTATION block
--- @allow-dangerous: true
+-- @allow: ...              -- ANNOTATION block (optional)
 
 -- +migrate Up              -- Start of UP block
 
@@ -175,9 +177,9 @@ DROP TABLE ...
 | Block | Marker | Required? | Purpose |
 |------|------|--------|------|
 | **Up** | `-- +migrate Up` | ✅ Required | Defines the SQL run for the "forward migration" |
-| **Down** | `-- +migrate Down` | ⚠️ Recommended | Defines the SQL run for the "rollback" |
-| **PreCheck** | `-- +sanity PreCheck` | ❌ Optional | Checks state before running |
-| **PostCheck** | `-- +sanity PostCheck` | ❌ Optional | Validates the result after running |
+| **Down** | `-- +migrate Down` | ✅ Required when Up changes anything | Defines the SQL run for the "rollback" |
+| **PreCheck** | `-- +sanity PreCheck` | ❌ Optional | Checks state before running — only with `--sanity-check` |
+| **PostCheck** | `-- +sanity PostCheck` | ❌ Optional | Validates the result after running — only with `--sanity-check`; a failure runs Down |
 
 ### 3.3 Execution Flow
 
@@ -230,9 +232,6 @@ DROP TABLE IF EXISTS users;
 ### 3.5 Complete Example (With PreCheck/PostCheck)
 
 ```sql
--- @description: Add a phone column
--- @allow-dangerous: true
-
 -- +migrate Up
 
 -- +sanity PreCheck
@@ -260,132 +259,92 @@ DROP INDEX idx_users_phone ON users;
 ALTER TABLE users DROP COLUMN phone;
 ```
 
-### 3.6 Stored Procedure Example (Using DELIMITER)
+### 3.6 Stored Procedures and Functions
+
+Procedures, functions and triggers belong in the **DDL** project (DCL refuses them). Write them **without `DELIMITER`** and add `-- @skip-syntax-check: true`:
 
 ```sql
--- @description: Create an order-statistics stored procedure
--- @type: procedure
+-- @skip-syntax-check: true
+-- (the SQL parser used by validate can't read CREATE/DROP PROCEDURE; the
+--  forbidden/dangerous rules still apply)
 
 -- +migrate Up
-
-DELIMITER //
-
 CREATE PROCEDURE sp_get_user_order_stats(IN p_user_id BIGINT)
 BEGIN
-    SELECT 
-        u.username,
-        COUNT(o.id) AS order_count,
-        COALESCE(SUM(o.total_amount), 0) AS total_spent
+    SELECT u.username,
+           COUNT(o.id) AS order_count,
+           COALESCE(SUM(o.total_amount), 0) AS total_spent
     FROM users u
     LEFT JOIN orders o ON u.id = o.user_id
     WHERE u.id = p_user_id
     GROUP BY u.id, u.username;
-END //
+END;
 
-CREATE FUNCTION fn_calculate_discount(
-    p_amount DECIMAL(10,2),
-    p_discount_rate DECIMAL(5,2)
-) RETURNS DECIMAL(10,2)
+CREATE FUNCTION fn_calculate_discount(p_amount DECIMAL(10,2), p_discount_rate DECIMAL(5,2))
+RETURNS DECIMAL(10,2)
 DETERMINISTIC
 BEGIN
     RETURN p_amount * (1 - p_discount_rate / 100);
-END //
-
-DELIMITER ;
+END;
 
 -- +migrate Down
 DROP FUNCTION IF EXISTS fn_calculate_discount;
 DROP PROCEDURE IF EXISTS sp_get_user_order_stats;
 ```
 
+- **No `DELIMITER`.** It's a command of the `mysql` command-line client, not SQL: the server rejects it, so a migration containing `DELIMITER //` fails when it runs (and, without `@skip-syntax-check`, already in `validate`). The tool sends the whole section to the server in one go, and the server reads `BEGIN … END;` bodies correctly without it.
+- **`@skip-syntax-check: true` is needed** for files with `CREATE/DROP PROCEDURE`, `FUNCTION` or `TRIGGER` — otherwise `validate` reports `SQL_SYNTAX_ERROR`. It skips only that parser; every other check still runs.
+- To change a procedure later, add a new migration that drops and recreates it (Down recreates the previous version).
+
 ### 3.7 DCL (Repeatable) Example
 
 ```sql
--- @description: Create application users
--- @type: dcl
--- @allow-dangerous: true
+-- Application accounts. No +migrate markers: the whole file is run, and run
+-- again whenever its content (checksum) changes, so every statement must be
+-- safe to repeat.
 
--- Note: DCL files do not need +migrate Up/Down markers
--- because DCL is Repeatable and re-runs whenever the checksum changes
+CREATE USER IF NOT EXISTS 'app_user'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';
+GRANT SELECT, INSERT, UPDATE, DELETE, EXECUTE ON mydb.* TO 'app_user'@'%';
 
--- Create the application account
-CREATE USER IF NOT EXISTS 'app_user'@'%' IDENTIFIED BY 'secure_password';
-
--- Grant privileges
-GRANT SELECT, INSERT, UPDATE, DELETE ON mydb.* TO 'app_user'@'%';
-GRANT EXECUTE ON mydb.* TO 'app_user'@'%';
-
--- Create a read-only account
-CREATE USER IF NOT EXISTS 'readonly_user'@'%' IDENTIFIED BY 'readonly_password';
+CREATE USER IF NOT EXISTS 'readonly_user'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';
 GRANT SELECT ON mydb.* TO 'readonly_user'@'%';
 
--- Flush privileges
 FLUSH PRIVILEGES;
 ```
+
+- `CHANGE_ME_ON_FIRST_LOGIN` is replaced at runtime with a separately generated password per account; the passwords appear only in the run's notification email. An account that already exists keeps its password. Details: [DCL-PASSWORD.md](DCL-PASSWORD.md).
+- Never put a real password in the file — it would end up in git.
+- Preview a change with `dcl --plan` before running `dcl`.
 
 ### 3.8 Key Rules Summary
 
 | Rule | Description |
 |------|------|
 | `-- +migrate Up` | **Required** in DDL files; marks the start of the forward migration block |
-| `-- +migrate Down` | **Recommended**; marks the start of the rollback block |
-| `-- +sanity PreCheck` / `-- -sanity PreCheck` | **Optional**, must appear in pairs, wraps the pre-check |
-| `-- +sanity PostCheck` / `-- -sanity PostCheck` | **Optional**, must appear in pairs, wraps the post-check |
+| `-- +migrate Down` | **Required** when Up changes anything (`MISSING_DOWN`) |
+| `-- +sanity PreCheck` … `-- -sanity PreCheck` | **Optional** pre-check, run only with `--sanity-check`. The closing line is optional (the block also ends at the next `-- +migrate` / `-- +sanity`) |
+| `-- +sanity PostCheck` … `-- -sanity PostCheck` | **Optional** post-check, same rules; a failure runs Down |
 | `EXPECT_ROWS:` | Expects the query to **return** rows, otherwise the check fails |
 | `EXPECT_NO_ROWS:` | Expects the query to return **no** rows, otherwise the check fails |
-| `DELIMITER` | **Required** for stored procedures/functions |
+| Plain SQL in a sanity block | Treated as `EXPECT_ROWS` (statements separated by `;`) |
+| `DELIMITER` | **Don't use it** — see [§3.6](#36-stored-procedures-and-functions) |
 | DCL files | **Do not need** `+migrate Up/Down` — the entire file is what gets executed |
 
 ---
 
 ## 4. Dangerous Command List
 
-### 🔴 Strictly Forbidden (Forbidden) - Requires `--allow-forbidden`
+Every rule, with its code, level and examples, is in **[VALIDATION-RULES-MARIADB.md](VALIDATION-RULES-MARIADB.md)** — that list is kept in sync with the code; this section is only the overview.
 
-| Code | Syntax | Risk |
-|-----|------|---------|
-| `DROP_DATABASE` | `DROP DATABASE xxx` | Deletes an entire database |
-| `DROP_SCHEMA` | `DROP SCHEMA xxx` | Deletes an entire schema |
-| `CREATE_USER` | `CREATE USER 'xxx'@'%'` | Should be managed in the DCL project |
-| `DROP_USER` | `DROP USER 'xxx'@'%'` | Should be managed in the DCL project |
-| `ALTER_USER` | `ALTER USER 'xxx'@'%'` | Should be managed in the DCL project |
-| `SET_PASSWORD` | `SET PASSWORD FOR 'xxx'@'%'` | Should be managed in the DCL project |
-| `GRANT` | `GRANT xxx ON xxx TO xxx` | Should be managed in the DCL project |
-| `REVOKE` | `REVOKE xxx ON xxx FROM xxx` | Should be managed in the DCL project |
-| `FLUSH_PRIVILEGES` | `FLUSH PRIVILEGES` | Should be managed in the DCL project |
-| `INTO_OUTFILE` | `SELECT ... INTO OUTFILE` | Data exfiltration risk |
-| `LOAD_DATA` | `LOAD DATA INFILE` | Data injection risk |
-| `SHUTDOWN` | `SHUTDOWN` | Shuts down the database |
-| `SET_GLOBAL` | `SET GLOBAL xxx` | Changes system settings |
-| `RESET_MASTER` | `RESET MASTER` | Breaks replication configuration |
+| Level | Blocks the run? | Typical codes | Released by |
+|---|---|---|---|
+| 🔴 Forbidden | Yes | `DROP_DATABASE`, `DROP_SCHEMA`; in DDL: `CREATE_USER`, `GRANT`, `REVOKE`, … (account changes belong in DCL); `INTO_OUTFILE`, `LOAD_DATA`, `SHUTDOWN`, `SET_GLOBAL`, `KILL`, replication commands | `@allow-forbidden: true`, `@allow: CODE`, `--allow-forbidden`, `--allow CODE` — record who approved it with `@approved-by` |
+| 🔴 Forbidden in DCL | Yes | `DROP_USER`, `ALTER_USER`, `SET_PASSWORD`, `REVOKE` | same |
+| ⛔ Never in DCL | Yes, no override | `CREATE_TABLE_IN_DCL`, `CREATE_ROUTINE_IN_DCL`, … (any schema object) | — move it to the DDL project |
+| 🟠 Dangerous | Yes | `TRUNCATE_TABLE`, `DELETE_ALL` / `UPDATE_ALL` (no `WHERE`), `DROP_TABLE` (existing table), `DROP_COLUMN`, `DROP_INDEX`, `MODIFY_COLUMN`, `CHANGE_COLUMN`, `RENAME_TABLE`, `ALTER_TABLE_REBUILD`, `LOCK_TABLE`, `INSERT_SELECT` (no `WHERE`) | `@allow-dangerous: true`, `@allow: CODE`, `--allow-dangerous`, `--allow CODE` |
+| 🟡 Warning | No | `ADD COLUMN` on large tables, `NOT NULL` without `DEFAULT`, `ENGINE=MyISAM`, `utf8`/`latin1`, `FLOAT`/`DOUBLE`, `ON DELETE CASCADE`, … | — |
 
-### 🟠 Dangerous Operations (Dangerous) - Requires `--allow-dangerous` or `@allow-dangerous`
-
-| Code | Syntax | Risk | Recommendation |
-|-----|------|---------|------|
-| `TRUNCATE_TABLE` | `TRUNCATE TABLE xxx` | Wipes the entire table | Use DELETE + WHERE |
-| `DELETE_ALL` | `DELETE FROM xxx` (no WHERE) | Deletes all rows in the table | Add a WHERE condition |
-| `UPDATE_ALL` | `UPDATE xxx SET ...` (no WHERE) | Updates all rows in the table | Add a WHERE condition |
-| `DROP_COLUMN` | `ALTER TABLE xxx DROP COLUMN` | Permanently deletes a column | Confirm it's unused first |
-| `DROP_INDEX` | `DROP INDEX xxx` | Affects query performance | Confirm no queries rely on it first |
-| `RENAME_TABLE` | `RENAME TABLE xxx` | Breaks the application | Confirm all references are updated |
-| `MODIFY_COLUMN` | `MODIFY COLUMN xxx` | Data conversion may fail | Validate in a test environment first |
-| `LOCK_TABLE` | `LOCK TABLE xxx` | Blocks all queries | Use a transaction or row locks |
-| `ALTER_TABLE_MODIFY` | `ALTER TABLE MODIFY/CHANGE COLUMN` | Rebuilds the table and locks it for a long time | Validate in a test environment first |
-| `ALTER_TABLE_REBUILD` | `ALTER TABLE CONVERT TO / ENGINE=` | Fully rebuilds the table | Use pt-osc for large tables |
-| `INSERT_SELECT` | `INSERT ... SELECT` (no WHERE / no ON DUPLICATE KEY) | Locks the entire source table | Add a WHERE clause or batch it |
-
-### 🟡 Advisory Warnings (Warnings) - Does Not Block, But Flags an Issue
-
-| Syntax | Warning |
-|------|---------|
-| `ALTER TABLE ADD COLUMN` | May take a long time on large tables |
-| `ADD NOT NULL` (no DEFAULT) | Should be paired with a DEFAULT value |
-| `AUTO_INCREMENT=xxx` | Setting it manually can cause ID collisions |
-| `ENGINE=MyISAM` | Does not support transactions; use InnoDB instead |
-| `CHARSET=latin1/utf8` | Use utf8mb4 instead |
-| `FLOAT/DOUBLE` | Precision issues; use DECIMAL for monetary values |
-| `ON DELETE CASCADE` | Can trigger cascading deletes |
+Dangerous rules look only at the Up section — Down is expected to undo things.
 
 ---
 
@@ -394,37 +353,42 @@ FLUSH PRIVILEGES;
 ### Option 1: Add an Annotation to the File (Recommended)
 
 ```sql
--- @description: Data cleanup script
--- @type: maintenance
--- @allow-dangerous: true
--- @allow: TRUNCATE_TABLE,DELETE_ALL
+-- @allow: TRUNCATE_TABLE
+-- @approved-by: Alice (ticket #123) — staging table, rebuilt nightly
 
+-- +migrate Up
 TRUNCATE TABLE temp_logs;
-DELETE FROM audit_logs WHERE created_at < DATE_SUB(NOW(), INTERVAL 90 DAY);
+
+-- +migrate Down
+SELECT 1;  -- nothing to restore
 ```
+
+Prefer `@allow: CODE` (exactly what was reviewed) over `@allow-dangerous: true` (everything dangerous in the file). For a file that is already applied — and so must not be edited — put the allowance in the config instead: `validation: { allow: { '<file name>': ['CODE'] } }`.
 
 ### Option 2: CLI Flags
 
 ```bash
-# Allow all dangerous operations
+# Allow specific codes for this run (DDL: validate, up, sync, up-all)
+docker compose run --rm migrate up --allow TRUNCATE_TABLE,DROP_INDEX -c <config>
+
+# Allow all forbidden operations, recording who approved them
+docker compose run --rm migrate up --allow-forbidden --approved-by "Alice (CAB-1042)" -c <config>
+
+# DCL: validation runs only with --validate
 docker compose run --rm migrate dcl --validate --allow-dangerous -c <config>
-
-# Allow all forbidden operations (requires team approval)
-docker compose run --rm migrate dcl --validate --allow-forbidden -c <config>
-
-# Allow specific operation codes
-docker compose run --rm migrate validate --allow TRUNCATE_TABLE,DROP_INDEX -c <config>
 ```
 
 ### Annotation Reference
 
 | Annotation | Value | Description |
 |------------|---|------|
-| `@allow-dangerous` | `true` / `false` | Allow all dangerous operations |
-| `@allow-forbidden` | `true` / `false` | Allow all forbidden operations |
-| `@allow` | `CODE1,CODE2,...` | Allow specific operation codes |
-| `@description` | text | Describes this migration |
-| `@type` | `procedure` / `maintenance` / `dcl` | Type marker |
+| `@allow` | `CODE1,CODE2,...` | Allow specific operation codes (preferred) |
+| `@allow-dangerous` | `true` / `false` | Allow every dangerous operation in the file |
+| `@allow-forbidden` | `true` / `false` | Allow every forbidden operation in the file |
+| `@approved-by` | name / ticket | Who approved the forbidden operations; required when `validation.requireApprover: true` |
+| `@skip-syntax-check` | `true` | Skip the SQL parser (stored procedures, syntax it doesn't know); all other checks still run |
+
+`@description` and `@type` appeared in older examples; they're informational only and have no effect.
 
 ---
 
@@ -465,24 +429,7 @@ ALTER TABLE users DROP COLUMN phone;
 
 ### 6.3 Execution Flow
 
-```
-┌─────────────────┐
-│   Pre-Check     │ ── Fail ──→ Stop, migration does not run
-└────────┬────────┘
-         │ Success
-         ▼
-┌─────────────────┐
-│ Execute Migration│
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   Post-Check    │ ── Fail ──→ Automatic rollback (if enabled)
-└────────┬────────┘
-         │ Success
-         ▼
-      Done ✅
-```
+See the diagram in [§3.3](#33-execution-flow). Sanity checks run only with `--sanity-check`; without it, PreCheck/PostCheck sections are ignored. A failed PreCheck stops the run before that migration executes; a failed PostCheck runs the Down section (unless `--no-auto-rollback`) and stops the run. Timeout per check: `sanityCheck.timeoutMs` in the config (default 30000).
 
 ### 6.4 CLI Usage
 
@@ -543,6 +490,9 @@ DROP INDEX idx_products_category ON products;
 #### Example 3: Confirm Data Compatibility Before Changing a Column Type
 
 ```sql
+-- @allow: MODIFY_COLUMN,ALTER_TABLE_MODIFY
+-- (changing a column type rewrites the table — reviewed)
+
 -- +migrate Up
 
 -- +sanity PreCheck
@@ -566,6 +516,8 @@ ALTER TABLE products MODIFY COLUMN price FLOAT;
 #### Example 4: Confirm a Column Is Unused Before Dropping It
 
 ```sql
+-- @allow: DROP_COLUMN
+
 -- +migrate Up
 
 -- +sanity PreCheck
@@ -664,14 +616,16 @@ UPDATE old_users SET migrated = 0 WHERE migrated = 1;
 ### 7.1 Getting the Docker Image
 
 ```bash
-# Option 1: Pull from a registry (if published)
-docker pull your-registry/ddl-migrate:latest
+# Option 1: the published image — pin a version tag or commit SHA, not latest
+docker pull ghcr.io/i7ppbeer/db-migrate/db-migrate:<version-or-sha>
 
-# Option 2: Build locally
-git clone https://github.com/your-org/ddl-migrate.git
-cd ddl-migrate
+# Option 2: build locally
+git clone https://github.com/i7ppBeer/db-migrate.git
+cd db-migrate
 docker compose build migrate
 ```
+
+Tags and the release process: [BUILD-IMAGE-GUIDE.md](BUILD-IMAGE-GUIDE.md#image-tags-ghcr).
 
 ### 7.2 Local Environment Setup
 
@@ -694,7 +648,7 @@ your-project/
                     └── R__002_readonly_users.sql
 ```
 
-**config.js example:**
+**`ddl/config.js`:**
 ```javascript
 export default {
   type: 'mariadb',
@@ -705,11 +659,23 @@ export default {
     user: process.env.MARIADB_USER,          // required — no built-in default
     password: process.env.MARIADB_PASSWORD   // required — no built-in default
   },
-  migrationsDir: './migrations',
-  changelogTable: '_migrations'  // for DDL
-  // checksumTable: '_dcl_migrations'  // for DCL
+  migrationsDir: './migrations',             // relative to this file
+  changelogTable: 'schema_migrations'        // the default
 };
 ```
+
+**`dcl/config.js`** — `mode: 'repeatable'` is what makes it a DCL project:
+```javascript
+export default {
+  type: 'mariadb',
+  mode: 'repeatable',
+  mariadb: { /* same connection settings */ },
+  migrationsDir: './migrations',             // or a list: ['./shared', './prod-tw']
+  checksumTable: 'dcl_repeatable_migrations' // the default
+};
+```
+
+Other options (`createDatabaseIfMissing`, `ddlSafety.lockGuard`, `runtimeGates`, `validation`, `notifications`) are in the [README's configuration section](../README.md#-configuration-examples).
 
 ### 7.3 Full CLI Command Reference
 
@@ -730,8 +696,11 @@ docker compose run --rm migrate up --sanity-check -c /app/test-fixtures/mariadb/
 # Dry run (preview)
 docker compose run --rm migrate up --dry-run -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
-# Roll back 1 migration
+# Roll back 1 migration (shows the plan and asks; add --yes in CI, --dry-run to preview)
 docker compose run --rm migrate down -n 1 -c /app/test-fixtures/mariadb/your-project/ddl/config.js
+
+# status → validate → up → schema diff → notification email
+docker compose run --rm migrate sync -c /app/test-fixtures/mariadb/your-project/ddl/config.js
 
 # Validate migration files
 docker compose run --rm migrate validate -c /app/test-fixtures/mariadb/your-project/ddl/config.js
@@ -755,7 +724,10 @@ docker compose run --rm migrate dcl --validate -c /app/test-fixtures/mariadb/you
 # Run DCL (allow dangerous operations)
 docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 
-# Dry run (preview)
+# Preview: script diffs, affected accounts and their current grants, passwords to be generated
+docker compose run --rm migrate dcl --plan -c /app/test-fixtures/mariadb/your-project/dcl/config.js
+
+# Dry run (just the list of scripts that would run)
 docker compose run --rm migrate dcl --dry-run -c /app/test-fixtures/mariadb/your-project/dcl/config.js
 
 # Create a new DCL migration file
@@ -813,66 +785,37 @@ ALTER TABLE products
 **File**: `R__001_app_users.sql`
 
 ```sql
--- @description: Application database users
--- @type: dcl
+-- Application database users
 
--- ========================================
--- Read-Only User (for reporting)
--- ========================================
-CREATE USER IF NOT EXISTS 'app_readonly'@'%' IDENTIFIED BY 'readonly_password_here';
-
--- Revoke all first (ensure clean state)
-REVOKE ALL PRIVILEGES ON *.* FROM 'app_readonly'@'%';
-
--- Grant read-only access
+-- Read-only user (reporting)
+CREATE USER IF NOT EXISTS 'app_readonly'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';
 GRANT SELECT ON your_database.* TO 'app_readonly'@'%';
 
--- ========================================
--- Read-Write User (for application)
--- ========================================
-CREATE USER IF NOT EXISTS 'app_readwrite'@'%' IDENTIFIED BY 'readwrite_password_here';
-
-REVOKE ALL PRIVILEGES ON *.* FROM 'app_readwrite'@'%';
-
+-- Read-write user (application)
+CREATE USER IF NOT EXISTS 'app_readwrite'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';
 GRANT SELECT, INSERT, UPDATE, DELETE ON your_database.* TO 'app_readwrite'@'%';
 
--- ========================================
--- Apply changes
--- ========================================
 FLUSH PRIVILEGES;
 ```
 
-### Scenario 4: Create Stored Procedures (DCL)
+`GRANT` is additive and safe to repeat. To take a privilege away later, edit the file to add a `REVOKE` for exactly what was granted, with `-- @allow-forbidden: true` (and `-- @approved-by:`) — see Scenario 5.
 
-**File**: `R__010_stored_procedures.sql`
+### Scenario 4: Stored Procedures (DDL)
+
+Procedures and functions are schema objects: they go in the **DDL** project, not DCL. See [§3.6](#36-stored-procedures-and-functions) for the rules (no `DELIMITER`, `@skip-syntax-check: true`).
+
+**File**: `20250126000004-order-procedures.sql`
 
 ```sql
--- @description: Application stored procedures
--- @type: procedure
--- @allow-dangerous: true
+-- @skip-syntax-check: true
 
--- ========================================
--- Function: Calculate age from birthdate
--- ========================================
-DELIMITER //
-
-DROP FUNCTION IF EXISTS fn_calculate_age//
-
+-- +migrate Up
 CREATE FUNCTION fn_calculate_age(birthdate DATE)
 RETURNS INT
 DETERMINISTIC
 BEGIN
     RETURN TIMESTAMPDIFF(YEAR, birthdate, CURDATE());
-END//
-
-DELIMITER ;
-
--- ========================================
--- Procedure: Get user order statistics
--- ========================================
-DELIMITER //
-
-DROP PROCEDURE IF EXISTS sp_get_user_order_stats//
+END;
 
 CREATE PROCEDURE sp_get_user_order_stats(
     IN p_user_id INT,
@@ -880,90 +823,39 @@ CREATE PROCEDURE sp_get_user_order_stats(
     OUT p_total_spent DECIMAL(10,2)
 )
 BEGIN
-    SELECT 
-        COUNT(*),
-        COALESCE(SUM(total_amount), 0)
-    INTO 
-        p_order_count,
-        p_total_spent
+    SELECT COUNT(*), COALESCE(SUM(total_amount), 0)
+    INTO p_order_count, p_total_spent
     FROM orders
     WHERE user_id = p_user_id;
-END//
+END;
 
-DELIMITER ;
-
--- ========================================
--- Procedure: Archive old orders
--- ========================================
-DELIMITER $$
-
-DROP PROCEDURE IF EXISTS sp_archive_old_orders$$
-
-CREATE PROCEDURE sp_archive_old_orders(IN p_days_old INT)
-BEGIN
-    DECLARE v_cutoff_date DATE;
-    SET v_cutoff_date = DATE_SUB(CURDATE(), INTERVAL p_days_old DAY);
-    
-    -- Create archive table if not exists
-    CREATE TABLE IF NOT EXISTS orders_archive LIKE orders;
-    
-    -- Move old orders to archive
-    INSERT INTO orders_archive
-    SELECT * FROM orders 
-    WHERE order_date < v_cutoff_date
-    AND id NOT IN (SELECT id FROM orders_archive);
-    
-    -- Delete archived orders
-    DELETE FROM orders 
-    WHERE order_date < v_cutoff_date
-    AND id IN (SELECT id FROM orders_archive);
-    
-    SELECT ROW_COUNT() AS archived_count;
-END$$
-
-DELIMITER ;
+-- +migrate Down
+DROP PROCEDURE IF EXISTS sp_get_user_order_stats;
+DROP FUNCTION IF EXISTS fn_calculate_age;
 ```
 
-### Scenario 5: Dangerous Operation - Data Cleanup (DCL)
+Recurring maintenance (archiving or purging old rows on a schedule) is not a migration: a migration runs once per database. Run such jobs from a scheduler (cron, a Kubernetes CronJob, a MariaDB `EVENT`), and use a DDL migration only for a one-off cleanup — with `@allow` for the dangerous codes it uses.
 
-**File**: `R__020_data_cleanup.sql`
+### Scenario 5: Remove a Privilege or an Account (DCL)
+
+**File**: `R__005_offboarding.sql`
 
 ```sql
--- @description: Periodic data cleanup job
--- @type: maintenance
--- @allow-dangerous: true
--- @allow: DELETE_ALL,TRUNCATE_TABLE
+-- @allow-forbidden: true
+-- @approved-by: Alice (CAB-2001)
 
--- ========================================
--- Clean up temporary tables
--- ========================================
+-- An account that's no longer used
+DROP USER IF EXISTS 'old_batch_user'@'%';
 
--- Truncate temp processing table (safe - no important data)
-TRUNCATE TABLE temp_processing_queue;
+-- Take back write access that was granted at database level
+REVOKE INSERT, UPDATE, DELETE ON your_database.* FROM 'app_reporting'@'%';
 
--- ========================================
--- Archive and clean old audit logs (90 days)
--- ========================================
-
--- First, ensure archive table exists
-CREATE TABLE IF NOT EXISTS audit_logs_archive LIKE audit_logs;
-
--- Archive old logs
-INSERT IGNORE INTO audit_logs_archive
-SELECT * FROM audit_logs 
-WHERE created_at < DATE_SUB(NOW(), INTERVAL 90 DAY);
-
--- Delete archived logs from main table
-DELETE FROM audit_logs 
-WHERE created_at < DATE_SUB(NOW(), INTERVAL 90 DAY)
-AND id IN (SELECT id FROM audit_logs_archive);
-
--- ========================================
--- Clean up expired sessions
--- ========================================
-DELETE FROM user_sessions 
-WHERE expires_at < NOW();
+FLUSH PRIVILEGES;
 ```
+
+- `DROP USER` and `REVOKE` are forbidden in DCL by default; `@allow-forbidden` releases them and `@approved-by` records who agreed (required if `validation.requireApprover` is on).
+- A `REVOKE` must match a grant that exists, at the same level: revoking table-level `SELECT` from an account that only has database-level `SELECT` fails with *ERROR 1147: There is no such grant defined*. To exclude a table, grant per table instead of `db.*`.
+- Deleting the `R__` file that created an account does **not** remove the account — `dcl` refuses until you restore the file or confirm with `--accept-removed-dcl`. Remove accounts explicitly, as above.
 
 ### Scenario 6: Migration With Sanity Checks (DDL)
 
@@ -988,56 +880,38 @@ ALTER TABLE users DROP COLUMN phone;
 
 ### Scenario 7: Multi-Environment Permission Management (DCL)
 
-**File**: `R__003_environment_users.sql`
+Each environment has its own server, so give each one its own DCL directory — plus a shared one for accounts every environment needs:
+
+```javascript
+// dcl/config.js
+export default {
+  type: 'mariadb',
+  mode: 'repeatable',
+  instances: [
+    { name: 'staging',    migrationsDir: ['./shared', './staging'],    mariadb: { host: 'db-staging.internal', database: 'app', user: process.env.MARIADB_USER, password: process.env.MARIADB_PASSWORD } },
+    { name: 'production', migrationsDir: ['./shared', './production'], mariadb: { host: 'db-prod.internal',    database: 'app', user: process.env.MARIADB_USER, password: process.env.MARIADB_PASSWORD } }
+  ]
+};
+```
+
+**File**: `production/R__010_bi_readonly.sql`
 
 ```sql
--- @description: Environment-specific users with dynamic passwords
--- @type: dcl
+-- BI tools: read-only, from the office network, without the sensitive tables
+CREATE USER IF NOT EXISTS 'bi_readonly'@'10.0.%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';
 
--- ========================================
--- Development Environment User
--- ========================================
-CREATE USER IF NOT EXISTS 'dev_user'@'%' 
-    IDENTIFIED BY 'dev_password_change_me';
-
-REVOKE ALL PRIVILEGES ON *.* FROM 'dev_user'@'%';
-GRANT ALL PRIVILEGES ON dev_%.* TO 'dev_user'@'%';
-
--- ========================================
--- Staging Environment User  
--- ========================================
-CREATE USER IF NOT EXISTS 'staging_user'@'%' 
-    IDENTIFIED BY 'staging_password_change_me';
-
-REVOKE ALL PRIVILEGES ON *.* FROM 'staging_user'@'%';
-GRANT SELECT, INSERT, UPDATE, DELETE ON staging_%.* TO 'staging_user'@'%';
-
--- ========================================
--- Production Read-Only User (for BI tools)
--- ========================================
-CREATE USER IF NOT EXISTS 'bi_readonly'@'10.0.%' 
-    IDENTIFIED BY 'bi_password_change_me';
-
-REVOKE ALL PRIVILEGES ON *.* FROM 'bi_readonly'@'10.0.%';
-GRANT SELECT ON production_db.* TO 'bi_readonly'@'10.0.%';
-
--- Disallow access to sensitive tables
-REVOKE SELECT ON production_db.user_passwords FROM 'bi_readonly'@'10.0.%';
-REVOKE SELECT ON production_db.payment_info FROM 'bi_readonly'@'10.0.%';
+-- Grant per table rather than app.* minus some tables: MariaDB can't REVOKE
+-- one table out of a database-level grant (ERROR 1147)
+GRANT SELECT ON app.orders      TO 'bi_readonly'@'10.0.%';
+GRANT SELECT ON app.order_items TO 'bi_readonly'@'10.0.%';
+GRANT SELECT ON app.products    TO 'bi_readonly'@'10.0.%';
 
 FLUSH PRIVILEGES;
 ```
 
----
+Table-level grants need the tables to exist — run the DDL project first; on a server where `app.orders` doesn't exist yet the `GRANT` fails (*ERROR 1146*). Database-level grants (`app.*`) don't have that requirement.
 
-## 📝 Best Practices
-
-1. **DDL files must always have a Down block** to allow rollback
-2. **DCL files must be idempotent** — use `IF EXISTS` / `IF NOT EXISTS`
-3. **Add ALGORITHM=INPLACE for large-table operations** to avoid long table locks
-4. **Never hardcode passwords** — use environment variables or a secret manager
-5. **Dangerous operations need an explicit annotation** explaining why they're needed
-6. **Test in a non-production environment first**, then run in production
+`dcl-all -c dcl/config.js` runs each instance against its own directories and writes one notification email per instance (with that instance's passwords). Details: [MULTI-INSTANCE.md](MULTI-INSTANCE.md#different-accounts-per-instance-dcl).
 
 ---
 

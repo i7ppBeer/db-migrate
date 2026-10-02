@@ -182,18 +182,20 @@ If a different application's long transaction is blocking the migration (the exa
 
 ## 8. How do we know these protections actually work (current validation status)
 
-An honest account of the current level of validation — don't take any of it at face value:
+An honest account of the current level of validation (updated 2026-10-02). "CI" means it runs on every push to `main` (`.github/workflows/migrations.yml`):
 
 | Item | Validation method | Status |
 |---|---|---|
-| Lock Guard's code logic | Line-by-line source review + 6 mocked unit tests | ✅ Validated |
-| Lock Guard's behavior against real MariaDB (3 e2e scenarios) | `test/integration.test.js`, logic reviewed | ⚠️ Not actually run yet (no Docker/MariaDB in this environment) |
-| Validation rule tiering/annotation mechanism | Line-by-line source review + actual CLI execution screenshots | ✅ Validated |
-| The two FK / orphan-drop logic bugs | Manual step-through + concrete SQL counterexamples | ✅ Confirmed real bugs, not yet fixed |
-| Runtime Gate R0-R4 | Design document only | ❌ Not implemented at all, cannot be validated |
-| `reset` command | 13 mocked unit tests | ✅ Logic validated; not tested against a real DB |
+| Lock Guard's code logic | Mocked unit tests | ✅ CI |
+| Lock Guard against a real MariaDB (bounded wait, retry, no queue jam) | `test/integration.test.js` scenarios 1–3 | ✅ CI, real MariaDB |
+| Validation rules, tiers and allowances | Unit tests + `test-all` running every fixture with `@expect-error` expectations | ✅ CI |
+| The two FK / orphan-drop logic bugs ([Bug A / Bug B](VALIDATION-RULES-MARIADB.md)) | Unit tests | ✅ Fixed (2026-09-29) |
+| Sanity-check rollback actually restoring the schema | `test-all --sanity-check` with fixtures whose Post-Check fails by design | ✅ CI, real MariaDB and MongoDB |
+| Runtime gates R0–R4 | Unit tests; R2 against a real open transaction in `test/integration.test.js` scenario 4; all gates run in every real-server test, and a missing privilege was confirmed to be reported as skipped (or refused with `requireLockCheck`) | ✅ CI for R0–R2 · ⚠️ R3 refusing a read-only target has not been exercised against a real replica |
+| MySQL 8 (the tool's own SQL) | `test/mysql-compat.test.js` — the CLI against MySQL 8.4, including upgrading old bookkeeping tables | ✅ CI, real MySQL |
+| `reset` command | Mocked unit tests | ⚠️ Not run against a real database in CI |
 
-For the full list of test gaps, see the "Known test gaps" section in [TESTING-GUIDE.md](./TESTING-GUIDE.md#known-test-gaps-audited-2026-09-10).
+What CI can't cover — production-sized tables, real replication topologies, your migrations' own SQL — still needs a staging run before production.
 
 ---
 

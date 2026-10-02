@@ -1,10 +1,8 @@
 # MongoDB DDL/DCL Migration Guide
 
-> ⚠️ **Not fully verified (2026-09-11 audit)**: This document was written in the same early batch as a planning guide that has since been removed as outdated. A keyword spot-check found no broken flags/code, but there was no line-by-line comparison against the source code — this is not "verified correct," only "no obvious errors found in the sample." For rule details, treat [VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md) as authoritative.
+> **Verified against the source on 2026-10-02.** Every complete example below passes `validate`; the sanity-check and DCL patterns follow the repository's templates. The full rule list lives in [VALIDATION-RULES-MONGODB.md](./VALIDATION-RULES-MONGODB.md).
 >
-> **Current behavior that affects how you write files (2026-10-01):** `up`/`sync` validate pending files before running them and refuse on failure; migrations must be ES modules (`export async function up…` — CommonJS `module.exports` can't be loaded); `R__` files in a DDL directory are ignored; `dropDatabase()` always needs explicit approval, also in `down()`. Rules can be tuned per project — see [VALIDATION-RULES-REFERENCE.md](./VALIDATION-RULES-REFERENCE.md#project-policy-turning-rules-off-down-or-up-and-adding-your-own).
-
-> This guide explains how to write DDL (Data Definition Language) and DCL (Data Control Language) migration files for MongoDB.
+> `up`/`sync` validate pending files before running them and refuse on failure; `R__` files in a DDL directory are ignored. Rules can be tuned per project — see [VALIDATION-RULES-REFERENCE.md](./VALIDATION-RULES-REFERENCE.md#project-policy-turning-rules-off-down-or-up-and-adding-your-own).
 
 ---
 
@@ -31,8 +29,9 @@
 
 ### DCL (Repeatable Migration)
 - **Purpose**: Permission management (users, roles, grants)
-- **File name format**: `R__NNN_description.js`
+- **File name format**: `R__<name>.js` — by convention `R__NNN_description.js`; files run in file-name order
 - **Characteristics**: Re-run whenever the checksum changes; must be idempotent
+- **Lives in**: a separate project with `mode: 'repeatable'` in its config (see [§7.2](#72-local-environment-setup))
 - **Example**: `R__001_create_app_user.js`
 
 ---
@@ -71,44 +70,40 @@ export async function down(db, client) {
 
 | Operation Type | Syntax Example | Notes |
 |---------|---------|------|
-| Create user | `db.command({createUser: ...})` | ✅ Must check existence first |
-| Update user | `db.command({updateUser: ...})` | ✅ Naturally idempotent |
-| Drop user | `db.command({dropUser: ...})` | ✅ Must check existence first |
-| Create role | `db.command({createRole: ...})` | ✅ Must check existence first |
-| Update role | `db.command({updateRole: ...})` | ✅ Naturally idempotent |
-| Grant role | `db.command({grantRolesToUser: ...})` | ✅ Naturally idempotent |
-| Revoke role | `db.command({revokeRolesFromUser: ...})` | ✅ Naturally idempotent |
+| Create user | `adminDb.command({ createUser, pwd: 'CHANGE_ME_ON_FIRST_LOGIN', … })` | ✅ Check `usersInfo` first; the placeholder gets a generated password |
+| Create role | `adminDb.command({ createRole: … })` | ✅ Check `rolesInfo` first |
+| Update role | `adminDb.command({ updateRole: … })` | ✅ Naturally idempotent |
+| Grant role | `adminDb.command({ grantRolesToUser: … })` | ✅ Naturally idempotent |
+| Revoke role | `adminDb.command({ revokeRolesFromUser: … })` | ✅ Naturally idempotent |
+| Update user | `adminDb.command({ updateUser: … })` | 🔴 `UPDATE_USER_CMD` — needs `// @allow-forbidden: true` |
+| Drop user | `adminDb.command({ dropUser: … })` | 🔴 `DROP_USER_CMD` — needs `// @allow-forbidden: true` |
+| Collections, indexes | `createCollection`, `createIndex`, `renameCollection` | ⛔ Never allowed in DCL (`*_IN_DCL`, can't be overridden) — put them in the DDL project |
 
-**File structure:**
+**File structure** (same as [`templates/mongodb/dcl/TEMPLATE-create-user-readonly.js`](../templates/mongodb/dcl/TEMPLATE-create-user-readonly.js)):
 ```javascript
-// @description: Application users management
-// @type: dcl
-// @allow-dangerous: true
+// @allow-forbidden: true
+// (updateUser in the "already exists" branch is high-risk by default)
 
 export async function up(db, client) {
   const adminDb = client.db('admin');
-  
-  // Check if user exists
-  const users = await adminDb.command({ usersInfo: 'app_readonly' });
-  
-  if (users.users.length === 0) {
-    await adminDb.command({
-      createUser: 'app_readonly',
-      pwd: 'password',
-      roles: [{ role: 'read', db: 'mydb' }]
-    });
-  } else {
-    await adminDb.command({
-      updateUser: 'app_readonly',
-      roles: [{ role: 'read', db: 'mydb' }]
-    });
-  }
-}
+  const username = 'app_readonly';
 
-export async function down(db, client) {
-  console.log('DCL migrations do not support rollback');
+  const existing = await adminDb.command({ usersInfo: username });
+  if (existing.users.length === 0) {
+    await adminDb.command({
+      createUser: username,
+      pwd: 'CHANGE_ME_ON_FIRST_LOGIN',
+      roles: [{ role: 'read', db: 'mydb' }]
+    });
+    return { passwordSet: true, createdUsernames: [username], allUsernames: [username] };
+  }
+
+  await adminDb.command({ updateUser: username, roles: [{ role: 'read', db: 'mydb' }] });
+  return { passwordSet: false, allUsernames: [username] };
 }
 ```
+
+The return value tells the runner what happened, for the notification email: `passwordSet: true` (new account), `false` (already existed, password unchanged) or `'rotated'` (password reset). DCL files don't need a `down()` — they're never rolled back.
 
 ---
 
@@ -118,86 +113,44 @@ export async function down(db, client) {
 
 #### MongoDB Migration File Structure (.js)
 
-**📄 ANNOTATION block** *(optional)*
-> Metadata configured via `//` comments
+| Export | Required | Runs |
+|---|---|---|
+| `up(db, client)` | ✅ | Always — the migration itself |
+| `down(db, client)` | ✅ when `up()` changes anything (`MISSING_DOWN`) | `down` command; auto-rollback after a failed `postCheck` |
+| `preCheck(db, client)` | Optional | Only with `--sanity-check`, before `up()`. A failure stops the run; `up()` doesn't execute |
+| `postCheck(db, client)` | Optional | Only with `--sanity-check`, after `up()`. A failure runs `down()` (unless `--no-auto-rollback`) and stops the run |
 
-```javascript
-// @description: Describes the purpose of this migration
-// @allow-dangerous: true
-```
+`db` is the configured database; `client` is the `MongoClient`, e.g. `client.db('admin')`. With `ddlSafety.operationTimeoutMs` (or `// @operation-timeout-ms:`) set, every operation issued through either is time-limited.
 
----
+`preCheck` / `postCheck` must **return** `{ success: true, details?: [...] }` or `{ success: false, error: '…' }`; a thrown error also counts as a failure. Each has `sanityCheck.timeoutMs` (default 30 s).
 
-**🔵 UP function** *(required)*
-> `export async function up(db, client) { ... }`
-
-Contains the following sub-blocks:
-
-| Block | Syntax | Required | Description |
-|------|------|--------|------|
-| 🟡 **PreCheck** | `// ══ PreCheck ══` + throw Error | Optional | State check before execution |
-| 🟢 **Main logic** | `// ══ Main Migration ══` | Required | The actual DDL operations to run |
-| 🟡 **PostCheck** | `// ══ PostCheck ══` + throw Error | Optional | Result validation after execution |
-
-**PreCheck example:**
-```javascript
-// ══ PreCheck ══
-const exists = await db.listCollections({name: 'users'}).toArray();
-if (exists.length === 0) throw new Error('PreCheck failed: users collection not found');
-```
-
-**Main logic example:**
-```javascript
-// ══ Main Migration ══
-await db.collection('users').createIndex({email: 1});
-await db.collection('users').updateMany(...);
-```
-
-**PostCheck example:**
-```javascript
-// ══ PostCheck ══
-const indexes = await db.collection('users').indexes();
-if (!indexes.find(i => i.name === 'idx_email')) {
-  throw new Error('PostCheck failed: index not created');
-}
-```
-
----
-
-**🔴 DOWN function** *(recommended)*
-> `export async function down(db, client) { ... }`
-
-```javascript
-await db.collection('users').dropIndex('idx_email');
-await db.collection('users').drop();
-```
-
----
+> A check written *inside* `up()` that throws is not a sanity check: it just makes `up()` fail, the migration stays pending, and **nothing rolls back** what `up()` already did. Use the exported functions when you want automatic rollback.
 
 #### Full Example Structure
 
 ```javascript
-// @description: ...              // ANNOTATION block
-// @allow-dangerous: true
+// annotations (optional) go in the leading comment block — see §5
 
-export async function up(db, client) {   // UP function starts
-  
-  // ══ PreCheck ══               // PreCheck starts
-  const exists = await db.listCollections({name: 'users'}).toArray();
-  if (exists.length === 0) throw new Error('PreCheck failed');
-  
-  // ══ Main Migration ══         // Main logic
-  await db.createCollection('orders');
-  await db.collection('orders').createIndex({userId: 1});
-  
-  // ══ PostCheck ══              // PostCheck starts
-  const indexes = await db.collection('orders').indexes();
-  if (!indexes.find(i => i.name === 'userId_1')) {
-    throw new Error('PostCheck failed');
-  }
+export async function preCheck(db, client) {
+  const exists = await db.listCollections({ name: 'users' }).toArray();
+  return exists.length > 0
+    ? { success: true }
+    : { success: false, error: 'users collection not found — run the create-users migration first' };
 }
 
-export async function down(db, client) { // DOWN function starts
+export async function up(db, client) {
+  await db.createCollection('orders');
+  await db.collection('orders').createIndex({ userId: 1 }, { name: 'idx_orders_user' });
+}
+
+export async function postCheck(db, client) {
+  const indexes = await db.collection('orders').indexes();
+  return indexes.some(i => i.name === 'idx_orders_user')
+    ? { success: true }
+    : { success: false, error: 'idx_orders_user was not created' };
+}
+
+export async function down(db, client) {
   await db.collection('orders').drop();
 }
 ```
@@ -207,9 +160,9 @@ export async function down(db, client) { // DOWN function starts
 | Block | Syntax | Required | Purpose |
 |------|------|--------|------|
 | **up()** | `export async function up(db, client)` | ✅ Required | Defines the "forward migration" logic |
-| **down()** | `export async function down(db, client)` | ⚠️ Recommended | Defines the "rollback" logic |
-| **PreCheck** | Check code at the start of up() | ❌ Optional | State check before execution |
-| **PostCheck** | Validation code at the end of up() | ❌ Optional | Result validation after execution |
+| **down()** | `export async function down(db, client)` | ✅ Required when up() changes anything | Defines the "rollback" logic |
+| **preCheck()** | `export async function preCheck(db, client)` | ❌ Optional | State check before execution — only with `--sanity-check` |
+| **postCheck()** | `export async function postCheck(db, client)` | ❌ Optional | Result validation after execution — only with `--sanity-check`; a failure runs down() |
 
 ### 3.3 Execution Flow
 
@@ -265,83 +218,44 @@ export async function down(db, client) {
 }
 ```
 
-### 3.5 Full Example (with PreCheck/PostCheck)
+### 3.5 Full Example (with preCheck/postCheck)
+
+Same as [`templates/mongodb/ddl/TEMPLATE-with-sanity-check.js`](../templates/mongodb/ddl/TEMPLATE-with-sanity-check.js), without the helper import:
 
 ```javascript
-/**
- * Add a phone field to all users
- * @description: Add phone field to users collection
- * @allow-dangerous: true
- */
+// Add a phone field to all users. Run with: up --sanity-check
 
-export async function up(db, client) {
-  const collection = db.collection('users');
-  
-  // ═══════════════════════════════════════════════════════════════
-  // PreCheck: preliminary checks
-  // ═══════════════════════════════════════════════════════════════
-  
-  // Confirm the users collection exists
+export async function preCheck(db, client) {
   const collections = await db.listCollections({ name: 'users' }).toArray();
   if (collections.length === 0) {
-    throw new Error('PreCheck failed: users collection does not exist');
+    return { success: false, error: 'users collection does not exist — run the create-users migration first' };
   }
-  
-  // Confirm the phone field doesn't already exist (avoid re-running)
-  const existingDoc = await collection.findOne({ phone: { $exists: true } });
-  if (existingDoc) {
-    console.log('phone field already exists, skipping migration');
-    return; // Idempotency: skip if already applied
+  const already = await db.collection('users').findOne({ phone: { $exists: true } });
+  if (already) {
+    return { success: false, error: 'some users already have a phone field — has this migration run before?' };
   }
-  
-  // ═══════════════════════════════════════════════════════════════
-  // Main Migration: main logic
-  // ═══════════════════════════════════════════════════════════════
-  
-  // Add the phone field to all documents
-  const result = await collection.updateMany(
+  return { success: true, details: ['users exists', 'no phone field yet'] };
+}
+
+export async function up(db, client) {
+  await db.collection('users').updateMany(
     { phone: { $exists: false } },
-    { $set: { phone: null, updatedAt: new Date() } }
+    { $set: { phone: null } }
   );
-  console.log(`Updated ${result.modifiedCount} documents`);
-  
-  // Create index
-  await collection.createIndex(
-    { phone: 1 },
-    { name: 'idx_users_phone', sparse: true }
-  );
-  
-  // ═══════════════════════════════════════════════════════════════
-  // PostCheck: post-execution validation
-  // ═══════════════════════════════════════════════════════════════
-  
-  // Confirm all documents have the phone field
-  const missingPhone = await collection.countDocuments({ phone: { $exists: false } });
-  if (missingPhone > 0) {
-    throw new Error(`PostCheck failed: ${missingPhone} documents still missing phone field`);
-  }
-  
-  // Confirm the index was created
-  const indexes = await collection.indexes();
-  const phoneIndex = indexes.find(idx => idx.name === 'idx_users_phone');
-  if (!phoneIndex) {
-    throw new Error('PostCheck failed: idx_users_phone index not created');
-  }
-  
-  console.log('Migration completed successfully');
+  await db.collection('users').createIndex({ phone: 1 }, { name: 'idx_users_phone', sparse: true });
+}
+
+export async function postCheck(db, client) {
+  const missing = await db.collection('users').countDocuments({ phone: { $exists: false } });
+  if (missing > 0) return { success: false, error: `${missing} users still have no phone field` };
+  const indexes = await db.collection('users').indexes();
+  if (!indexes.some(i => i.name === 'idx_users_phone')) return { success: false, error: 'idx_users_phone was not created' };
+  return { success: true };
 }
 
 export async function down(db, client) {
-  const collection = db.collection('users');
-  
-  // Drop the index
-  await collection.dropIndex('idx_users_phone').catch(() => {});
-  
-  // Remove the phone field
-  await collection.updateMany(
-    {},
-    { $unset: { phone: '' } }
-  );
+  await db.collection('users').dropIndex('idx_users_phone').catch(() => {});
+  await db.collection('users').updateMany({}, { $unset: { phone: '' } });
 }
 ```
 
@@ -353,21 +267,14 @@ export async function down(db, client) {
  */
 
 export async function up(db, client) {
-  // ═══════════════════════════════════════════════════════════════
-  // PreCheck
-  // ═══════════════════════════════════════════════════════════════
-  
-  // Confirm the collection exists
+  // Make sure the collection exists
   const collections = await db.listCollections({ name: 'products' }).toArray();
   if (collections.length === 0) {
     // Create it if it doesn't exist
     await db.createCollection('products');
   }
   
-  // ═══════════════════════════════════════════════════════════════
-  // Main Migration: apply schema validation
-  // ═══════════════════════════════════════════════════════════════
-  
+  // Apply schema validation
   await db.command({
     collMod: 'products',
     validator: {
@@ -399,10 +306,7 @@ export async function up(db, client) {
     validationAction: 'warn'
   });
   
-  // ═══════════════════════════════════════════════════════════════
-  // PostCheck
-  // ═══════════════════════════════════════════════════════════════
-  
+  // Fail the migration if the validator didn't stick (no rollback — see §3.1)
   const collInfo = await db.listCollections({ name: 'products' }).toArray();
   if (!collInfo[0]?.options?.validator) {
     throw new Error('PostCheck failed: Schema validation not applied');
@@ -421,150 +325,65 @@ export async function down(db, client) {
 
 ### 3.7 DCL (Repeatable) Example
 
-```javascript
-/**
- * Create application users
- * @description: Create application database users
- * @type: dcl
- * @allow-dangerous: true
- */
+Several accounts in one file (the pattern of `test-fixtures/mongodb/test-success/dcl/migrations/R__003_secret_users.js`):
 
-// Note: DCL files also need up() and down() functions,
-// but down() usually just logs and does not actually roll back
+```javascript
+// Application accounts — each gets its own generated password on creation
+// @allow-forbidden: true
+// (updateUser for accounts that already exist)
 
 export async function up(db, client) {
   const adminDb = client.db('admin');
-  
-  // ═══════════════════════════════════════════════════════════════
-  // Create app_user (read/write permission)
-  // ═══════════════════════════════════════════════════════════════
-  
-  try {
-    // Try to create the user
-    await adminDb.command({
-      createUser: 'app_user',
-      pwd: 'secure_password_here',
-      roles: [
-        { role: 'readWrite', db: 'mydb' }
-      ]
-    });
-    console.log('Created user: app_user');
-  } catch (error) {
-    if (error.code === 51003) {
-      // User already exists, update its roles
-      await adminDb.command({
-        updateUser: 'app_user',
-        roles: [
-          { role: 'readWrite', db: 'mydb' }
-        ]
-      });
-      console.log('Updated user: app_user');
-    } else {
-      throw error;
-    }
-  }
-  
-  // ═══════════════════════════════════════════════════════════════
-  // Create readonly_user (read-only permission)
-  // ═══════════════════════════════════════════════════════════════
-  
-  try {
-    await adminDb.command({
-      createUser: 'readonly_user',
-      pwd: 'readonly_password_here',
-      roles: [
-        { role: 'read', db: 'mydb' }
-      ]
-    });
-    console.log('Created user: readonly_user');
-  } catch (error) {
-    if (error.code === 51003) {
-      await adminDb.command({
-        updateUser: 'readonly_user',
-        roles: [
-          { role: 'read', db: 'mydb' }
-        ]
-      });
-      console.log('Updated user: readonly_user');
-    } else {
-      throw error;
-    }
-  }
-}
+  const users = [
+    { username: 'app_user',      pwd: 'CHANGE_ME_ON_FIRST_LOGIN', roles: [{ role: 'readWrite', db: 'mydb' }] },
+    { username: 'readonly_user', pwd: 'CHANGE_ME_ON_FIRST_LOGIN', roles: [{ role: 'read', db: 'mydb' }] }
+  ];
 
-export async function down(db, client) {
-  // DCL typically does not support rollback
-  console.log('DCL migrations typically do not support rollback');
-  console.log('To remove users, create a new migration');
+  const createdUsernames = [];
+  for (const u of users) {
+    const existing = await adminDb.command({ usersInfo: u.username });
+    if (existing.users.length === 0) {
+      await adminDb.command({ createUser: u.username, pwd: u.pwd, roles: u.roles });
+      createdUsernames.push(u.username);
+    } else {
+      await adminDb.command({ updateUser: u.username, roles: u.roles }); // roles only; password unchanged
+    }
+  }
+  return { passwordSet: createdUsernames.length > 0, createdUsernames, allUsernames: users.map(u => u.username) };
 }
 ```
+
+- Every `CHANGE_ME_ON_FIRST_LOGIN` is replaced at runtime with its own generated password, which appears only in the run's notification email. Never put a real password (or a `process.env.X || 'fallback'`) in the file. Details: [DCL-PASSWORD.md](DCL-PASSWORD.md).
+- Preview a change with `dcl --plan` before running `dcl`.
 
 ### 3.8 Key Rules Summary
 
 | Rule | Description |
 |------|------|
 | `export async function up(db, client)` | **Required**, defines the forward migration logic |
-| `export async function down(db, client)` | **Recommended**, defines the rollback logic |
-| PreCheck | Write checks at the **start** of up(); `throw new Error()` on failure |
-| PostCheck | Write validation at the **end** of up(); `throw new Error()` on failure |
-| Idempotency | Check whether it has already run, and `return` early if so |
+| `export async function down(db, client)` | **Required** when up() changes anything (`MISSING_DOWN`) |
+| `export async function preCheck(db, client)` | Optional; returns `{ success, error? }`; runs only with `--sanity-check` |
+| `export async function postCheck(db, client)` | Optional; returns `{ success, error? }`; a failure runs down() |
+| Idempotency | DDL runs once per database; DCL re-runs on every change and must be safe to repeat |
 | Parameter `db` | The current database instance |
 | Parameter `client` | The MongoDB client, usable to access other databases, e.g. `client.db('admin')` |
-| DCL files | Also need up/down functions, but down usually just logs |
+| DCL files | Need `up()` (returning `{ passwordSet, … }` when they create accounts); no `down()` |
 
 ---
 
 ## 4. Dangerous Command List
 
-### 🔴 Absolutely Forbidden - Requires `--allow-forbidden`
+Every rule, with its code, level and examples, is in **[VALIDATION-RULES-MONGODB.md](VALIDATION-RULES-MONGODB.md)** — that list is kept in sync with the code; this section is only the overview.
 
-| Code | Syntax | Risk |
-|-----|------|---------|
-| `DROP_DATABASE` | `db.dropDatabase()` | Deletes the entire database |
-| `DROP_DATABASE_CMD` | `{ dropDatabase: 1 }` | Deletes the entire database |
-| `CREATE_USER` | `db.createUser()` | Should be managed in a DCL project |
-| `CREATE_USER_CMD` | `{ createUser: ... }` | Should be managed in a DCL project |
-| `DROP_USER` | `db.dropUser()` | Should be managed in a DCL project |
-| `DROP_USER_CMD` | `{ dropUser: ... }` | Should be managed in a DCL project |
-| `UPDATE_USER` | `db.updateUser()` | Should be managed in a DCL project |
-| `UPDATE_USER_CMD` | `{ updateUser: ... }` | Should be managed in a DCL project |
-| `GRANT_ROLES` | `db.grantRolesToUser()` | Should be managed in a DCL project |
-| `REVOKE_ROLES` | `db.revokeRolesFromUser()` | Should be managed in a DCL project |
-| `CREATE_ROLE` | `db.createRole()` | Should be managed in a DCL project |
-| `DROP_ROLE` | `db.dropRole()` | Should be managed in a DCL project |
-| `SHUTDOWN` | `{ shutdown: 1 }` | Shuts down the database |
-| `REPL_RECONFIG` | `{ replSetReconfig: ... }` | Changes the replica set configuration |
-| `SET_PARAMETER` | `{ setParameter: ... }` | Changes system parameters |
+| Level | Blocks the run? | Typical codes | Released by |
+|---|---|---|---|
+| 🔴 Forbidden | Yes | `DROP_DATABASE` / `DROP_DATABASE_CMD`; in DDL: `CREATE_USER`, `UPDATE_USER`, `GRANT_ROLES`, `CREATE_ROLE`, … (account changes belong in DCL); `SHUTDOWN`, `REPL_RECONFIG`, `REPL_STEPDOWN`, `SET_PARAMETER` | `@allow-forbidden: true`, `@allow: CODE`, `--allow-forbidden`, `--allow CODE` — record who approved it with `@approved-by` |
+| 🔴 Forbidden in DCL | Yes | `DROP_USER`, `UPDATE_USER` (and their `_CMD` forms) | same |
+| ⛔ Never in DCL | Yes, no override | `CREATE_COLLECTION_IN_DCL`, `CREATE_INDEX_IN_DCL`, `RENAME_COLLECTION_IN_DCL` | — move it to the DDL project |
+| 🟠 Dangerous | Yes | `DROP_COLLECTION` (not one created in the same `up()`), `DELETE_ALL` / `UPDATE_ALL` / `REMOVE_ALL` (empty filter), `REPLACE_ONE`, `DROP_INDEX`, `DROP_INDEXES`, `RENAME_FIELD`, `UNSET_FIELD`, `RENAME_COLLECTION`, `VALIDATION_ERROR`, `VALIDATION_STRICT` | `@allow-dangerous: true`, `@allow: CODE`, `--allow-dangerous`, `--allow CODE` |
+| 🟡 Warning | No | `createIndex` (long on large collections), `background: false`, `aggregate`, `$lookup`, `sparse`, TTL indexes, `deleteMany` / `updateMany` | — |
 
-### 🟠 Dangerous Operations - Requires `--allow-dangerous` or `@allow-dangerous`
-
-| Code | Syntax | Risk | Recommendation |
-|-----|------|---------|------|
-| `DROP_COLLECTION` | `.drop()` | Deletes the entire collection | Confirm a backup exists |
-| `DELETE_ALL` | `.deleteMany({})` | Deletes all documents | Add a query filter |
-| `REMOVE_ALL` | `.remove({})` | Deletes all documents | Use deleteMany with a filter |
-| `UPDATE_ALL` | `.updateMany({}, ...)` | Updates all documents | Add a query filter |
-| `REPLACE_ONE` | `.replaceOne()` | Fully replaces a document | Use updateOne + $set |
-| `DROP_INDEX` | `.dropIndex()` | Affects query performance | Confirm no query relies on it |
-| `DROP_INDEXES` | `.dropIndexes()` | Drops all indexes | Very dangerous |
-| `RENAME_FIELD` | `{ $rename: ... }` | Breaks the application | Confirm references were updated |
-| `UNSET_FIELD` | `{ $unset: ... }` | Permanently removes a field | Confirm the field is unused |
-| `RENAME_COLLECTION` | `.renameCollection()` | Breaks the application | Confirm references were updated |
-| `VALIDATION_ERROR` | `validationAction: "error"` | Writes will fail | Test with "warn" first |
-| `VALIDATION_STRICT` | `validationLevel: "strict"` | Validates all documents | Confirm data conforms |
-
-### 🟡 Warnings - Does not block, but flags for attention
-
-| Syntax | Warning |
-|------|---------|
-| `.createIndex()` | May take a long time on a large collection |
-| `background: false` | Blocks operations |
-| `.aggregate()` | May consume significant resources on large datasets |
-| `$lookup` | May cause performance issues; confirm proper indexes exist |
-| `sparse: true` | Excludes documents with null values |
-| `expireAfterSeconds` | A TTL index automatically deletes expired documents |
-| `.deleteMany()` | May affect a large amount of data |
-| `.updateMany()` | May affect a large amount of data |
+Dangerous rules look only at `up()` — `down()` is expected to undo things. Before `up`/`sync` run, index builds and bulk writes on collections with 1,000,000+ documents are also flagged (`runtimeGates.largeCollectionDocs`, warning only).
 
 ---
 
@@ -573,497 +392,118 @@ export async function down(db, client) {
 ### Method 1: Add an Annotation in the File (Recommended)
 
 ```javascript
-// @description: Data cleanup script
-// @type: maintenance
-// @allow-dangerous: true
-// @allow: DROP_COLLECTION,DELETE_ALL
+// @allow: DROP_COLLECTION
+// @approved-by: Alice (ticket #123) — temp_import was a one-off staging collection
 
 export async function up(db, client) {
-  // Create the temp collection first so this isn't an orphan drop
-  await db.createCollection('temp_data').catch(() => {});
-  
-  // Now safe to drop
-  await db.collection('temp_data').drop();
-  
-  // Delete old audit logs
-  await db.collection('audit_logs').deleteMany({
-    createdAt: { $lt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) }
-  });
+  await db.collection('temp_import').drop();
 }
 
 export async function down(db, client) {
-  console.log('Repeatable migrations do not support rollback');
+  await db.createCollection('temp_import'); // the data itself can't be restored
 }
 ```
+
+Prefer `@allow: CODE` (exactly what was reviewed) over `@allow-dangerous: true` (everything dangerous in the file). For a file that is already applied — and so must not be edited — put the allowance in the config instead: `validation: { allow: { '<file name>': ['CODE'] } }`.
 
 ### Method 2: CLI Arguments
 
 ```bash
-# Allow all dangerous operations
+# Allow specific codes for this run (DDL: validate, up, sync, up-all)
+docker compose run --rm migrate up --allow DROP_COLLECTION,DELETE_ALL -c <config>
+
+# Allow all forbidden operations, recording who approved them
+docker compose run --rm migrate up --allow-forbidden --approved-by "Alice (CAB-1042)" -c <config>
+
+# DCL: validation runs only with --validate
 docker compose run --rm migrate dcl --validate --allow-dangerous -c <config>
-
-# Allow all forbidden operations (requires team approval)
-docker compose run --rm migrate dcl --validate --allow-forbidden -c <config>
-
-# Allow specific operation codes
-docker compose run --rm migrate validate --allow DROP_COLLECTION,DELETE_ALL -c <config>
 ```
 
 ### Full Annotation Reference
 
 | Annotation | Value | Description |
 |------------|---|------|
-| `@allow-dangerous` | `true` / `false` | Allow all dangerous operations |
-| `@allow-forbidden` | `true` / `false` | Allow all forbidden operations |
-| `@allow` | `CODE1,CODE2,...` | Allow specific operation codes |
-| `@description` | Text | Describes this migration |
-| `@type` | `maintenance` / `dcl` | Type marker |
+| `@allow` | `CODE1,CODE2,...` | Allow specific operation codes (preferred) |
+| `@allow-dangerous` | `true` / `false` | Allow every dangerous operation in the file |
+| `@allow-forbidden` | `true` / `false` | Allow every forbidden operation in the file |
+| `@approved-by` | name / ticket | Who approved the forbidden operations; required when `validation.requireApprover: true` |
+| `@operation-timeout-ms` | milliseconds | This file's operation time limit, overriding `ddlSafety.operationTimeoutMs` (`0` = none) |
+
+Annotations are read from the `//` comment lines at the top of the file. `@description` and `@type` appeared in older examples; they're informational only and have no effect.
 
 ---
 
 ## 6. Sanity Check Mechanism
 
-Sanity Check provides **Pre-Check** and **Post-Check** mechanisms to ensure the state before and after a migration is correct, and supports **automatic rollback**.
+Sanity checks are the exported `preCheck(db, client)` and `postCheck(db, client)` functions of a migration ([§3.1](#31-full-file-structure-diagram)). They run only when the command is given `--sanity-check`:
 
-### 6.1 Sanity Check Code Structure
+```bash
+docker compose run --rm migrate up --sanity-check -c <ddl-config>
+docker compose run --rm migrate up --sanity-check --no-auto-rollback -c <ddl-config>   # keep a failed migration's changes for inspection
+```
+
+| Step | On failure |
+|---|---|
+| `preCheck()` | The run stops; this migration doesn't execute |
+| `up()` | The run stops; the migration may be partly applied and stays pending (MongoDB migrations aren't transactional) |
+| `postCheck()` | `down()` runs (unless `--no-auto-rollback`), the migration stays pending, the run stops |
+
+Each check must return `{ success: true }` or `{ success: false, error }` within `sanityCheck.timeoutMs` (default 30000). The flow diagram is in [§3.3](#33-execution-flow).
+
+### 6.1 Example: no duplicates before a unique index
 
 ```javascript
-export async function up(db, client) {
-  // ═══════════════════════════════════════════════════════
-  // Pre-Check: preliminary checks
-  // ═══════════════════════════════════════════════════════
-  
-  // Check whether the collection exists
-  const collections = await db.listCollections({ name: 'users' }).toArray();
-  if (collections.length === 0) {
-    throw new Error('PreCheck failed: users collection does not exist');
-  }
-  
-  // Check whether the field already exists (avoid re-running)
-  const existingDoc = await db.collection('users').findOne({ newField: { $exists: true } });
-  if (existingDoc) {
-    console.log('Field already exists, skipping migration');
-    return;
-  }
-  
-  // ═══════════════════════════════════════════════════════
-  // Execute Migration: run the main migration
-  // ═══════════════════════════════════════════════════════
-  
-  await db.collection('users').updateMany(
-    { newField: { $exists: false } },
-    { $set: { newField: 'defaultValue' } }
-  );
-  
-  // ═══════════════════════════════════════════════════════
-  // Post-Check: post-execution check
-  // ═══════════════════════════════════════════════════════
-  
-  // Confirm all documents have the new field
-  const missingCount = await db.collection('users').countDocuments({ 
-    newField: { $exists: false } 
-  });
-  
-  if (missingCount > 0) {
-    throw new Error(`PostCheck failed: ${missingCount} documents still missing newField`);
-  }
-}
-
-export async function down(db, client) {
-  await db.collection('users').updateMany(
-    {},
-    { $unset: { newField: '' } }
-  );
-}
-```
-
-### 6.2 Execution Flow
-
-```
-┌─────────────────┐
-│   Pre-Check     │ ── Fail ──→ Throw Error, stop execution
-└────────┬────────┘
-         │ Success
-         ▼
-┌─────────────────┐
-│ Execute Migration│
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   Post-Check    │ ── Fail ──→ Throw Error (can be caught and rolled back by the caller)
-└────────┬────────┘
-         │ Success
-         ▼
-    Complete ✅
-```
-
-### 6.3 Sanity Check Scenario Examples
-
-#### Example 1: Confirm Collection Exists Before Adding a Field
-
-```javascript
-export async function up(db, client) {
-  // ═══════════════════════════════════════════════════════
-  // Pre-Check
-  // ═══════════════════════════════════════════════════════
-  const collections = await db.listCollections({ name: 'products' }).toArray();
-  if (collections.length === 0) {
-    throw new Error('PreCheck failed: products collection does not exist');
-  }
-  
-  // Confirm the tags field doesn't already exist
-  const existingWithTags = await db.collection('products').findOne({ 
-    tags: { $exists: true } 
-  });
-  if (existingWithTags) {
-    console.log('tags field already exists, skipping');
-    return;
-  }
-  
-  // ═══════════════════════════════════════════════════════
-  // Execute Migration
-  // ═══════════════════════════════════════════════════════
-  const result = await db.collection('products').updateMany(
-    { tags: { $exists: false } },
-    { $set: { tags: [], updatedAt: new Date() } }
-  );
-  console.log(`Updated ${result.modifiedCount} products`);
-  
-  // Create index
-  await db.collection('products').createIndex(
-    { tags: 1 },
-    { name: 'idx_products_tags' }
-  );
-  
-  // ═══════════════════════════════════════════════════════
-  // Post-Check
-  // ═══════════════════════════════════════════════════════
-  const missingTags = await db.collection('products').countDocuments({ 
-    tags: { $exists: false } 
-  });
-  if (missingTags > 0) {
-    throw new Error(`PostCheck failed: ${missingTags} products still missing tags`);
-  }
-  
-  // Confirm the index exists
-  const indexes = await db.collection('products').indexes();
-  const hasIndex = indexes.some(idx => idx.name === 'idx_products_tags');
-  if (!hasIndex) {
-    throw new Error('PostCheck failed: idx_products_tags index not created');
-  }
-}
-
-export async function down(db, client) {
-  await db.collection('products').dropIndex('idx_products_tags').catch(() => {});
-  await db.collection('products').updateMany({}, { $unset: { tags: '' } });
-}
-```
-
-#### Example 2: Confirm No Duplicate Values Before Creating an Index
-
-```javascript
-export async function up(db, client) {
-  const collection = db.collection('users');
-  
-  // ═══════════════════════════════════════════════════════
-  // Pre-Check: confirm there are no duplicate emails
-  // ═══════════════════════════════════════════════════════
-  const duplicates = await collection.aggregate([
-    { $group: { _id: '$email', count: { $sum: 1 } } },
-    { $match: { count: { $gt: 1 } } },
-    { $limit: 10 }
+export async function preCheck(db, client) {
+  const dups = await db.collection('users').aggregate([
+    { $group: { _id: '$email', n: { $sum: 1 } } },
+    { $match: { n: { $gt: 1 } } },
+    { $limit: 5 }
   ]).toArray();
-  
-  if (duplicates.length > 0) {
-    const dupEmails = duplicates.map(d => d._id).join(', ');
-    throw new Error(`PreCheck failed: Duplicate emails found: ${dupEmails}`);
-  }
-  
-  // Confirm there are no null emails
-  const nullEmails = await collection.countDocuments({ 
-    $or: [{ email: null }, { email: '' }] 
-  });
-  if (nullEmails > 0) {
-    throw new Error(`PreCheck failed: ${nullEmails} users have null/empty email`);
-  }
-  
-  // ═══════════════════════════════════════════════════════
-  // Execute Migration: create the unique index
-  // ═══════════════════════════════════════════════════════
-  await collection.createIndex(
-    { email: 1 },
-    { unique: true, name: 'idx_users_email_unique' }
-  );
-  
-  // ═══════════════════════════════════════════════════════
-  // Post-Check: confirm the index was created
-  // ═══════════════════════════════════════════════════════
-  const indexes = await collection.indexes();
-  const uniqueIndex = indexes.find(idx => idx.name === 'idx_users_email_unique');
-  
-  if (!uniqueIndex) {
-    throw new Error('PostCheck failed: Unique index not created');
-  }
-  
-  if (!uniqueIndex.unique) {
-    throw new Error('PostCheck failed: Index is not unique');
-  }
-  
-  console.log('Successfully created unique email index');
+  return dups.length === 0
+    ? { success: true }
+    : { success: false, error: `duplicate emails, e.g. ${dups.map(d => d._id).join(', ')} — clean them up first` };
+}
+
+export async function up(db, client) {
+  await db.collection('users').createIndex({ email: 1 }, { unique: true, name: 'uk_users_email' });
+}
+
+export async function postCheck(db, client) {
+  const idx = (await db.collection('users').indexes()).find(i => i.name === 'uk_users_email');
+  return idx?.unique ? { success: true } : { success: false, error: 'uk_users_email missing or not unique' };
 }
 
 export async function down(db, client) {
-  await db.collection('users').dropIndex('idx_users_email_unique');
+  await db.collection('users').dropIndex('uk_users_email');
 }
 ```
 
-#### Example 3: Verify Data Integrity During Migration
+### 6.2 Example: backfill a field and verify every document got it
 
 ```javascript
+export async function preCheck(db, client) {
+  const total = await db.collection('orders').estimatedDocumentCount();
+  return total > 0 ? { success: true, details: [`${total} orders`] } : { success: false, error: 'orders is empty — wrong database?' };
+}
+
 export async function up(db, client) {
-  // ═══════════════════════════════════════════════════════
-  // Pre-Check: confirm both source and target are ready
-  // ═══════════════════════════════════════════════════════
-  
-  // Confirm the source collection has data
-  const sourceCount = await db.collection('old_orders').countDocuments();
-  if (sourceCount === 0) {
-    console.log('No data to migrate, skipping');
-    return;
-  }
-  
-  // Confirm the target collection exists
-  const collections = await db.listCollections({ name: 'new_orders' }).toArray();
-  if (collections.length === 0) {
-    throw new Error('PreCheck failed: new_orders collection does not exist');
-  }
-  
-  // Record the target count before migration
-  const beforeTargetCount = await db.collection('new_orders').countDocuments();
-  
-  // ═══════════════════════════════════════════════════════
-  // Execute Migration: migrate data using an aggregation pipeline
-  // ═══════════════════════════════════════════════════════
-  const pipeline = [
-    { $match: { migrated: { $ne: true } } },
-    {
-      $project: {
-        orderId: '$_id',
-        customerId: '$customer_id',
-        items: '$order_items',
-        totalAmount: '$total',
-        status: '$order_status',
-        createdAt: '$created_at',
-        migratedAt: new Date()
-      }
-    },
-    {
-      $merge: {
-        into: 'new_orders',
-        on: 'orderId',
-        whenMatched: 'keepExisting',
-        whenNotMatched: 'insert'
-      }
-    }
-  ];
-  
-  await db.collection('old_orders').aggregate(pipeline).toArray();
-  
-  // Mark as migrated
-  await db.collection('old_orders').updateMany(
-    { migrated: { $ne: true } },
-    { $set: { migrated: true, migratedAt: new Date() } }
+  await db.collection('orders').updateMany(
+    { currency: { $exists: false } },
+    { $set: { currency: 'TWD' } }
   );
-  
-  // ═══════════════════════════════════════════════════════
-  // Post-Check: confirm migration completeness
-  // ═══════════════════════════════════════════════════════
-  
-  // Confirm all source data has been marked as migrated
-  const unmigrated = await db.collection('old_orders').countDocuments({ 
-    migrated: { $ne: true } 
-  });
-  if (unmigrated > 0) {
-    throw new Error(`PostCheck failed: ${unmigrated} orders not migrated`);
-  }
-  
-  // Confirm the target count increased
-  const afterTargetCount = await db.collection('new_orders').countDocuments();
-  console.log(`Migrated ${afterTargetCount - beforeTargetCount} orders`);
-  
-  if (afterTargetCount < beforeTargetCount) {
-    throw new Error('PostCheck failed: Target collection count decreased!');
-  }
+}
+
+export async function postCheck(db, client) {
+  const missing = await db.collection('orders').countDocuments({ currency: { $exists: false } });
+  return missing === 0 ? { success: true } : { success: false, error: `${missing} orders still have no currency` };
 }
 
 export async function down(db, client) {
-  // Delete the migrated data
-  await db.collection('new_orders').deleteMany({ migratedAt: { $exists: true } });
-  
-  // Reset the migration markers
-  await db.collection('old_orders').updateMany(
-    { migrated: true },
-    { $unset: { migrated: '', migratedAt: '' } }
-  );
+  await db.collection('orders').updateMany({ currency: 'TWD' }, { $unset: { currency: '' } });
 }
 ```
 
-#### Example 4: Confirm Data Compatibility Before Changing Schema Validation
-
-```javascript
-export async function up(db, client) {
-  const collectionName = 'products';
-  const collection = db.collection(collectionName);
-  
-  // ═══════════════════════════════════════════════════════
-  // Pre-Check: confirm existing data conforms to the new schema
-  // ═══════════════════════════════════════════════════════
-  
-  // Check for documents missing required fields
-  const missingName = await collection.countDocuments({ 
-    $or: [{ name: { $exists: false } }, { name: null }, { name: '' }] 
-  });
-  if (missingName > 0) {
-    throw new Error(`PreCheck failed: ${missingName} products missing required 'name' field`);
-  }
-  
-  // Check whether all prices are positive
-  const invalidPrice = await collection.countDocuments({ 
-    $or: [
-      { price: { $exists: false } },
-      { price: { $lt: 0 } },
-      { price: { $type: 'string' } }
-    ] 
-  });
-  if (invalidPrice > 0) {
-    throw new Error(`PreCheck failed: ${invalidPrice} products have invalid price`);
-  }
-  
-  // ═══════════════════════════════════════════════════════
-  // Execute Migration: apply strict schema validation
-  // ═══════════════════════════════════════════════════════
-  await db.command({
-    collMod: collectionName,
-    validator: {
-      $jsonSchema: {
-        bsonType: 'object',
-        required: ['name', 'price'],
-        properties: {
-          name: {
-            bsonType: 'string',
-            minLength: 1,
-            description: 'Product name is required'
-          },
-          price: {
-            bsonType: 'decimal',
-            minimum: 0,
-            description: 'Price must be a positive decimal'
-          },
-          stock: {
-            bsonType: 'int',
-            minimum: 0
-          }
-        }
-      }
-    },
-    validationLevel: 'strict',
-    validationAction: 'error'
-  });
-  
-  // ═══════════════════════════════════════════════════════
-  // Post-Check: confirm schema validation was applied
-  // ═══════════════════════════════════════════════════════
-  const collectionInfo = await db.listCollections({ name: collectionName }).toArray();
-  const options = collectionInfo[0]?.options;
-  
-  if (!options?.validator) {
-    throw new Error('PostCheck failed: Schema validation not applied');
-  }
-  
-  if (options?.validationLevel !== 'strict') {
-    throw new Error('PostCheck failed: validationLevel is not strict');
-  }
-  
-  console.log('Schema validation applied successfully');
-}
-
-export async function down(db, client) {
-  // Remove schema validation
-  await db.command({
-    collMod: 'products',
-    validator: {},
-    validationLevel: 'off'
-  });
-}
-```
-
-#### Example 5: Confirm Field Exists Before Creating a TTL Index
-
-```javascript
-export async function up(db, client) {
-  const collection = db.collection('sessions');
-  
-  // ═══════════════════════════════════════════════════════
-  // Pre-Check
-  // ═══════════════════════════════════════════════════════
-  
-  // Confirm the collection exists
-  const collections = await db.listCollections({ name: 'sessions' }).toArray();
-  if (collections.length === 0) {
-    throw new Error('PreCheck failed: sessions collection does not exist');
-  }
-  
-  // Confirm the expiresAt field exists and is a Date type
-  const sampleDoc = await collection.findOne({ expiresAt: { $exists: true } });
-  if (!sampleDoc) {
-    throw new Error('PreCheck failed: No documents with expiresAt field found');
-  }
-  
-  if (!(sampleDoc.expiresAt instanceof Date)) {
-    throw new Error('PreCheck failed: expiresAt is not a Date type');
-  }
-  
-  // Confirm no TTL index already exists
-  const indexes = await collection.indexes();
-  const existingTTL = indexes.find(idx => idx.expireAfterSeconds !== undefined);
-  if (existingTTL) {
-    console.log('TTL index already exists, skipping');
-    return;
-  }
-  
-  // ═══════════════════════════════════════════════════════
-  // Execute Migration
-  // ═══════════════════════════════════════════════════════
-  await collection.createIndex(
-    { expiresAt: 1 },
-    { 
-      name: 'idx_sessions_ttl',
-      expireAfterSeconds: 0  // Expires at the time specified by expiresAt
-    }
-  );
-  
-  // ═══════════════════════════════════════════════════════
-  // Post-Check
-  // ═══════════════════════════════════════════════════════
-  const newIndexes = await collection.indexes();
-  const ttlIndex = newIndexes.find(idx => idx.name === 'idx_sessions_ttl');
-  
-  if (!ttlIndex) {
-    throw new Error('PostCheck failed: TTL index not created');
-  }
-  
-  if (ttlIndex.expireAfterSeconds !== 0) {
-    throw new Error('PostCheck failed: TTL index has wrong expireAfterSeconds value');
-  }
-  
-  console.log('TTL index created successfully');
-}
-
-export async function down(db, client) {
-  await db.collection('sessions').dropIndex('idx_sessions_ttl');
-}
-```
+Note the Down: it removes `currency: 'TWD'` everywhere — including documents that already had it before `up()` ran. If that matters, also mark the documents you backfill (e.g. `currencyBackfilledAt`) and unset only those. Before running a backfill like this on a large collection, `up --dry-run` shows the large-collection warning and whether a time limit applies.
 
 ---
 
@@ -1072,14 +512,16 @@ export async function down(db, client) {
 ### 7.1 Getting the Docker Image
 
 ```bash
-# Option 1: Pull from a registry (if published)
-docker pull your-registry/ddl-migrate:latest
+# Option 1: the published image — pin a version tag or commit SHA, not latest
+docker pull ghcr.io/i7ppbeer/db-migrate/db-migrate:<version-or-sha>
 
-# Option 2: Build locally
-git clone https://github.com/your-org/ddl-migrate.git
-cd ddl-migrate
+# Option 2: build locally
+git clone https://github.com/i7ppBeer/db-migrate.git
+cd db-migrate
 docker compose build migrate
 ```
+
+Tags and the release process: [BUILD-IMAGE-GUIDE.md](BUILD-IMAGE-GUIDE.md#image-tags-ghcr).
 
 ### 7.2 Local Environment Setup
 
@@ -1102,20 +544,32 @@ your-project/
                     └── R__002_readonly_users.js
 ```
 
-**config.js example:**
+**`ddl/config.js`:**
 ```javascript
 export default {
   type: 'mongodb',
   mongodb: {
     url: process.env.MONGODB_URI || 'mongodb://mongodb:27017',
-    databaseName: process.env.MONGODB_DB || 'your_database',
-    options: {}
+    databaseName: process.env.MONGODB_DB || 'your_database'
   },
-  migrationsDir: './migrations',
-  changelogCollection: 'changelog'  // Used for DDL
-  // checksumTable: '_dcl_migrations'    // Used for DCL
+  migrationsDir: './migrations',          // relative to this file
+  changelogCollection: 'changelog',       // the default
+  // ddlSafety: { operationTimeoutMs: 60000 }   // optional per-operation time limit
 };
 ```
+
+**`dcl/config.js`** — `mode: 'repeatable'` is what makes it a DCL project:
+```javascript
+export default {
+  type: 'mongodb',
+  mode: 'repeatable',
+  mongodb: { url: process.env.MONGODB_URI || 'mongodb://mongodb:27017', databaseName: 'admin' },
+  migrationsDir: './migrations',                    // or a list: ['./shared', './prod-tw']
+  checksumCollection: 'dcl_repeatable_migrations'   // the default
+};
+```
+
+Other options (`createDatabaseIfMissing`, `runtimeGates`, `validation`, `notifications`) are in the [README's configuration section](../README.md#-configuration-examples).
 
 ### 7.3 Full CLI Command Reference
 
@@ -1133,8 +587,11 @@ docker compose run --rm migrate up -c /app/test-fixtures/mongodb/your-project/dd
 # Dry run (preview)
 docker compose run --rm migrate up --dry-run -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
-# Roll back 1 migration
+# Roll back 1 migration (shows the plan and asks; add --yes in CI, --dry-run to preview)
 docker compose run --rm migrate down -n 1 -c /app/test-fixtures/mongodb/your-project/ddl/config.js
+
+# status → validate → up → schema diff → notification email
+docker compose run --rm migrate sync -c /app/test-fixtures/mongodb/your-project/ddl/config.js
 
 # Validate migration files
 docker compose run --rm migrate validate -c /app/test-fixtures/mongodb/your-project/ddl/config.js
@@ -1158,7 +615,10 @@ docker compose run --rm migrate dcl --validate -c /app/test-fixtures/mongodb/you
 # Run DCL (allow dangerous operations)
 docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 
-# Dry run (preview)
+# Preview: script diffs, affected accounts and their current roles, passwords to be generated
+docker compose run --rm migrate dcl --plan -c /app/test-fixtures/mongodb/your-project/dcl/config.js
+
+# Dry run (just the list of scripts that would run)
 docker compose run --rm migrate dcl --dry-run -c /app/test-fixtures/mongodb/your-project/dcl/config.js
 
 # Create a new DCL migration file
@@ -1298,80 +758,30 @@ export async function down(db, client) {
 
 ### Scenario 3: Create Application Users (DCL)
 
-**File**: `R__001_app_users.js`
+**File**: `R__001_app_users.js` — same pattern as [§3.7](#37-dcl-repeatable-example):
 
 ```javascript
-// @description: Application database users
-// @type: dcl
 // @allow-forbidden: true
+// (updateUser for accounts that already exist)
 
 export async function up(db, client) {
   const adminDb = client.db('admin');
-  const dbName = 'your_database';
-  
-  // ========================================
-  // Read-Only User (for reporting)
-  // ========================================
-  try {
-    const readonlyUsers = await adminDb.command({ 
-      usersInfo: { user: 'app_readonly', db: 'admin' } 
-    });
-    
-    if (readonlyUsers.users.length === 0) {
-      await adminDb.command({
-        createUser: 'app_readonly',
-        pwd: process.env.READONLY_PASSWORD || 'readonly_password_here',
-        roles: [
-          { role: 'read', db: dbName }
-        ]
-      });
-      console.log('[DCL] Created app_readonly user');
-    } else {
-      await adminDb.command({
-        updateUser: 'app_readonly',
-        roles: [
-          { role: 'read', db: dbName }
-        ]
-      });
-      console.log('[DCL] Updated app_readonly user roles');
-    }
-  } catch (error) {
-    console.error('[DCL] Error managing app_readonly:', error.message);
-  }
+  const users = [
+    { username: 'app_readonly',  pwd: 'CHANGE_ME_ON_FIRST_LOGIN', roles: [{ role: 'read', db: 'your_database' }] },
+    { username: 'app_readwrite', pwd: 'CHANGE_ME_ON_FIRST_LOGIN', roles: [{ role: 'readWrite', db: 'your_database' }] }
+  ];
 
-  // ========================================
-  // Read-Write User (for application)
-  // ========================================
-  try {
-    const rwUsers = await adminDb.command({ 
-      usersInfo: { user: 'app_readwrite', db: 'admin' } 
-    });
-    
-    if (rwUsers.users.length === 0) {
-      await adminDb.command({
-        createUser: 'app_readwrite',
-        pwd: process.env.READWRITE_PASSWORD || 'readwrite_password_here',
-        roles: [
-          { role: 'readWrite', db: dbName }
-        ]
-      });
-      console.log('[DCL] Created app_readwrite user');
+  const createdUsernames = [];
+  for (const u of users) {
+    const existing = await adminDb.command({ usersInfo: u.username });
+    if (existing.users.length === 0) {
+      await adminDb.command({ createUser: u.username, pwd: u.pwd, roles: u.roles });
+      createdUsernames.push(u.username);
     } else {
-      await adminDb.command({
-        updateUser: 'app_readwrite',
-        roles: [
-          { role: 'readWrite', db: dbName }
-        ]
-      });
-      console.log('[DCL] Updated app_readwrite user roles');
+      await adminDb.command({ updateUser: u.username, roles: u.roles });
     }
-  } catch (error) {
-    console.error('[DCL] Error managing app_readwrite:', error.message);
   }
-}
-
-export async function down(db, client) {
-  console.log('[DCL] Repeatable migrations do not support rollback');
+  return { passwordSet: createdUsernames.length > 0, createdUsernames, allUsernames: users.map(u => u.username) };
 }
 ```
 
@@ -1482,153 +892,58 @@ export async function down(db, client) {
 }
 ```
 
-### Scenario 5: Dangerous Operation - Data Cleanup (DCL)
+### Scenario 5: Remove an Account (DCL)
 
-**File**: `R__010_data_cleanup.js`
+**File**: `R__005_offboarding.js`
 
 ```javascript
-// @description: Periodic data cleanup job
-// @type: maintenance
-// @allow-dangerous: true
-// @allow: DROP_COLLECTION,DELETE_ALL
+// @allow-forbidden: true
+// @approved-by: Alice (CAB-2001)
 
 export async function up(db, client) {
-  console.log('[Cleanup] Starting data cleanup...');
-  
-  // ========================================
-  // 1. Clean up temporary collections
-  // ========================================
-  // First create the collection so it's not an orphan drop
-  await db.createCollection('temp_processing').catch(() => {});
-  
-  try {
-    await db.collection('temp_processing').drop();
-    console.log('[Cleanup] Dropped temp_processing collection');
-  } catch (error) {
-    if (error.code !== 26) { // 26 = NamespaceNotFound
-      throw error;
-    }
+  const adminDb = client.db('admin');
+  for (const username of ['old_batch_user']) {
+    const existing = await adminDb.command({ usersInfo: username });
+    if (existing.users.length > 0) await adminDb.command({ dropUser: username });
   }
-
-  // ========================================
-  // 2. Archive and clean old audit logs (90 days)
-  // ========================================
-  const ninetyDaysAgo = new Date();
-  ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
-  
-  // Ensure audit_logs_archive exists
-  await db.createCollection('audit_logs_archive').catch(() => {});
-  
-  // Archive old logs
-  const oldLogs = await db.collection('audit_logs')
-    .find({ createdAt: { $lt: ninetyDaysAgo } })
-    .toArray();
-  
-  if (oldLogs.length > 0) {
-    await db.collection('audit_logs_archive').insertMany(oldLogs, {
-      ordered: false
-    }).catch(() => {}); // Ignore duplicate key errors
-    
-    // Delete archived logs
-    const deleteResult = await db.collection('audit_logs').deleteMany({
-      createdAt: { $lt: ninetyDaysAgo }
-    });
-    
-    console.log(`[Cleanup] Archived and deleted ${deleteResult.deletedCount} old audit logs`);
-  }
-
-  // ========================================
-  // 3. Clean up expired sessions
-  // ========================================
-  const sessionResult = await db.collection('sessions').deleteMany({
-    expiresAt: { $lt: new Date() }
-  });
-  console.log(`[Cleanup] Deleted ${sessionResult.deletedCount} expired sessions`);
-
-  // ========================================
-  // 4. Clean up orphaned files metadata
-  // ========================================
-  const orphanedFiles = await db.collection('files').deleteMany({
-    status: 'pending',
-    createdAt: { $lt: new Date(Date.now() - 24 * 60 * 60 * 1000) }
-  });
-  console.log(`[Cleanup] Deleted ${orphanedFiles.deletedCount} orphaned file records`);
-  
-  console.log('[Cleanup] Data cleanup completed');
-}
-
-export async function down(db, client) {
-  console.log('[DCL] Repeatable migrations do not support rollback');
 }
 ```
 
+- `dropUser` is forbidden in DCL by default; `@allow-forbidden` releases it and `@approved-by` records who agreed (required if `validation.requireApprover` is on).
+- Deleting the `R__` file that created an account does **not** remove the account — `dcl` refuses until you restore the file or confirm with `--accept-removed-dcl`. Remove accounts explicitly, as above.
+- Recurring data cleanup (purging old documents on a schedule) is neither DCL nor a migration — a migration runs once per database. Use a TTL index (a DDL migration) or a scheduled job.
+
 ### Scenario 6: Migration with Sanity Check (DDL)
 
-**File**: `20250126000003-add-user-preferences.js`
+**File**: `20250126000003-add-user-preferences.js` — run with `up --sanity-check`:
 
 ```javascript
-export async function up(db, client) {
-  const collection = db.collection('users');
-  
-  // Pre-check: Ensure users collection exists
+export async function preCheck(db, client) {
   const collections = await db.listCollections({ name: 'users' }).toArray();
-  if (collections.length === 0) {
-    throw new Error('PreCheck failed: users collection does not exist');
-  }
-  
-  // Pre-check: Ensure preferences field doesn't exist
-  const existingWithPrefs = await collection.findOne({ preferences: { $exists: true } });
-  if (existingWithPrefs) {
-    console.log('Preferences field already exists, skipping update');
-    return;
-  }
-  
-  // Migration: Add preferences field
-  const result = await collection.updateMany(
+  if (collections.length === 0) return { success: false, error: 'users collection does not exist' };
+  const already = await db.collection('users').findOne({ preferences: { $exists: true } });
+  if (already) return { success: false, error: 'some users already have preferences — has this run before?' };
+  return { success: true };
+}
+
+export async function up(db, client) {
+  const users = db.collection('users');
+  await users.updateMany(
     { preferences: { $exists: false } },
-    {
-      $set: {
-        preferences: {
-          theme: 'light',
-          notifications: true,
-          language: 'en'
-        },
-        updatedAt: new Date()
-      }
-    }
+    { $set: { preferences: { theme: 'light', notifications: true, language: 'en' }, updatedAt: new Date() } }
   );
-  
-  console.log(`Updated ${result.modifiedCount} users with default preferences`);
-  
-  // Post-check: Verify all users have preferences
-  const usersWithoutPrefs = await collection.countDocuments({ 
-    preferences: { $exists: false } 
-  });
-  
-  if (usersWithoutPrefs > 0) {
-    throw new Error(`PostCheck failed: ${usersWithoutPrefs} users still without preferences`);
-  }
-  
-  // Create index for preferences queries
-  await collection.createIndex(
-    { 'preferences.theme': 1 },
-    { name: 'idx_users_preferences_theme', sparse: true }
-  );
+  await users.createIndex({ 'preferences.theme': 1 }, { name: 'idx_users_preferences_theme', sparse: true });
+}
+
+export async function postCheck(db, client) {
+  const without = await db.collection('users').countDocuments({ preferences: { $exists: false } });
+  return without === 0 ? { success: true } : { success: false, error: `${without} users still without preferences` };
 }
 
 export async function down(db, client) {
-  const collection = db.collection('users');
-  
-  // Remove the index
-  await collection.dropIndex('idx_users_preferences_theme').catch(() => {});
-  
-  // Remove the preferences field
-  await collection.updateMany(
-    {},
-    { $unset: { preferences: '' } }
-  );
-  
-  console.log('Removed preferences field from all users');
+  const users = db.collection('users');
+  await users.dropIndex('idx_users_preferences_theme').catch(() => {});
+  await users.updateMany({}, { $unset: { preferences: '' } });
 }
 ```
 
@@ -1710,13 +1025,13 @@ export async function down(db, client) {
 
 ## 📝 Best Practices
 
-1. **DDL files must always have a down() function** to ensure rollback is possible
-2. **DCL files must be idempotent** — check for existence before creating/updating
-3. **When creating indexes on large collections**, consider using `{ background: true }` (prior to MongoDB 4.2)
-4. **Never hardcode passwords** — use environment variables
-5. **Dangerous operations need an explicit annotation** explaining why they're necessary
-6. **Use try-catch** to handle possible errors
-7. **Add console.log** to record the execution process
+1. **Give every DDL migration a real `down()`** — validation requires one when `up()` changes anything, and auto-rollback depends on it
+2. **DCL files must be idempotent** — check `usersInfo` / `rolesInfo` before creating, and return `{ passwordSet, … }`
+3. **Never put passwords in files** — use `CHANGE_ME_ON_FIRST_LOGIN` and let the tool generate them ([DCL-PASSWORD.md](DCL-PASSWORD.md)); environment-variable fallbacks end up in git too
+4. **Use `preCheck` / `postCheck` with `--sanity-check`** for anything that should roll back on a bad result — checks inside `up()` don't
+5. **Allow exactly what was reviewed** — `@allow: CODE` over `@allow-dangerous: true`, plus `@approved-by` for forbidden operations
+6. **Large collections** — index builds and bulk updates are flagged before they run; set `ddlSafety.operationTimeoutMs` (or `@operation-timeout-ms` per file) and run them off-peak
+7. **Preview first** — `up --dry-run`, `dcl --plan`, `down --dry-run`
 
 ---
 

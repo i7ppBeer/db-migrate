@@ -195,6 +195,25 @@ All optional settings default to the old behavior unless noted.
 - `sync` could hang behind a long transaction: every connect ran
   `CREATE DATABASE IF NOT EXISTS`, which waits on an exclusive schema lock.
 - `FK_REFERENCES_DROPPED_TABLE` false positive on drop → recreate → reference.
+- MariaDB: a sanity block with two or more `EXPECT_*` directives was rejected by
+  validation as a syntax error (they were parsed as one statement) unless the queries
+  used `DATABASE()`.
+
+### Documentation
+
+- The MariaDB and MongoDB user guides were checked line by line against the code and
+  their examples validated; several taught things that don't work:
+  - **Stored procedures (MariaDB)** go in DDL, written **without `DELIMITER`** and with
+    `-- @skip-syntax-check: true`. A migration using `DELIMITER //` fails — `DELIMITER`
+    is a `mysql` client command, not SQL. DCL refuses procedures outright.
+  - **Sanity checks (MongoDB)** are the exported `preCheck()` / `postCheck()` functions,
+    which must return `{ success, error }`. Checks written inside `up()` that throw are
+    not rolled back.
+  - **DCL**: `DROP USER`, `REVOKE`, `ALTER USER` (MariaDB) and `updateUser` /
+    `dropUser` (MongoDB) need `@allow-forbidden`; passwords come from
+    `CHANGE_ME_ON_FIRST_LOGIN`, never from the file; tables, procedures and data
+    cleanup can't live in DCL; a table-level `REVOKE` out of a database-level grant fails.
+- Removed `docs/archive/` and the broken draw.io diagrams (replaced by Mermaid).
 
 ### Caveats
 
