@@ -677,6 +677,16 @@ export default {
 
 Other options (`createDatabaseIfMissing`, `ddlSafety.lockGuard`, `runtimeGates`, `validation`, `notifications`) are in the [README's configuration section](../README.md#-configuration-examples).
 
+**TLS (e.g. AWS RDS with `require_secure_transport=ON`)** — add `ssl` next to the connection settings (inside `mariadb: { … }`, or at the top level of a flat config):
+
+```javascript
+ssl: { caFile: '/app/config/global-bundle.pem' }   // CA bundle; the server certificate is verified against it
+// ssl: true                                       // TLS, verified against Node's default CAs
+// ssl: { ca, cert, key, rejectUnauthorized, … }   // passed to the mysql2 driver as-is
+```
+
+`caFile` / `certFile` / `keyFile` are read for you. Without `ssl`, the connection is unencrypted, and a server that requires secure transport refuses it ("Connections using insecure transport are prohibited"). For RDS, download AWS's `global-bundle.pem` and ship it with the config — [`k8s/dynamic/`](../k8s/dynamic/README.md) mounts any `*.pem` in the profile directory at `/app/config/`. The same setting is used by the Docker entrypoint's wait-for-database check.
+
 ### 7.3 Full CLI Command Reference
 
 ```bash

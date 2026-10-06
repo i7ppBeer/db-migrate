@@ -11,8 +11,43 @@ import mysql from 'mysql2/promise';
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
+import { readFileSync } from 'fs';
 import nodeSqlParserPkg from 'node-sql-parser';
 const { Parser: SQLParser } = nodeSqlParserPkg;
+
+
+/**
+ * The `ssl` config option → mysql2's `ssl` connection option.
+ *
+ *   ssl: true                       TLS, server certificate checked against Node's default CAs
+ *   ssl: { caFile: '/path/ca.pem' } TLS with that CA bundle (e.g. AWS RDS's
+ *                                   global-bundle.pem, mounted from a ConfigMap)
+ *   ssl: { ca, cert, key, rejectUnauthorized, … }  passed to mysql2 as-is
+ *
+ * caFile / certFile / keyFile are read here, so a config can point at
+ * mounted files instead of reading them itself. Unset / false → no TLS.
+ */
+export function resolveSslOption(ssl) {
+  if (!ssl) return undefined;
+  if (ssl === true) return {};
+  if (typeof ssl !== 'object') {
+    throw new Error(`ssl must be true or an object (e.g. { caFile: '/path/ca.pem' }), got ${JSON.stringify(ssl)}`);
+  }
+  const { caFile, certFile, keyFile, ...rest } = ssl;
+  const read = (file, what) => {
+    try {
+      return readFileSync(file, 'utf8');
+    } catch (err) {
+      throw new Error(`ssl.${what}: cannot read ${file} (${err.code || err.message})`);
+    }
+  };
+  return {
+    ...rest,
+    ...(caFile ? { ca: read(caFile, 'caFile') } : {}),
+    ...(certFile ? { cert: read(certFile, 'certFile') } : {}),
+    ...(keyFile ? { key: read(keyFile, 'keyFile') } : {})
+  };
+}
 
 export class MariaDBAdapter extends BaseAdapter {
   constructor(config) {
@@ -319,6 +354,8 @@ export class MariaDBAdapter extends BaseAdapter {
         multipleStatements: true,
         connectTimeout
       };
+      const ssl = resolveSslOption(dbConfig.ssl);
+      if (ssl) connectionOptions.ssl = ssl;
 
       // 🔧 First connect without specifying database to avoid "unknown database" error
       const tempConnection = await mysql.createConnection(connectionOptions);

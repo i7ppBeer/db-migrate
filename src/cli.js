@@ -17,7 +17,7 @@ import { DCLIdempotentChecker } from './core/dcl-idempotent-checker.js';
 import { checkMigrationsToRun, describeValidationFailures, allowHintForFailures } from './core/validation-gate.js';
 import { parseExpectedErrors, checkFileExpectation, parseExpectedSanity, checkSanityExpectation } from './core/fixture-expectations.js';
 import { buildDCLPlan } from './core/dcl-plan.js';
-import { resolveDirs, describeDirs, pickDir } from './core/migration-dirs.js';
+import { resolveDirs, describeDirs, pickDir, matchMigrationFile } from './core/migration-dirs.js';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -1210,7 +1210,7 @@ program
       if (options.all) {
         filesToMark = versionedFiles;
       } else if (options.upTo) {
-        const targetFile = versionedFiles.find(f => f.includes(options.upTo));
+        const targetFile = matchMigrationFile(versionedFiles, options.upTo, '--up-to');
         if (!targetFile) {
           console.error(chalk.red(`[ERROR] Migration '${options.upTo}' not found`));
           process.exitCode = 1;
@@ -1219,7 +1219,7 @@ program
         const targetIdx = versionedFiles.indexOf(targetFile);
         filesToMark = versionedFiles.slice(0, targetIdx + 1);
       } else if (options.file) {
-        const targetFile = versionedFiles.find(f => f.includes(options.file));
+        const targetFile = matchMigrationFile(versionedFiles, options.file, '--file');
         if (!targetFile) {
           console.error(chalk.red(`[ERROR] Migration '${options.file}' not found`));
           process.exitCode = 1;
@@ -2664,7 +2664,7 @@ program
           const annotationInfo = m.annotations?.allowDangerous ? chalk.yellow(' [allow-dangerous]') : '';
           console.log(`   ${m.fileName} (${m.reason})${dirTag(m, Array.isArray(migrationsDir))}${annotationInfo}`);
         }
-      } else if (!result.skipped || result.skipped.length === 0) {
+      } else if ((!result.skipped || result.skipped.length === 0) && result.errors.length === 0) {
         console.log(chalk.gray('\n   All DCL migrations are up-to-date.'));
       }
 
