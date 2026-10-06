@@ -38,7 +38,6 @@ export function splitSqlStatements(sql) {
     'DATABASE', 'SCHEMA', 'SEQUENCE', 'SERVER', 'TABLESPACE', 'TEMPORARY', 'ALGORITHM', 'PACKAGE']);
 
   const statements = [];
-  let start = 0;           // where the current statement begins
   let hasCode = false;     // it has something besides comments/whitespace
   let codeStart = -1;      // where its first non-comment text is (leading comments are dropped)
   let words = [];          // its leading words (upper-case), to recognize compound statements
@@ -52,8 +51,8 @@ export function splitSqlStatements(sql) {
   const markCode = (at) => {
     if (!hasCode) { hasCode = true; codeStart = at; }
   };
-  const reset = (from) => {
-    start = from; hasCode = false; codeStart = -1; words = []; compound = false;
+  const reset = () => {
+    hasCode = false; codeStart = -1; words = []; compound = false;
     depth = 0; atBodyStatement = false; afterEnd = false; inHandler = false; lastWord = '';
   };
   const push = (end) => {
@@ -147,7 +146,7 @@ export function splitSqlStatements(sql) {
     if (ch === ';') {
       if (!compound || depth === 0) {
         push(i);
-        reset(i + 1);
+        reset();
       } else {
         atBodyStatement = true;
         afterEnd = false;
