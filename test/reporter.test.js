@@ -292,6 +292,18 @@ describe('passwordExpiryNote', () => {
   });
 });
 
+describe('notification email — account whose password could not be matched', () => {
+  it('says so instead of showing a password or "not auto-generated"', () => {
+    const html = notificationEmailToHTML(buildNotificationEmail({
+      project: 'app', dbType: 'mongodb',
+      dcl: { events: [{ type: 'new', username: 'shop_mreport', password: null, passwordUnmatched: true }] }
+    }));
+    expect(html).toContain('its generated password could not be matched to it');
+    expect(html).toContain('Rotate this account');
+    expect(html).not.toContain('credentials were not auto-generated');
+  });
+});
+
 describe('notification email fonts', () => {
   const html = notificationEmailToHTML(buildNotificationEmail({
     project: 'app', dbType: 'mariadb',

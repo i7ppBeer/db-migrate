@@ -281,12 +281,12 @@ describe('recordCredentialEvents — multi-line SQL template format', () => {
   });
 
   // ─── Fix verification: preCheckAccountsExistMariaDB excludes ALTER USER ────
-  it('[Fix] preCheckAccountsExistMariaDB: ALTER USER only → returns false without querying DB', async () => {
+  it('[Fix] preCheckAccountsExistMariaDB: ALTER USER only → no existing accounts, without querying DB', async () => {
     const alterSql = `ALTER USER 'existing_user'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`;
     // Passing null connection — if it tried to query it would throw
-    // Returning false means it correctly detected no CREATE USER and exited early
+    // An empty set means it correctly detected no CREATE USER and exited early
     const result = await runner.preCheckAccountsExistMariaDB(null, alterSql);
-    expect(result).toBe(false);
+    expect(result.size).toBe(0);
   });
 });
 
@@ -480,5 +480,236 @@ describe('importResolvedModule', () => {
       expect(mod.dirMode).toBe(0o700);
     }
     await expect(fs.access(path.dirname(fileURLToPath(`file://${mod.file}`)))).rejects.toThrow();
+  });
+});
+
+describe('DCL credential events — one file mixing existing and new accounts', () => {
+  const MIXED_SQL = [
+    `CREATE USER IF NOT EXISTS 'shop_app'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`,
+    `CREATE USER IF NOT EXISTS 'shop_report'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`,
+    `CREATE USER IF NOT EXISTS 'shop_app'@'localhost' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`,
+    `ALTER USER 'shop_ops'@'%' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`,
+  ].join('\n');
+
+  let runner;
+  beforeEach(() => {
+    runner = new RepeatableRunner({ checksumTable: 'test_dcl' });
+  });
+
+  it('preCheckAccountsExistMariaDB returns the existing accounts per user@host, not one flag per file', async () => {
+    const connection = {
+      query: vi.fn().mockResolvedValue([[{ User: 'shop_app', Host: '%' }, { User: 'unrelated', Host: '%' }]])
+    };
+    const existing = await runner.preCheckAccountsExistMariaDB(connection, MIXED_SQL);
+
+    expect([...existing]).toEqual(['shop_app@%']);
+    // one lookup, by user name, for the CREATE USER accounts only (ALTER USER is left out)
+    expect(connection.query).toHaveBeenCalledTimes(1);
+    expect(connection.query.mock.calls[0][1]).toEqual(['shop_app', 'shop_report']);
+  });
+
+  it('compares hosts case-insensitively', async () => {
+    const sql = `CREATE USER IF NOT EXISTS 'svc'@'LocalHost' IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN';`;
+    const connection = { query: vi.fn().mockResolvedValue([[{ User: 'svc', Host: 'localhost' }]]) };
+    expect([...await runner.preCheckAccountsExistMariaDB(connection, sql)]).toEqual(['svc@localhost']);
+  });
+
+  it('recordCredentialEvents: existing → no_change, new → its own password, ALTER → password_changed', () => {
+    runner.recordCredentialEvents(MIXED_SQL, ['pw1', 'pw2', 'pw3', 'pw4'], new Set(['shop_app@%']));
+
+    expect(runner.credentialEvents).toEqual([
+      { type: 'no_change', username: 'shop_app', host: '%' },
+      { type: 'new', username: 'shop_report', host: '%', password: 'pw2' },
+      { type: 'new', username: 'shop_app', host: 'localhost', password: 'pw3' },
+      { type: 'password_changed', username: 'shop_ops', host: '%', password: 'pw4' },
+    ]);
+  });
+
+  it('recordCredentialEvents still accepts a boolean for the whole file', () => {
+    runner.recordCredentialEvents(MIXED_SQL, ['pw1', 'pw2', 'pw3', 'pw4'], true);
+
+    expect(runner.credentialEvents.map(e => e.type)).toEqual(['no_change', 'no_change', 'no_change', 'password_changed']);
+  });
+
+  it('runMariaDB: the new account in a file with an existing one gets the password it was created with', async () => {
+    const dir = await fs.mkdtemp(path.join((await import('os')).tmpdir(), 'dclmix-'));
+    await fs.writeFile(path.join(dir, 'R__001_accounts.sql'), MIXED_SQL.split('\n').slice(0, 2).join('\n') + '\n');
+    const executed = [];
+    const connection = {
+      execute: vi.fn().mockResolvedValue([[]]),
+      query: vi.fn(async (sql) => {
+        if (/FROM mysql\.user/.test(sql)) return [[{ User: 'shop_app', Host: '%' }]];
+        if (/CREATE USER/.test(sql)) executed.push(sql);
+        return [[]];
+      })
+    };
+    try {
+      const result = await runner.run({ dbType: 'mariadb', connection, migrationsDir: dir });
+      expect(result.errors).toEqual([]);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+
+    const [noChange, created] = runner.credentialEvents;
+    expect(noChange).toEqual({ type: 'no_change', username: 'shop_app', host: '%' });
+    expect(created).toMatchObject({ type: 'new', username: 'shop_report', host: '%' });
+    // the password in the event is the one the CREATE USER for shop_report actually ran with
+    expect(executed.join('\n')).toContain(`'shop_report'@'%' IDENTIFIED BY '${created.password}'`);
+  });
+
+  it('runMongoDB: pairs passwords with allUsernames, so a new account after existing ones gets its own password', async () => {
+    const js = [
+      `export async function up(db, client) {`,
+      `  const users = [`,
+      `    { username: 'shop_app', password: 'CHANGE_ME_ON_FIRST_LOGIN' },`,
+      `    { username: 'shop_readonly', password: 'CHANGE_ME_ON_FIRST_LOGIN' },`,
+      `    { username: 'shop_mreport', password: 'CHANGE_ME_ON_FIRST_LOGIN' },`,
+      `  ];`,
+      `}`,
+    ].join('\n');
+    let resolvedPasswords;
+    runner.getRepeatableFiles = vi.fn(async () => [{
+      fileName: 'R__001_accounts.js', filePath: '/x/R__001_accounts.js', dir: '/x',
+      content: js, checksum: 'c1', annotations: {}
+    }]);
+    runner.getStoredChecksumsMongoDB = vi.fn(async () => new Map());
+    runner.updateChecksumMongoDB = vi.fn(async () => {});
+    runner.injectCustomDataMongoDB = vi.fn(async () => new Date('2026-10-13T00:00:00Z'));
+    runner.importResolvedModule = vi.fn(async (resolved) => {
+      resolvedPasswords = [...resolved.matchAll(/password: '([^']+)'/g)].map(m => m[1]);
+      return {
+        up: async () => ({
+          passwordSet: true,
+          createdUsernames: ['shop_mreport'],
+          allUsernames: ['shop_app', 'shop_readonly', 'shop_mreport']
+        })
+      };
+    });
+
+    const result = await runner.run({ dbType: 'mongodb', db: {}, client: {}, migrationsDir: '/x' });
+    expect(result.errors).toEqual([]);
+
+    expect(runner.credentialEvents).toEqual([
+      { type: 'no_change', username: 'shop_app' },
+      { type: 'no_change', username: 'shop_readonly' },
+      { type: 'new', username: 'shop_mreport', password: resolvedPasswords[2], expiry: { at: '2026-10-13T00:00:00.000Z' } },
+    ]);
+    expect(runner.injectCustomDataMongoDB.mock.calls[0][1]).toEqual(['shop_mreport']);
+  });
+});
+
+describe('DCL placeholder parsing — one entry per CHANGE_ME_ON_FIRST_LOGIN, in file order', () => {
+  const P = 'CHANGE_ME_ON_FIRST_LOGIN';
+  let runner;
+  beforeEach(() => {
+    runner = new RepeatableRunner({ checksumTable: 'test_dcl' });
+  });
+
+  it('several accounts in one CREATE USER keep their own passwords, and later statements stay aligned', () => {
+    const sql = `CREATE USER IF NOT EXISTS 'a'@'%' IDENTIFIED BY '${P}', 'b'@'10.0.%' IDENTIFIED BY '${P}';\nCREATE USER 'c'@'%' IDENTIFIED BY '${P}';`;
+    const { passwords } = runner.resolvePlaceholderPasswords(sql, 'R__x.sql');
+    runner.recordCredentialEvents(sql, passwords, new Set());
+
+    expect(runner.credentialEvents).toEqual([
+      { type: 'new', username: 'a', host: '%', password: passwords[0] },
+      { type: 'new', username: 'b', host: '10.0.%', password: passwords[1] },
+      { type: 'new', username: 'c', host: '%', password: passwords[2] },
+    ]);
+  });
+
+  it("an account without @host is MariaDB's default host '%'", () => {
+    runner.recordCredentialEvents(`CREATE USER 'x' IDENTIFIED BY '${P}'; CREATE USER 'y'@'%' IDENTIFIED BY '${P}';`, ['pw1', 'pw2'], new Set());
+    expect(runner.credentialEvents).toEqual([
+      { type: 'new', username: 'x', host: '%', password: 'pw1' },
+      { type: 'new', username: 'y', host: '%', password: 'pw2' },
+    ]);
+  });
+
+  it('CREATE OR REPLACE USER on an existing account → password_changed with the new password', () => {
+    runner.recordCredentialEvents(`CREATE OR REPLACE USER 'app'@'%' IDENTIFIED BY '${P}';`, ['pw1'], new Set(['app@%']));
+    expect(runner.credentialEvents).toEqual([{ type: 'password_changed', username: 'app', host: '%', password: 'pw1' }]);
+  });
+
+  it('DROP USER then CREATE USER: existing account → password_changed, new account → new', () => {
+    const sql = `DROP USER IF EXISTS 'app'@'%', 'fresh'@'%';\nCREATE USER 'app'@'%' IDENTIFIED BY '${P}';\nCREATE USER 'fresh'@'%' IDENTIFIED BY '${P}';\nCREATE USER IF NOT EXISTS 'kept'@'%' IDENTIFIED BY '${P}';`;
+    runner.recordCredentialEvents(sql, ['pw1', 'pw2', 'pw3'], new Set(['app@%', 'kept@%']));
+    expect(runner.credentialEvents).toEqual([
+      { type: 'password_changed', username: 'app', host: '%', password: 'pw1' },
+      { type: 'new', username: 'fresh', host: '%', password: 'pw2' },
+      { type: 'no_change', username: 'kept', host: '%' },
+    ]);
+  });
+
+  it('SET PASSWORD FOR → password_changed', () => {
+    runner.recordCredentialEvents(`SET PASSWORD FOR 'ops'@'localhost' = PASSWORD('${P}');`, ['pw1'], true);
+    expect(runner.credentialEvents).toEqual([{ type: 'password_changed', username: 'ops', host: 'localhost', password: 'pw1' }]);
+  });
+
+  it("a placeholder whose account can't be identified keeps its password and doesn't shift the next ones", () => {
+    const sql = `GRANT ALL ON db.* TO 'z'@'%' IDENTIFIED BY '${P}';\nCREATE USER 'y'@'%' IDENTIFIED BY '${P}';`;
+    runner.recordCredentialEvents(sql, ['pw1', 'pw2'], new Set());
+    expect(runner.credentialEvents).toEqual([
+      { type: 'new', username: '(unrecognized account, statement 1)', password: 'pw1' },
+      { type: 'new', username: 'y', host: '%', password: 'pw2' },
+    ]);
+  });
+
+  it('a placeholder in a comment is not an account (matches resolvePlaceholderPasswords)', () => {
+    const sql = `-- e.g. CREATE USER 'doc'@'%' IDENTIFIED BY '${P}';\nCREATE USER 'real'@'%' IDENTIFIED BY '${P}';`;
+    const { passwords } = runner.resolvePlaceholderPasswords(sql, 'R__x.sql');
+    expect(passwords).toHaveLength(1);
+    expect(runner.parsePlaceholderAccountsSQL(sql).map(a => a.name)).toEqual(['real']);
+  });
+
+  it('preCheckAccountsExistMariaDB looks up CREATE OR REPLACE / DROP+CREATE accounts too, but not unrecognized ones', async () => {
+    const sql = `CREATE OR REPLACE USER 'r'@'%' IDENTIFIED BY '${P}'; GRANT ALL ON *.* TO 'g'@'%' IDENTIFIED BY '${P}';`;
+    const connection = { query: vi.fn().mockResolvedValue([[{ User: 'r', Host: '%' }]]) };
+    expect([...await runner.preCheckAccountsExistMariaDB(connection, sql)]).toEqual(['r@%']);
+    expect(connection.query.mock.calls[0][1]).toEqual(['r']);
+  });
+});
+
+describe('DCL MongoDB — passwords are never paired by guess', () => {
+  const js = [
+    `export async function up(db, client) {`,
+    `  const users = [`,
+    `    { user: 'shop_app', password: 'CHANGE_ME_ON_FIRST_LOGIN' },`,
+    `    { user: 'shop_mreport', password: 'CHANGE_ME_ON_FIRST_LOGIN' },`,
+    `  ];`,
+    `}`,
+  ].join('\n');
+
+  async function runWith(upResult) {
+    const runner = new RepeatableRunner({});
+    runner.getRepeatableFiles = vi.fn(async () => [{
+      fileName: 'R__001_accounts.js', filePath: '/x/R__001_accounts.js', dir: '/x', content: js, checksum: 'c1', annotations: {}
+    }]);
+    runner.getStoredChecksumsMongoDB = vi.fn(async () => new Map());
+    runner.updateChecksumMongoDB = vi.fn(async () => {});
+    runner.injectCustomDataMongoDB = vi.fn(async () => new Date('2026-10-13T00:00:00Z'));
+    runner.importResolvedModule = vi.fn(async () => ({ up: async () => upResult }));
+    const result = await runner.run({ dbType: 'mongodb', db: {}, client: {}, migrationsDir: '/x' });
+    expect(result.errors).toEqual([]);
+    return runner.credentialEvents;
+  }
+
+  it('createdUsernames is a subset and no allUsernames → new account reported without a password', async () => {
+    const events = await runWith({ passwordSet: true, createdUsernames: ['shop_mreport'] });
+    expect(events).toEqual([{ type: 'new', username: 'shop_mreport', password: null, passwordUnmatched: true }]);
+  });
+
+  it('createdUsernames covers every placeholder → paired in order', async () => {
+    const events = await runWith({ passwordSet: true, createdUsernames: ['shop_app', 'shop_mreport'] });
+    expect(events.map(e => [e.username, typeof e.password])).toEqual([['shop_app', 'string'], ['shop_mreport', 'string']]);
+  });
+
+  it('no return value → names found in the file, paired when they line up', async () => {
+    const events = await runWith(undefined);
+    expect(events.map(e => [e.type, e.username, typeof e.password])).toEqual([['new', 'shop_app', 'string'], ['new', 'shop_mreport', 'string']]);
+  });
+
+  it('passwordSet: false → every account no_change', async () => {
+    const events = await runWith({ passwordSet: false, allUsernames: ['shop_app', 'shop_mreport'] });
+    expect(events).toEqual([{ type: 'no_change', username: 'shop_app' }, { type: 'no_change', username: 'shop_mreport' }]);
   });
 });
