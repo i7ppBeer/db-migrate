@@ -166,31 +166,7 @@ export async function down(db, client) {
 
 ### 3.3 Execution Flow
 
-```mermaid
-flowchart TD
-  A["up / sync"] --> B["Connect — R0: the database exists"]
-  B --> C["status — R1: changelog consistency, checksums of applied files"]
-  C --> D{"Validation gate<br/>(pending migrations only)"}
-  D -- fails --> X1["❌ Refused — nothing applied"]
-  D -- passes --> E{"Runtime gates R2–R4<br/>long operations, writable primary, disk;<br/>large-collection warning"}
-  E -- blocked --> X1
-  E -- ok --> F["Next pending migration"]
-  F --> G{"--sanity-check and<br/>an exported preCheck()?"}
-  G -- yes --> H{"preCheck() passes?"}
-  H -- no --> X2["❌ Stop — this migration is not run"]
-  H -- yes --> I
-  G -- no --> I["Run up(db, client)<br/>(each operation bounded by operationTimeoutMs, if set)"]
-  I -- error --> X3["❌ Stop — may be partly applied, not recorded"]
-  I -- ok --> J{"--sanity-check and<br/>an exported postCheck()?"}
-  J -- no --> K["Record in the changelog, with checksum"]
-  J -- yes --> L{"postCheck() passes?"}
-  L -- yes --> K
-  L -- no --> M["Run down(db, client)<br/>(auto-rollback, unless --no-auto-rollback)"]
-  M --> X4["❌ Stop — rolled back, still pending"]
-  K --> N{"More pending?"}
-  N -- yes --> F
-  N -- no --> O["✅ Done"]
-```
+What `up` / `sync` do step by step — the gates R0–R6, preCheck / up / postCheck per migration, automatic rollback, and the state left wherever a run stops — is drawn and explained in **[EXECUTION-FLOW.md](EXECUTION-FLOW.md)**, one page for MariaDB and MongoDB.
 
 Automatic rollback applies to the exported `preCheck(db, client)` / `postCheck(db, client)` functions run by `--sanity-check` (see [`templates/mongodb/ddl/TEMPLATE-with-sanity-check.js`](../templates/mongodb/ddl/TEMPLATE-with-sanity-check.js)). A check written inside `up()` that throws only fails the migration — nothing rolls back what `up()` already did. `--dry-run` stops after the gates. Details: [RUNTIME-GATE-PLAN.md](RUNTIME-GATE-PLAN.md).
 

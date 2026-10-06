@@ -30,6 +30,7 @@ deeper, grouped by what you're trying to do.
 | Document | Covers |
 |---|---|
 | [DDL-PRODUCTION-SAFETY.md](DDL-PRODUCTION-SAFETY.md) | **Start here for production** — what jams a database, the protections, pre-flight checklist, abort/rollback runbook |
+| [EXECUTION-FLOW.md](EXECUTION-FLOW.md) | What `up` / `sync` do step by step: gates R0–R6, PreCheck / PostCheck, rollback, and where a run can stop (MariaDB and MongoDB, one diagram) |
 | [RUNTIME-GATE-PLAN.md](RUNTIME-GATE-PLAN.md) | The checks made before anything executes (R0–R4) and why each is absolute or overridable |
 | [LOCK-GUARD.md](LOCK-GUARD.md) | MariaDB lock-wait guard: settings, behavior, limits |
 

@@ -183,31 +183,7 @@ DROP TABLE ...
 
 ### 3.3 Execution Flow
 
-```mermaid
-flowchart TD
-  A["up / sync"] --> B["Connect — R0: the database exists and the connection points at it"]
-  B --> C["status — R1: changelog consistency, checksums of applied files"]
-  C --> D{"Validation gate<br/>(pending migrations only)"}
-  D -- fails --> X1["❌ Refused — nothing applied"]
-  D -- passes --> E{"Runtime gates R2–R4<br/>open transactions, read-only target, headroom"}
-  E -- blocked --> X1
-  E -- ok --> F["Next pending migration"]
-  F --> G{"--sanity-check and<br/>a PreCheck section?"}
-  G -- yes --> H{"PreCheck passes?"}
-  H -- no --> X2["❌ Stop — this migration is not run"]
-  H -- yes --> I
-  G -- no --> I["Run the Up section<br/>(Lock Guard: bounded lock wait + retry)"]
-  I -- error --> X3["❌ Stop — may be partly applied, not recorded"]
-  I -- ok --> J{"--sanity-check and<br/>a PostCheck section?"}
-  J -- no --> K["Record in the changelog, with checksum"]
-  J -- yes --> L{"PostCheck passes?"}
-  L -- yes --> K
-  L -- no --> M["Run the Down section<br/>(auto-rollback, unless --no-auto-rollback)"]
-  M --> X4["❌ Stop — rolled back, still pending"]
-  K --> N{"More pending?"}
-  N -- yes --> F
-  N -- no --> O["✅ Done"]
-```
+What `up` / `sync` do step by step — the gates R0–R6, PreCheck / Up / PostCheck per migration, automatic rollback, and the state left wherever a run stops — is drawn and explained in **[EXECUTION-FLOW.md](EXECUTION-FLOW.md)**, one page for MariaDB and MongoDB.
 
 `--dry-run` stops after the gates and reports what would run or be refused. Details: [RUNTIME-GATE-PLAN.md](RUNTIME-GATE-PLAN.md), [LOCK-GUARD.md](LOCK-GUARD.md).
 

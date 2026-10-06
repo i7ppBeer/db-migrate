@@ -329,7 +329,9 @@ connect() → R0 identity → R1 changelog consistency → [R2 lock preflight
 ```
 
 R0 and R1 gate the *connection*; R2–R4 gate the *moment right before execution
-starts*; R5 gates *each statement*; R6 gates the *result*.
+starts*; R5 gates *each statement*; R6 gates the *result*. The full flow, with
+PreCheck, rollback and where a run can stop, is drawn in
+[EXECUTION-FLOW.md](EXECUTION-FLOW.md).
 
 ---
 
