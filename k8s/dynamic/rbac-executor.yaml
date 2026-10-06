@@ -1,0 +1,50 @@
+# Permissions for whatever runs submit.sh / collect.sh (CI runner, ops box,
+# scheduler) — NOT for the migration Pod, which needs no API access at all
+# (job.template.yaml sets automountServiceAccountToken: false).
+#
+# pods/exec is powerful: whoever holds it can open a shell in the migration
+# Pod and read the DB credentials mounted there. Keep this Role in the
+# migration namespace only, and bind it only to the executor's identity.
+#
+# Replace {{ namespace }} and the subject below, then apply.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: db-migrate-executor
+  namespace: "{{ namespace }}"
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]          # submit.sh only checks the Secrets exist
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: db-migrate-executor
+  namespace: "{{ namespace }}"
+subjects:
+  # Your CI's ServiceAccount (or a User / Group)
+  - kind: ServiceAccount
+    name: ci-deployer
+    namespace: ci
+roleRef:
+  kind: Role
+  name: db-migrate-executor
+  apiGroup: rbac.authorization.k8s.io

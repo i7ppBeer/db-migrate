@@ -1,0 +1,9 @@
+-- +migrate Up
+CREATE TABLE customers (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  email VARCHAR(255) NOT NULL UNIQUE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- +migrate Down
+DROP TABLE customers;

@@ -1,0 +1,2 @@
+# Extra arguments for `dcl` — one per line. dcl doesn't validate by default; keep --validate.
+--validate
