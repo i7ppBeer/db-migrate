@@ -617,7 +617,7 @@ docker compose run --rm migrate dcl --validate --allow-dangerous -c /app/test-fi
 
 ### Q4: Does DCL Need a Baseline?
 
-**A:** DCL uses the Repeatable (R__) format and doesn't need a baseline. It is reapplied every time it runs (idempotent), so you just need to create the correct DCL file and run it.
+**A:** DCL uses the Repeatable (R__) format and doesn't need a baseline. A script runs the first time `dcl` sees it and again whenever its content (checksum) changes — so it must be idempotent: write it for the accounts and grants you want, and run `dcl`.
 
 ### Q5: How to Handle Multiple Environments (DEV/STG/PROD)?
 
