@@ -9,10 +9,13 @@
  *   - compound statements, whose bodies contain ';':
  *       CREATE [OR REPLACE] [DEFINER=…] PROCEDURE | FUNCTION | TRIGGER | EVENT …
  *       BEGIN NOT ATOMIC …, and top-level IF / CASE / LOOP / WHILE / REPEAT
- *     Blocks are tracked by depth: BEGIN and CASE always open one; IF, LOOP,
- *     WHILE and REPEAT open one when they start a statement (so the IF()
- *     function and IF [NOT] EXISTS don't); END closes one, and END IF / END
- *     LOOP / … consume their keyword.
+ *     Blocks are tracked by depth: CASE always opens one; BEGIN, IF, LOOP,
+ *     WHILE and REPEAT open one when they start a statement (after ';',
+ *     THEN / ELSE / DO, a label, a routine header or HANDLER FOR …) — so the
+ *     IF() / REPEAT() functions, IF [NOT] EXISTS and a column named `begin`
+ *     don't; END closes one, and END IF / END LOOP / … consume their keyword.
+ *     A word right after '.' or '@' (NEW.end, @end) is a name, never a keyword.
+ *     A leading "label:" (lbl: BEGIN NOT ATOMIC …) is skipped.
  *
  * Returns null when it can't be sure — an unterminated quote or comment, or
  * a compound statement whose blocks don't balance — so the caller can send
@@ -43,13 +46,15 @@ export function splitSqlStatements(sql) {
   let depth = 0;           // open blocks in the compound statement
   let atBodyStatement = false; // next word starts a statement inside a block
   let afterEnd = false;    // previous word was END (END IF, END LOOP, …)
+  let inHandler = false;   // after DECLARE … HANDLER, before its body
+  let lastWord = '';       // previous word (upper-case)
 
   const markCode = (at) => {
     if (!hasCode) { hasCode = true; codeStart = at; }
   };
   const reset = (from) => {
     start = from; hasCode = false; codeStart = -1; words = []; compound = false;
-    depth = 0; atBodyStatement = false; afterEnd = false;
+    depth = 0; atBodyStatement = false; afterEnd = false; inHandler = false; lastWord = '';
   };
   const push = (end) => {
     if (!hasCode) return;
@@ -57,6 +62,29 @@ export function splitSqlStatements(sql) {
     if (text) statements.push(text);
   };
   const isWordChar = (ch) => ch !== undefined && /[A-Za-z0-9_$]/.test(ch);
+
+  // lookahead right after a word, without copying the rest of the script
+  const LABEL = /\s*:(?!=)/y;
+  const at = (re, pos) => { re.lastIndex = pos; return re.exec(sql); };
+
+  // Does a parenthesized group start at pos (after whitespace) with a comma at
+  // its top level? That's a function call — IF(a, b, c), REPEAT('x', 3) — not
+  // the IF (cond) THEN / REPEAT … statement.
+  const isFunctionCall = (pos) => {
+    let k = pos;
+    while (/\s/.test(sql[k] ?? '')) k++;
+    if (sql[k] !== '(') return false;
+    let level = 0;
+    for (; k < sql.length; k++) {
+      const c = sql[k];
+      if (c === "'" || c === '"' || c === '`') {
+        for (k++; k < sql.length && sql[k] !== c; k++) if (sql[k] === '\\' && c !== '`') k++;
+      } else if (c === '(') level++;
+      else if (c === ')') { if (--level === 0) return false; }
+      else if (c === ',' && level === 1) return true;
+    }
+    return false;
+  };
 
   // Is the statement so far (words) a compound statement? true / false / null = can't tell yet
   const classify = () => {
@@ -123,6 +151,7 @@ export function splitSqlStatements(sql) {
       } else {
         atBodyStatement = true;
         afterEnd = false;
+        inHandler = false;
       }
       i++;
       continue;
@@ -133,11 +162,18 @@ export function splitSqlStatements(sql) {
       let j = i;
       while (isWordChar(sql[j])) j++;
       const word = sql.slice(i, j).toUpperCase();
-      const rest = sql.slice(j);
+      const prev = sql[i - 1];
+      const before = lastWord;
+      lastWord = word;
       markCode(i);
       i = j;
 
       if (!compound) {
+        const label = words.length === 0 && at(LABEL, j);
+        if (label) { // "lbl:" before a top-level block — classify what follows
+          i = j + label[0].length;
+          continue;
+        }
         if (words.length < 8) {
           words.push(word);
           if (classify() === true) {
@@ -153,36 +189,46 @@ export function splitSqlStatements(sql) {
       }
 
       // inside a compound statement
+      if (prev === '.' || prev === '@') { // NEW.end, t.begin, @end — a name
+        atBodyStatement = false;
+        afterEnd = false;
+        continue;
+      }
       if (afterEnd && BLOCK_KEYWORDS.includes(word)) { // END IF / END CASE / …
         afterEnd = false;
         continue;
       }
       afterEnd = false;
 
-      const label = atBodyStatement && rest.match(/^\s*:(?!=)/);
+      const label = atBodyStatement && at(LABEL, j);
       if (label) { // "label:" before a block — the next word still starts a statement
-        i += label[0].length;
+        i = j + label[0].length;
         continue;
       }
 
-      // At depth 0 we're in the routine's header (or a body that has no
-      // BEGIN): IF there is IF [NOT] EXISTS or the IF() function unless it
-      // starts a block; LOOP/WHILE/REPEAT can only start one.
-      const startsStatement = atBodyStatement ||
-        (depth === 0 && !(word === 'IF' && /^\s*(\(|NOT\s+EXISTS\b|EXISTS\b)/i.test(rest)));
+      // A block keyword opens a block only where a statement can start: after
+      // ';' / THEN / ELSE / DO / a label (atBodyStatement), after HANDLER FOR …,
+      // or at depth 0 — the routine's header, or a body without BEGIN.
+      // IF right after PROCEDURE/FUNCTION/… is the header's IF NOT EXISTS (in a
+      // body, IF [NOT] EXISTS (SELECT …) THEN is a real IF), and IF(…, …) /
+      // REPEAT(…, …) are functions.
+      const startsStatement = atBodyStatement || inHandler || depth === 0;
+      const opensBlock = startsStatement && (
+        word === 'BEGIN' || word === 'LOOP' || word === 'WHILE' ||
+        (word === 'IF' && !ROUTINES.includes(before) && !isFunctionCall(j)) ||
+        (word === 'REPEAT' && !isFunctionCall(j)));
 
       if (word === 'END') {
         depth--;
         if (depth < 0) return null;
         afterEnd = true;
         atBodyStatement = false;
-      } else if (word === 'BEGIN' || word === 'CASE') {
+      } else if (word === 'CASE' || opensBlock) {
         depth++;
-        atBodyStatement = word === 'BEGIN';
-      } else if (startsStatement && ['IF', 'LOOP', 'WHILE', 'REPEAT'].includes(word)) {
-        depth++;
-        atBodyStatement = word === 'LOOP' || word === 'REPEAT';
+        if (word === 'BEGIN') inHandler = false;
+        atBodyStatement = word === 'BEGIN' || word === 'LOOP' || word === 'REPEAT';
       } else {
+        if (word === 'HANDLER') inHandler = true;
         atBodyStatement = ['THEN', 'ELSE', 'DO'].includes(word);
       }
       continue;

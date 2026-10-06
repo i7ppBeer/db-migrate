@@ -263,8 +263,14 @@ Thresholds are overridable via `config.performance.thresholds`.
 ### Known parser limitation
 
 `node-sql-parser` rejects some valid MariaDB syntax — e.g. `UPDATE … ORDER BY … LIMIT n`
-(batched updates) — as `SQL_SYNTAX_ERROR`. Add `-- @skip-syntax-check: true` to such a
-file; the rule checks above still run.
+(batched updates) and `ALTER TABLE … ADD CONSTRAINT … CHECK (…)` — as `SQL_SYNTAX_ERROR`.
+Add `-- @skip-syntax-check: true` to such a file; the rule checks above still run.
+
+Some forms it doesn't know are rewritten for the check only (the SQL that runs is
+unchanged), so they're checked instead of refused: `ADD [CONSTRAINT name] UNIQUE [INDEX|KEY]`
+is checked as `ADD INDEX`, and `IF [NOT] EXISTS` on `ADD INDEX`, `ADD UNIQUE`,
+`ADD PARTITION`, `CREATE INDEX`, `DROP COLUMN`, `DROP INDEX`, `DROP KEY`,
+`DROP CONSTRAINT`, `DROP PARTITION` and `MODIFY` / `CHANGE COLUMN` is ignored.
 
 ---
 

@@ -340,7 +340,9 @@ export function buildDCLNotificationEvents(credentialEvents, diff, dbType) {
     const prev = merged.get(key);
     if (!prev) {
       merged.set(key, { ...rest, username: key });
-    } else if (e.password) {
+    } else if (e.password || e.passwordUnmatched) {
+      // A later password — or a later change whose password couldn't be
+      // matched — makes the earlier one invalid: never show that one as current.
       merged.set(key, {
         ...rest,
         username: key,

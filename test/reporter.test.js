@@ -292,6 +292,17 @@ describe('passwordExpiryNote', () => {
   });
 });
 
+describe('buildDCLNotificationEvents — a later unmatched change replaces an earlier password', () => {
+  it('does not show the earlier, no longer valid password', () => {
+    const events = buildDCLNotificationEvents([
+      { type: 'new', username: 'app_user', password: 'P1' },
+      { type: 'password_changed', username: 'app_user', password: null, passwordUnmatched: true }
+    ], { addedUsers: [], removedUsers: [], changedUsers: [] }, 'mongodb');
+    const e = events.find(x => x.username === 'app_user');
+    expect(e).toMatchObject({ type: 'new', password: null, passwordUnmatched: true });
+  });
+});
+
 describe('notification email — account whose password could not be matched', () => {
   it('says so instead of showing a password or "not auto-generated"', () => {
     const html = notificationEmailToHTML(buildNotificationEmail({

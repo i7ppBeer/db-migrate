@@ -1046,20 +1046,25 @@ export class RepeatableRunner {
         if (generated) {
           const pwCount = Array.isArray(passwords) ? passwords.length : 1;
           const strict = { requireAligned: true };
+          const listed = Array.isArray(upResult?.allUsernames) ? upResult.allUsernames : null;
           if (isRotated) {
             // { name, isReset: true } → recorded as password_changed
             this.recordCredentialEvents(file.content, passwords, false, (allUsernames || []).map(name => ({ name, isReset: true })), strict);
-          } else if (Array.isArray(createdUsernames) && Array.isArray(upResult?.allUsernames) && upResult.allUsernames.length === pwCount) {
-            const created = new Set(createdUsernames);
-            const existing = new Set(upResult.allUsernames.filter(name => !created.has(name)));
-            this.recordCredentialEvents(file.content, passwords, existing, upResult.allUsernames, strict);
           } else if (alreadyExists) {
-            // Every account already existed: no password was handed out
-            this.recordCredentialEvents(file.content, passwords, true, allUsernames, strict);
+            // Every account already existed: no password was handed out, so
+            // there's nothing to pair (and nothing to warn about)
+            this.recordCredentialEvents(file.content, passwords, true, allUsernames);
+          } else if (listed && listed.length === pwCount) {
+            // Per account when the script says which ones it created; without
+            // createdUsernames, every listed account counts as new (as before)
+            const existing = Array.isArray(createdUsernames)
+              ? new Set(listed.filter(name => !createdUsernames.includes(name)))
+              : false;
+            this.recordCredentialEvents(file.content, passwords, existing, listed, strict);
           } else {
-            // createdUsernames (or, without a return value, the names found in
-            // the file) — paired only if they line up with the passwords
-            this.recordCredentialEvents(file.content, passwords, false, createdUsernames, strict);
+            // createdUsernames, else allUsernames, else the names found in the
+            // file — paired only if they line up with the passwords
+            this.recordCredentialEvents(file.content, passwords, false, createdUsernames ?? listed, strict);
           }
         }
 

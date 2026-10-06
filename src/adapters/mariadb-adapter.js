@@ -1745,13 +1745,18 @@ export class MariaDBAdapter extends BaseAdapter {
         return `${prefix}(${quotedCols})`;
       });
 
-    // MariaDB's IF [NOT] EXISTS on index / column clauses is valid but unknown
-    // to node-sql-parser (it does know CREATE/DROP TABLE … and ADD COLUMN IF NOT
-    // EXISTS). Drop just those words for the parse, so re-runnable migrations
-    // aren't refused while the rest of the statement is still checked. The
-    // SQL that's executed is unchanged.
+    // Valid MariaDB that node-sql-parser doesn't know, rewritten for the parse
+    // only (the SQL that's executed is unchanged), so the rest of the
+    // statement is still checked:
+    //  - ALTER TABLE … ADD [CONSTRAINT [name]] UNIQUE [INDEX|KEY] — every form
+    //    is rejected; checked as ADD INDEX (same shape, minus the uniqueness)
+    //  - IF [NOT] EXISTS on index / column / partition clauses — dropped (the
+    //    parser knows it only on CREATE/DROP TABLE and ADD COLUMN)
+    // ADD CONSTRAINT … CHECK (…) is rejected too and can't be rewritten safely:
+    // such a file needs -- @skip-syntax-check: true.
     const stripMariaDBIfExists = (sql) => sql
-      .replace(/\b(ADD\s+(?:UNIQUE\s+|FULLTEXT\s+|SPATIAL\s+)?(?:INDEX|KEY))\s+IF\s+NOT\s+EXISTS\b/gi, '$1')
+      .replace(/\bADD\s+(?:CONSTRAINT(?:\s+(?!UNIQUE\b)(?:`[^`]+`|\w+))?\s+)?UNIQUE(?:\s+(?:INDEX|KEY))?\b/gi, 'ADD INDEX')
+      .replace(/\b(ADD\s+(?:FULLTEXT\s+|SPATIAL\s+)?(?:INDEX|KEY)|ADD\s+PARTITION)\s+IF\s+NOT\s+EXISTS\b/gi, '$1')
       .replace(/\b(CREATE\s+(?:OR\s+REPLACE\s+)?(?:UNIQUE\s+|FULLTEXT\s+|SPATIAL\s+)?INDEX)\s+IF\s+NOT\s+EXISTS\b/gi, '$1')
       .replace(/\b(DROP\s+(?:COLUMN|INDEX|KEY|CONSTRAINT|PARTITION|FOREIGN\s+KEY))\s+IF\s+EXISTS\b/gi, '$1')
       .replace(/\b((?:MODIFY|CHANGE)(?:\s+COLUMN)?)\s+IF\s+EXISTS\b/gi, '$1');

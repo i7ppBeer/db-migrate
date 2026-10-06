@@ -172,21 +172,29 @@ trap 'fail_and_cleanup "submit.sh was interrupted while $STEP"' INT TERM
 
 log "▶ Creating Job $JOB (suspended)"
 STEP="creating Job $JOB"
-sed \
-  -e "s|{{ job }}|$JOB|g" \
-  -e "s|{{ namespace }}|$NAMESPACE|g" \
-  -e "s|{{ project }}|$PROJECT|g" \
-  -e "s|{{ db }}|$DB|g" \
-  -e "s|{{ runId }}|$RUN_ID|g" \
-  -e "s|{{ environment }}|$ENVIRONMENT|g" \
-  -e "s|{{ ddlHash }}|$DDL_HASH|g" \
-  -e "s|{{ dclHash }}|$DCL_HASH|g" \
-  -e "s|{{ image }}|$IMAGE|g" \
-  -e "s|{{ ddlSecret }}|$DDL_SECRET|g" \
-  -e "s|{{ dclSecret }}|$DCL_SECRET|g" \
-  -e "s|{{ collectTimeoutSeconds }}|$COLLECT_TIMEOUT_SECONDS|g" \
-  -e "s|{{ activeDeadlineSeconds }}|$((MIGRATE_TIMEOUT_SECONDS + COLLECT_TIMEOUT_SECONDS))|g" \
-  -e "s|{{ ttlSeconds }}|$TTL_SECONDS|g" \
+# Values are escaped for sed's replacement text: \ and & are special there,
+# and | is the delimiter (ENVIRONMENT=R&D must stay R&D).
+sed_value() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+render_args=()
+while IFS='=' read -r key value; do
+  render_args+=(-e "s|{{ $key }}|$(sed_value "$value")|g")
+done <<EOF
+job=$JOB
+namespace=$NAMESPACE
+project=$PROJECT
+db=$DB
+runId=$RUN_ID
+environment=$ENVIRONMENT
+ddlHash=$DDL_HASH
+dclHash=$DCL_HASH
+image=$IMAGE
+ddlSecret=$DDL_SECRET
+dclSecret=$DCL_SECRET
+collectTimeoutSeconds=$COLLECT_TIMEOUT_SECONDS
+activeDeadlineSeconds=$((MIGRATE_TIMEOUT_SECONDS + COLLECT_TIMEOUT_SECONDS))
+ttlSeconds=$TTL_SECONDS
+EOF
+sed "${render_args[@]}" \
   "$HERE/job.template.yaml" | kubectl create -f - >&2 2>>"$KERR"
 JOB_UID=$(kubectl get job "$JOB" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}' 2>>"$KERR")
 

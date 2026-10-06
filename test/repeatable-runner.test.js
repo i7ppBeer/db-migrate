@@ -708,6 +708,29 @@ describe('DCL MongoDB — passwords are never paired by guess', () => {
     expect(events.map(e => [e.type, e.username, typeof e.password])).toEqual([['new', 'shop_app', 'string'], ['new', 'shop_mreport', 'string']]);
   });
 
+  it('allUsernames without createdUsernames (names built dynamically) → paired in order, all new', async () => {
+    const dynamic = js.replace(/\{ user: '([^']+)'/g, "{ user: 'shop_' + '$1'.slice(5)");
+    const runner = new RepeatableRunner({});
+    runner.getRepeatableFiles = vi.fn(async () => [{ fileName: 'R__dyn.js', filePath: '/x/R__dyn.js', dir: '/x', content: dynamic, checksum: 'c', annotations: {} }]);
+    runner.getStoredChecksumsMongoDB = vi.fn(async () => new Map());
+    runner.updateChecksumMongoDB = vi.fn(async () => {});
+    runner.injectCustomDataMongoDB = vi.fn(async () => new Date('2026-10-13T00:00:00Z'));
+    runner.importResolvedModule = vi.fn(async () => ({ up: async () => ({ allUsernames: ['svc_a', 'svc_b'] }) }));
+    await runner.run({ dbType: 'mongodb', db: {}, client: {}, migrationsDir: '/x' });
+    expect(runner.credentialEvents.map(e => [e.type, e.username, typeof e.password])).toEqual([['new', 'svc_a', 'string'], ['new', 'svc_b', 'string']]);
+  });
+
+  it('passwordSet: false with a name count that does not match → no_change, and no "can\'t tell" warning', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const events = await runWith({ passwordSet: false, allUsernames: ['shop_app'] });
+      expect(events).toEqual([{ type: 'no_change', username: 'shop_app' }]);
+      expect(log.mock.calls.flat().join('\n')).not.toMatch(/can't tell which password/);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it('passwordSet: false → every account no_change', async () => {
     const events = await runWith({ passwordSet: false, allUsernames: ['shop_app', 'shop_mreport'] });
     expect(events).toEqual([{ type: 'no_change', username: 'shop_app' }, { type: 'no_change', username: 'shop_mreport' }]);

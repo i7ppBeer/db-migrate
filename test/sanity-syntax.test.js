@@ -51,6 +51,18 @@ describe('MariaDB syntax check — IF [NOT] EXISTS on index / column clauses', (
     ].join('\n'))).toEqual([]);
   });
 
+  it('accepts ALTER TABLE … ADD UNIQUE in every form (the parser rejects all of them on its own)', () => {
+    expect(syntaxErrors([
+      'CREATE TABLE IF NOT EXISTS t (id INT PRIMARY KEY, a INT, b INT, c INT, d INT);',
+      'ALTER TABLE t ADD UNIQUE u_a (a);',
+      'ALTER TABLE t ADD UNIQUE KEY u_b (b), ADD UNIQUE INDEX IF NOT EXISTS u_c (c);',
+      'ALTER TABLE t ADD UNIQUE IF NOT EXISTS u_d (d);',
+      'ALTER TABLE t ADD CONSTRAINT uq_ab UNIQUE (a, b);',
+      'ALTER TABLE t ADD CONSTRAINT `uq ac` UNIQUE KEY (a, c);'
+    ].join('\n'))).toEqual([]);
+    expect(syntaxErrors('ALTER TABLE t ADD UNIQUE KEY u_a (a;').map(e => e.code)).toEqual(['SQL_SYNTAX_ERROR']);
+  });
+
   it('still reports a real syntax error in such a statement', () => {
     expect(syntaxErrors('ALTER TABLE t ADD INDEX IF NOT EXISTS i_d (d;').map(e => e.code)).toEqual(['SQL_SYNTAX_ERROR']);
     expect(syntaxErrors('CREATE TABLE t (id INT);', 'ALTER TABLE t DROP INDEX IF EXISTS i_d,, DROP COLUMN IF EXISTS d;').map(e => e.code)).toEqual(['SQL_SYNTAX_ERROR_DOWN']);

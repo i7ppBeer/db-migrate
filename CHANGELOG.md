@@ -50,11 +50,13 @@ changes, no config changes required — but read **Behavior changes** if you scr
   with certainty is sent as one batch with a single attempt. Reproduced and verified
   against MariaDB 11; `docs/LOCK-GUARD.md` corrected (it claimed nothing could be left
   half-applied).
-- **MariaDB validation refused valid re-runnable syntax** as `SQL_SYNTAX_ERROR`:
-  `ADD INDEX IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, `DROP COLUMN IF EXISTS`,
-  `DROP INDEX IF EXISTS`, `MODIFY COLUMN IF EXISTS` (the SQL parser behind the syntax
-  pre-check doesn't know these MariaDB forms). They're accepted now; the rest of each
-  statement is still checked.
+- **MariaDB validation refused valid syntax** as `SQL_SYNTAX_ERROR`, because the SQL
+  parser behind the syntax pre-check doesn't know it: every `ALTER TABLE … ADD [CONSTRAINT
+  name] UNIQUE [INDEX|KEY]`, and the re-runnable forms `ADD INDEX / ADD UNIQUE / ADD
+  PARTITION / CREATE INDEX IF NOT EXISTS`, `DROP COLUMN / DROP INDEX / MODIFY COLUMN IF
+  EXISTS`. They're accepted now; the rest of each statement is still checked.
+  `ADD CONSTRAINT … CHECK (…)` is still refused by the parser — use
+  `-- @skip-syntax-check: true` for such a file.
 
 - **DCL (MariaDB): a new account's password was lost when another account in the same
   file already existed.** The "does it exist" check was one yes/no for the whole file,

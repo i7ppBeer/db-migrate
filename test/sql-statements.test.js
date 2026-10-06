@@ -89,6 +89,39 @@ END`;
     ]);
   });
 
+  it('a name right after "." or "@" is never a keyword (NEW.end, @end)', () => {
+    const trg = 'CREATE TRIGGER t BEFORE INSERT ON r FOR EACH ROW BEGIN SET NEW.end = NOW(); SET NEW.x = 1; END';
+    const proc = 'CREATE PROCEDURE p() BEGIN SET @end = 1; SELECT @end, t.begin, t.case FROM t; END';
+    expect(splitSqlStatements(`${trg};\n${proc};\nSELECT 1`)).toEqual([trg, proc, 'SELECT 1']);
+  });
+
+  it('BEGIN opens a block only where a statement starts — a column named begin does not', () => {
+    const proc = `CREATE PROCEDURE p() BEGIN
+  SELECT begin FROM sched;
+  DECLARE CONTINUE HANDLER FOR SQLEXCEPTION BEGIN SET @e = 1; END;
+  DECLARE EXIT HANDLER FOR NOT FOUND SET @d = 1;
+  lbl: BEGIN SET @x = 1; END lbl;
+END`;
+    expect(splitSqlStatements(`${proc};\nSELECT 2`)).toEqual([proc, 'SELECT 2']);
+  });
+
+  it('labelled top-level blocks', () => {
+    const b = 'lbl: BEGIN NOT ATOMIC DECLARE x INT; SET x = 1; END lbl';
+    const l = 'outer_loop: LOOP SET @i = @i + 1; IF @i > 3 THEN LEAVE outer_loop; END IF; END LOOP outer_loop';
+    expect(splitSqlStatements(`${b};\n${l};\nSELECT 1`)).toEqual([b, l, 'SELECT 1']);
+  });
+
+  it('IF() / REPEAT() functions are not blocks, also after THEN; IF [NOT] EXISTS (SELECT …) THEN in a body is', () => {
+    const proc = `CREATE PROCEDURE p() BEGIN
+  SET @v = CASE WHEN 1 THEN IF(1, 2, 3) ELSE 0 END;
+  SET @s = REPEAT('x', 3);
+  IF EXISTS (SELECT 1 FROM t) THEN SET @a = 1; END IF;
+  IF NOT EXISTS (SELECT 1 FROM t) THEN SET @b = 2; END IF;
+  REPEAT SET @i = @i + 1; UNTIL @i > 3 END REPEAT;
+END`;
+    expect(splitSqlStatements(`${proc};\nSELECT 9`)).toEqual([proc, 'SELECT 9']);
+  });
+
   it('returns null when it cannot be sure', () => {
     expect(splitSqlStatements("SELECT 'unterminated")).toBeNull();
     expect(splitSqlStatements('SELECT 1 /* unterminated')).toBeNull();
