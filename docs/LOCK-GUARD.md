@@ -19,9 +19,13 @@ This is intentionally decoupled from table size — the failure mode above doesn
 Before executing a migration's SQL, the adapter:
 
 1. Runs `SET SESSION lock_wait_timeout = <n>` and `SET SESSION innodb_lock_wait_timeout = <n>` on its connection.
-2. Executes the migration SQL.
-3. If it fails with MariaDB's lock-wait-timeout error (`errno 1205` / `ER_LOCK_WAIT_TIMEOUT`), waits `retryDelayMs` and retries — up to `maxRetries` attempts total.
-4. Any other error, or exhausting all retries, is re-thrown immediately (not retried) — `up()`/`down()` report it the same way they always have, and the migration stays pending (nothing is left half-applied).
+2. Splits the migration into its statements and runs them **one at a time**.
+3. If a statement fails with MariaDB's lock-wait-timeout error (`errno 1205` / `ER_LOCK_WAIT_TIMEOUT`), waits `retryDelayMs` and retries **that statement only** — up to `maxRetries` attempts for it. Statements that already succeeded are not run again.
+4. Any other error, or exhausting the retries, is re-thrown immediately — `up()`/`down()` report it the same way they always have and the migration stays pending (not recorded as applied). In a migration with several statements the error says which one failed, e.g. `Lock wait timeout exceeded … (statement 2 of 3; statement 1 was already applied — MariaDB commits each DDL statement, so it is not rolled back)`.
+
+**A failed multi-statement migration can be partly applied.** MariaDB commits every DDL statement on its own, so the statements before the failing one have taken effect even though the migration is still pending. Check the database and remove or finish those changes before running it again — the error message tells you how far it got. (Before 3.0.1, a retry re-ran the whole migration: a statement that had already succeeded ran a second time, usually failing with something like `Table '…' already exists`, which hid the real cause.)
+
+How statements are split: quotes, backticks, comments, and stored-program bodies (`CREATE PROCEDURE / FUNCTION / TRIGGER / EVENT … BEGIN … END`, `BEGIN NOT ATOMIC`, top-level `IF … END IF`) are understood, so a `;` inside them doesn't split anything. If a migration can't be split with certainty (an unterminated quote, or blocks that don't balance), it's sent to the server as one batch, with a single attempt and no retry, and a warning says so.
 
 This applies to every SQL execution path in `up()`, `upWithSanityCheck()`, and `down()`. It does **not** wrap the small changelog bookkeeping statements (`INSERT`/`DELETE` on the changelog table) — those are single-row and not the risk this guards against.
 
@@ -37,7 +41,7 @@ export default {
   database: 'myapp',
   ddlSafety: {
     lockGuard: {
-      enabled: true,             // false restores the old unguarded behavior
+      enabled: true,             // false restores the old unguarded behavior (whole migration as one batch, no retry)
       lockWaitTimeoutSec: 5,     // MDL wait bound
       innodbLockWaitTimeoutSec: 5, // row-lock wait bound
       maxRetries: 3,
@@ -52,10 +56,10 @@ export default {
 | `enabled` | `true` | Set `false` to skip Lock Guard entirely and call `connection.query()` directly, as before this feature. |
 | `lockWaitTimeoutSec` | `5` | How long a single attempt waits for the metadata lock before giving up. |
 | `innodbLockWaitTimeoutSec` | `5` | How long a single attempt waits for an InnoDB row lock before giving up. |
-| `maxRetries` | `3` | Total attempts before the error is reported and the migration stays pending. |
+| `maxRetries` | `3` | Attempts per statement before the error is reported and the migration stays pending. |
 | `retryDelayMs` | `2000` | Delay between attempts. |
 
-Worst-case wall time before failing loudly ≈ `maxRetries * lockWaitTimeoutSec + (maxRetries - 1) * retryDelayMs` seconds — with the defaults, about 19 seconds, instead of an unbounded wait.
+Worst-case wait for one statement before failing loudly ≈ `maxRetries × lockWaitTimeoutSec + (maxRetries − 1) × retryDelayMs` — with the defaults, about 19 seconds, instead of an unbounded wait. Each statement of a migration gets its own attempts, so one where several statements each wait on a lock and then get through can take that long per statement.
 
 ---
 

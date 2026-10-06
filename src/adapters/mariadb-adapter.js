@@ -7,6 +7,7 @@ import { BaseAdapter, isRepeatableMigrationFile, selectPendingMigrations } from 
 import { SanityChecker, SQLChecks } from '../core/sanity-checker.js';
 import { listMigrationFiles, pickDir, findExisting } from '../core/migration-dirs.js';
 import { addColumnIfMissing } from '../core/sql-columns.js';
+import { splitSqlStatements } from '../core/sql-statements.js';
 import mysql from 'mysql2/promise';
 import fs from 'fs/promises';
 import path from 'path';
@@ -283,15 +284,25 @@ export class MariaDBAdapter extends BaseAdapter {
    * fails fast instead of parking in the queue and dragging everything else
    * down with it.
    *
-   * @param {string} sql - SQL to execute via this.connection.query()
-   * @returns {Promise<*>} - Same return shape as this.connection.query()
+   * The migration runs one statement at a time, and a retry re-runs only the
+   * statement that timed out. MariaDB commits each DDL statement on its own,
+   * so re-running the whole migration would repeat the statements that had
+   * already succeeded — a plain CREATE TABLE then fails with "already exists"
+   * and the migration is left half-applied with a misleading error. When the
+   * script can't be split with certainty (splitSqlStatements() returns null),
+   * it's sent as one batch with a single attempt instead — never retried.
+   *
+   * @param {string} sql - The migration's SQL
+   * @param {{database?: string}} [opts] - database to USE first
+   * @returns {Promise<*>} - this.connection.query()'s result for the last statement
    */
-  async executeWithLockGuard(sql) {
+  async executeWithLockGuard(sql, { database } = {}) {
     const cfg = this.config.ddlSafety?.lockGuard ?? {};
     const enabled = cfg.enabled ?? true;
+    const use = database ? `USE \`${database}\`` : null;
 
     if (!enabled) {
-      return this.connection.query(sql);
+      return this.connection.query(use ? `${use};\n${sql}` : sql);
     }
 
     const requirePositiveInt = (value, name) => {
@@ -311,21 +322,43 @@ export class MariaDBAdapter extends BaseAdapter {
     // a value we've already validated as a positive integer.
     await this.connection.query(`SET SESSION lock_wait_timeout = ${lockWaitTimeoutSec}`);
     await this.connection.query(`SET SESSION innodb_lock_wait_timeout = ${innodbLockWaitTimeoutSec}`);
+    if (use) await this.connection.query(use);
 
-    let attempt = 0;
-    for (;;) {
-      attempt++;
-      try {
-        return await this.connection.query(sql);
-      } catch (error) {
-        const isLockWaitTimeout = error && (error.errno === 1205 || error.code === 'ER_LOCK_WAIT_TIMEOUT');
-        if (!isLockWaitTimeout || attempt >= maxRetries) {
+    const statements = splitSqlStatements(sql);
+    if (statements === null) {
+      console.warn('⚠️  Lock Guard: this migration could not be split into statements with certainty — running it as one batch, without retries');
+      return this.connection.query(sql);
+    }
+
+    let result;
+    for (const [index, statement] of statements.entries()) {
+      let attempt = 0;
+      for (;;) {
+        attempt++;
+        try {
+          result = await this.connection.query(statement);
+          break;
+        } catch (error) {
+          const isLockWaitTimeout = error && (error.errno === 1205 || error.code === 'ER_LOCK_WAIT_TIMEOUT');
+          if (isLockWaitTimeout && attempt < maxRetries) {
+            const where = statements.length > 1 ? ` on statement ${index + 1} of ${statements.length}` : '';
+            console.warn(`⚠️  Lock wait timeout${where} (attempt ${attempt}/${maxRetries}), retrying that statement in ${retryDelayMs}ms...`);
+            await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+            continue;
+          }
+          if (error instanceof Error && statements.length > 1) {
+            // Same error object (errno, code kept) — just say where it happened
+            // and what had already run, since nothing before it is rolled back.
+            const done = index === 0 ? ''
+              : index === 1 ? '; statement 1 was already applied'
+              : `; statements 1–${index} were already applied`;
+            error.message += ` (statement ${index + 1} of ${statements.length}${done}${done ? ' — MariaDB commits each DDL statement, so it is not rolled back' : ''})`;
+          }
           throw error;
         }
-        console.warn(`⚠️  Lock wait timeout (attempt ${attempt}/${maxRetries}), retrying in ${retryDelayMs}ms...`);
-        await new Promise(resolve => setTimeout(resolve, retryDelayMs));
       }
     }
+    return result;
   }
 
   async connect() {
@@ -931,10 +964,8 @@ export class MariaDBAdapter extends BaseAdapter {
             // Prepend USE <db> directly into the SQL so the correct database
             // context is guaranteed within the same multi-statement execution.
             // This means migration files don't need to include "USE <db>" themselves.
-            const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
-
-            // Use query() for multi-statement support, guarded against MDL queue jams
-            await this.executeWithLockGuard(wrappedUpSQL);
+            // Run in the configured database, guarded against MDL queue jams
+            await this.executeWithLockGuard(upSQL, { database: dbName });
           }
 
           // Record in changelog — an Up section with no statements is a
@@ -1029,8 +1060,7 @@ export class MariaDBAdapter extends BaseAdapter {
               up: async () => {
                 if (upSQL) {
                   const dbName = (this.config.mariadb || this.config).database;
-                  const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
-                  await this.executeWithLockGuard(wrappedUpSQL);
+                  await this.executeWithLockGuard(upSQL, { database: dbName });
                 }
                 const id = file.replace('.sql', '');
                 await this.connection.execute(
@@ -1041,8 +1071,7 @@ export class MariaDBAdapter extends BaseAdapter {
               down: async () => {
                 if (downSQL) {
                   const dbName = (this.config.mariadb || this.config).database;
-                  const wrappedDownSQL = dbName ? `USE \`${dbName}\`;\n${downSQL}` : downSQL;
-                  await this.executeWithLockGuard(wrappedDownSQL);
+                  await this.executeWithLockGuard(downSQL, { database: dbName });
                   const id = file.replace('.sql', '');
                   await this.connection.execute(
                     `DELETE FROM ${this.changelogTable} WHERE id = ?`,
@@ -1079,8 +1108,7 @@ export class MariaDBAdapter extends BaseAdapter {
               const startTime = Date.now();
               if (upSQL) {
                 const dbName = (this.config.mariadb || this.config).database;
-                const wrappedUpSQL = dbName ? `USE \`${dbName}\`;\n${upSQL}` : upSQL;
-                await this.executeWithLockGuard(wrappedUpSQL);
+                await this.executeWithLockGuard(upSQL, { database: dbName });
               }
               const id = file.replace('.sql', '');
               await this.connection.execute(
@@ -1422,12 +1450,8 @@ export class MariaDBAdapter extends BaseAdapter {
               // Prepend USE <db> so the correct database context is set
               // within the same multi-statement execution.
               const dbConfigDown = this.config.mariadb || this.config;
-              const wrappedDownSQL = dbConfigDown.database
-                ? `USE \`${dbConfigDown.database}\`;\n${downSQL}`
-                : downSQL;
-
-              // Use query() for multi-statement support, guarded against MDL queue jams
-              await this.executeWithLockGuard(wrappedDownSQL);
+              // Run in the configured database, guarded against MDL queue jams
+              await this.executeWithLockGuard(downSQL, { database: dbConfigDown.database });
             } catch (downError) {
               // DOWN SQL failed — restore the changelog entry so state stays consistent
               try {

@@ -212,6 +212,55 @@ describe.skipIf(!dbAvailable)('MariaDB lock guard — real-server e2e', () => {
     }
   }, 15000);
 
+  it('Scenario 5a — lock wait exhausted on statement 2 of 2: error says statement 1 was already applied', async () => {
+    const holder = await mysql.createConnection({ host: HOST, port: PORT, user: ROOT_USER, password: ROOT_PASSWORD, database: TEST_DB });
+    await holder.query('START TRANSACTION');
+    await holder.query("DELETE FROM lock_guard_demo WHERE status = 'active'");
+    try {
+      adapter.config.ddlSafety = withLockGuard({ lockWaitTimeoutSec: 1, innodbLockWaitTimeoutSec: 1, maxRetries: 2, retryDelayMs: 200 });
+      const result = await adapter.up({ only: '20260101000003' });
+
+      expect(result.applied).toEqual([]);
+      expect(result.errors).toHaveLength(1);
+      // the lock timeout itself is what's reported — not a confusing
+      // "table already exists" from re-running statement 1
+      expect(result.errors[0]).toMatch(/lock wait timeout/i);
+      expect(result.errors[0]).toMatch(/statement 2 of 2/);
+      expect(result.errors[0]).toMatch(/statement 1 .*already applied/i);
+
+      const [[side]] = await rootConn.query(`SELECT COUNT(*) AS n FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'lock_guard_side'`, [TEST_DB]);
+      expect(side.n).toBe(1); // honest: statement 1 did run
+      const status = await adapter.status();
+      expect(status.pending).toContain('20260101000003-two-statements.sql');
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {});
+      await holder.end();
+      await rootConn.query(`DROP TABLE IF EXISTS \`${TEST_DB}\`.lock_guard_side`);
+    }
+  }, 20000);
+
+  it('Scenario 5b — retry recovers by re-running only the statement that timed out, not the ones before it', async () => {
+    const holder = await mysql.createConnection({ host: HOST, port: PORT, user: ROOT_USER, password: ROOT_PASSWORD, database: TEST_DB });
+    await holder.query('START TRANSACTION');
+    await holder.query("DELETE FROM lock_guard_demo WHERE status = 'active'");
+    const releaseAt = setTimeout(() => { holder.query('COMMIT').catch(() => {}); }, 1500);
+    try {
+      adapter.config.ddlSafety = withLockGuard({ lockWaitTimeoutSec: 1, innodbLockWaitTimeoutSec: 1, maxRetries: 4, retryDelayMs: 300 });
+      const result = await adapter.up({ only: '20260101000003' });
+
+      // Re-running the whole migration made statement 1 fail with
+      // "Table 'lock_guard_side' already exists" and left it half-applied.
+      expect(result.errors).toEqual([]);
+      expect(result.applied).toEqual(['20260101000003-two-statements.sql']);
+      const [cols] = await rootConn.query(`SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'lock_guard_demo' AND COLUMN_NAME = 'retried_col'`, [TEST_DB]);
+      expect(cols).toHaveLength(1);
+    } finally {
+      clearTimeout(releaseAt);
+      await holder.query('COMMIT').catch(() => {});
+      await holder.end();
+    }
+  }, 20000);
+
   it('Scenario 4 — runtime gate R2 sees the open transaction and the queued ALTER, and the tool itself does not get stuck', async () => {
     // The incident again: an open DELETE transaction, and someone else's ALTER
     // already queued behind it on the metadata lock.

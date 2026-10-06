@@ -33,8 +33,23 @@ changes, no config changes required — but read **Behavior changes** if you scr
   `collect.sh` for your own mail delivery. See [k8s/dynamic/README.md](k8s/dynamic/README.md).
 - **`baseline --up-to` / `--file` no longer match a substring** from the middle of a
   file name.
+- **Lock Guard retries only the statement that hit the lock timeout.** It used to
+  re-run the whole migration, repeating statements that had already succeeded.
 
 ### Fixed
+
+- **MariaDB Lock Guard re-ran the whole migration on a lock-wait retry.** MariaDB
+  commits each DDL statement, so in a migration like `CREATE TABLE a …; ALTER TABLE b …`
+  where the `ALTER` waited out the lock, the retry ran `CREATE TABLE a` again, failed
+  with `Table 'a' already exists`, and left the migration half-applied behind an error
+  that hid the real cause. Migrations now run one statement at a time and a retry
+  repeats only the statement that timed out; an error in a multi-statement migration
+  says which statement failed and that the ones before it were applied (they are not
+  rolled back). Statements are split with an SQL-aware splitter (quotes, comments,
+  `BEGIN … END` bodies of procedures / functions / triggers / events); SQL it can't split
+  with certainty is sent as one batch with a single attempt. Reproduced and verified
+  against MariaDB 11; `docs/LOCK-GUARD.md` corrected (it claimed nothing could be left
+  half-applied).
 
 - **DCL (MariaDB): a new account's password was lost when another account in the same
   file already existed.** The "does it exist" check was one yes/no for the whole file,
@@ -94,6 +109,9 @@ changes, no config changes required — but read **Behavior changes** if you scr
   condition (before: only while it had active Pods), so a Job whose Pod hasn't started
   yet now blocks too. A Job suspended for over `SUSPENDED_STALE_SECONDS` (600) that
   never started is ignored with a warning.
+- **MariaDB migration errors** from a migration with several statements end with
+  `(statement N of M; …)`. The MariaDB error code and the start of the message are
+  unchanged.
 - **DCL email** may now show `PASSWORD CHANGED` where 3.0.0 showed `NEW`/`NO CHANGE`
   (the cases under Fixed), and a MongoDB account whose password can't be matched shows
   no password.
