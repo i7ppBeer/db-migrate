@@ -379,7 +379,7 @@ jobs:
             -e "s/{{ project }}/${PROJECT}/g" \
             -e "s/{{ namespace }}/${NAMESPACE}/g" \
             -e "s/{{ contentHash }}/${CONTENT_HASH:0:7}/g" \
-            -e "s|your-registry/db-migrate:3.0.0|${REGISTRY}/${IMAGE_NAME}:${{ needs.build.outputs.image_tag }}|g" \
+            -e "s|your-registry/db-migrate:3.0.1|${REGISTRY}/${IMAGE_NAME}:${{ needs.build.outputs.image_tag }}|g" \
             k8s/job.yaml \
             | sed "s|mariadb\.${NAMESPACE}\.svc\.cluster\.local|${MARIADB_HOST_OVERRIDE:-mariadb.${NAMESPACE}.svc.cluster.local}|g" \
             | kubectl apply -f -
@@ -452,7 +452,7 @@ jobs:
             -e "s/{{ project }}/${PROJECT}/g" \
             -e "s/{{ namespace }}/${NAMESPACE}/g" \
             -e "s/{{ contentHash }}/${CONTENT_HASH:0:7}/g" \
-            -e "s|your-registry/db-migrate:3.0.0|${REGISTRY}/${IMAGE_NAME}:${{ needs.build.outputs.image_tag }}|g" \
+            -e "s|your-registry/db-migrate:3.0.1|${REGISTRY}/${IMAGE_NAME}:${{ needs.build.outputs.image_tag }}|g" \
             k8s/job.yaml \
             | sed "s|mariadb\.${NAMESPACE}\.svc\.cluster\.local|${MARIADB_HOST_OVERRIDE:-mariadb.${NAMESPACE}.svc.cluster.local}|g" \
             | kubectl apply -f -
