@@ -1745,6 +1745,17 @@ export class MariaDBAdapter extends BaseAdapter {
         return `${prefix}(${quotedCols})`;
       });
 
+    // MariaDB's IF [NOT] EXISTS on index / column clauses is valid but unknown
+    // to node-sql-parser (it does know CREATE/DROP TABLE … and ADD COLUMN IF NOT
+    // EXISTS). Drop just those words for the parse, so re-runnable migrations
+    // aren't refused while the rest of the statement is still checked. The
+    // SQL that's executed is unchanged.
+    const stripMariaDBIfExists = (sql) => sql
+      .replace(/\b(ADD\s+(?:UNIQUE\s+|FULLTEXT\s+|SPATIAL\s+)?(?:INDEX|KEY))\s+IF\s+NOT\s+EXISTS\b/gi, '$1')
+      .replace(/\b(CREATE\s+(?:OR\s+REPLACE\s+)?(?:UNIQUE\s+|FULLTEXT\s+|SPATIAL\s+)?INDEX)\s+IF\s+NOT\s+EXISTS\b/gi, '$1')
+      .replace(/\b(DROP\s+(?:COLUMN|INDEX|KEY|CONSTRAINT|PARTITION|FOREIGN\s+KEY))\s+IF\s+EXISTS\b/gi, '$1')
+      .replace(/\b((?:MODIFY|CHANGE)(?:\s+COLUMN)?)\s+IF\s+EXISTS\b/gi, '$1');
+
     const checkSQL = (sql, label, code) => {
       const clean = cleanUnicode(sql);
       if (!clean) return;
@@ -1763,7 +1774,7 @@ export class MariaDBAdapter extends BaseAdapter {
         });
         return;
       }
-      const normalized = quoteReservedInInsertColumnList(quoteReservedIdentifiers(clean));
+      const normalized = stripMariaDBIfExists(quoteReservedInInsertColumnList(quoteReservedIdentifiers(clean)));
       try {
         const parser = new SQLParser();
         parser.astify(normalized, { database: 'MariaDB' });

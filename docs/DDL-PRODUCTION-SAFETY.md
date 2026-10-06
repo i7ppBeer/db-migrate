@@ -45,7 +45,7 @@ Migration files get deleted or renamed, or changelog data gets manually edited, 
 
 This isn't a bug unique to this tool — it's **a limitation shared by all DDL migration tools**: MariaDB DDL statements trigger an implicit commit, so even if you wrap the SQL execution and the changelog write in the same transaction, the DDL itself still commits immediately, and the two steps can never truly be made atomic.
 
-**Mitigation**: write UP blocks to be idempotent wherever possible (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, or check `information_schema` first before deciding whether to run), so a re-run won't error out.
+**Mitigation**: write UP blocks to be idempotent wherever possible (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, or check `information_schema` first before deciding whether to run), so a re-run won't error out. The same applies to a migration that *failed* partway — see [§7.4](#74-a-migration-failed-partway-recovering).
 
 ---
 
@@ -151,12 +151,14 @@ When `up --sanity-check` runs, if the migration file has a `PostCheck` defined, 
 - Rollback succeeds → reports the failure reason; the database returns to its pre-execution state.
 - **Rollback also fails** → marked as `critical`; the tool explicitly prints that "manual intervention is required." In this case, **do not** rerun any command against the same connection — manually confirm the database's actual state first.
 
-- A migration that **fails partway** (no sanity check involved) is not undone by either database — MariaDB commits each DDL statement immediately, and MongoDB migrations aren't transactional. It's not recorded as applied, and both the console and the failure notification email now say so explicitly. Check what it already did before running again.
+- A migration that **fails partway** (no sanity check involved) is not undone by either database — MariaDB commits each DDL statement immediately, and MongoDB migrations aren't transactional. It's not recorded as applied, and both the console and the failure notification email now say so explicitly. Check what it already did before running again — [§7.4](#74-a-migration-failed-partway-recovering).
 - When the stop was refused *before* execution (validation, checksum, changelog consistency, missing database), nothing ran — the email says "nothing was applied" and has no partial-apply warning.
 
 ### Rolling back with `down`
 
 `down` prints exactly which migrations it will roll back (most recent first) and asks you to type `yes`; in a pipeline (no terminal) it refuses unless `--yes` is passed. Use `down --dry-run` (with `-n` or `--target`) to see the plan without touching anything. It also refuses if any file in the plan was edited after being applied — the Down section that would run isn't the one that was applied with — unless `--allow-checksum-drift`.
+
+`down` only rolls back migrations recorded as applied. Right after a failure, `down -n 1` therefore rolls back the most recent **successful** migration, not the one that failed — see [§7.4](#74-a-migration-failed-partway-recovering).
 
 ### 7.2 Manually aborting a stuck migration
 
@@ -177,6 +179,103 @@ If a different application's long transaction is blocking the migration (the exa
 
 - Find the source of that transaction (`trx_query`, `host`), and evaluate whether that team can commit/rollback it rather than killing someone else's transaction directly — unless you've already confirmed it's a batch job that's safe to interrupt.
 - Batch jobs (large DELETE/UPDATE) should commit in batches and set a reasonable `innodb_lock_wait_timeout` themselves — that's the responsibility of the application team, not something db-migrate controls, but it's worth raising with that team after an incident like this.
+
+### 7.4 A migration failed partway: recovering
+
+The short version: **don't run `down`. Find out how far it got, remove the cause, and re-run a migration that is safe to re-run.**
+
+#### What is and isn't all-or-nothing
+
+Checked against real servers (MariaDB 11.8 with InnoDB, MongoDB 7, 200,000 rows / documents, failure forced at row 150,000):
+
+| Unit | MariaDB (InnoDB) | MongoDB |
+|---|---|---|
+| **One DDL statement / command** | All or nothing. One `ALTER TABLE … ADD COLUMN extra INT, ADD UNIQUE INDEX uq_d (d)` hitting a duplicate left neither the column nor the index. | All or nothing. One `createIndexes` building two indexes, the second hitting a duplicate, left neither. An index build stopped by `ddlSafety.operationTimeoutMs` was dropped by the server. |
+| **One DML statement / operation** | All or nothing. An `UPDATE` over 200,000 rows that failed at row 150,000 changed **0** rows. | **Not.** An `updateMany` that failed at document 150,000 left **149,999** documents changed. The same applies to `deleteMany`, `insertMany` and `bulkWrite`, whatever stops them: bad data, a lost connection, a primary step-down, or `operationTimeoutMs` (a 300 ms limit stopped an 11 s `updateMany` after 24,179 of 1,000,000 documents). |
+| **A migration with several statements / operations** | **Not.** Each statement commits on its own, so the ones before the failure stay applied. | **Not.** Operations before the failing one stay applied. |
+
+- MariaDB's DDL stays all-or-nothing even if the server crashes or the statement is killed only from 10.6, and only for InnoDB. That case wasn't tested here.
+- In MongoDB, many "schema changes" are really data changes: back-filling a new field (`updateMany … $set`) or renaming one (`$rename`) can stop halfway. Real schema operations are single commands and are all-or-nothing: `createCollection`, `createIndex`, `dropIndex`, `collMod`, `renameCollection`.
+- In a multi-statement MariaDB migration, the error says how far it got, e.g. `… (statement 3 of 3; statements 1–2 were already applied — …)`. A MongoDB error doesn't, because the migration is JavaScript: check the data.
+
+#### Why not `down`
+
+- **The tool never runs Down for a failed migration.** It stops, reports the error, and doesn't record the migration as applied. The only automatic Down is §7.1's: with `--sanity-check`, when Up **completed** but its PostCheck failed.
+- **Down is written for a fully applied Up.** On a partly applied one it usually fails on the first object that was never created (`DROP COLUMN` of a column that isn't there), leaving things messier.
+- **`down -n 1` right after a failure rolls back the wrong migration.** The failed one isn't recorded as applied, so `down` takes the most recent *successful* migration.
+
+#### Recovering
+
+1. **Read the error.** Which statement failed, what was already applied, and why.
+2. **Remove the cause:** duplicate data, a long transaction holding the table (§7.3), a syntax error, a missing privilege. Otherwise the re-run fails at the same place. (A lock-wait timeout that clears within the retry window was already retried for that statement by Lock Guard.)
+3. **A single-statement migration failed** → it's all-or-nothing, so nothing changed. Re-run it as is.
+4. **A multi-statement migration stopped partway.** First decide whether the file was **already applied successfully in another environment** (e.g. it passed in staging and failed in production):
+   - **Not applied anywhere** → make Up safe to re-run, update Down to match, add a PreCheck and a PostCheck (below), and re-run. Editing it is fine: the checksum gate only covers applied migrations.
+   - **Applied somewhere else** → **don't edit the file.** Its checksum changes, and the next run in that environment refuses because an applied file was edited (unless `--allow-checksum-drift`). Instead, in the failed environment either:
+     - finish the remaining statements by hand, check the result, and mark the migration applied with `baseline --file <file>`; or
+     - undo the statements that were applied, then re-run the unchanged file.
+5. **Check.** `status` shows it applied, and the PostCheck passed (run with `--sanity-check`).
+
+#### Writing Up so it can be re-run
+
+**MariaDB:**
+
+```sql
+-- +sanity PreCheck
+-- preconditions, not "not applied yet": a re-run must pass this too.
+-- If note_count already exists it must already be what this migration adds —
+-- otherwise stop before anything runs (IF NOT EXISTS below would skip it silently)
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders'
+-- EXPECT_NO_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'note_count' AND COLUMN_TYPE <> 'int(11)'
+-- END_CHECK
+
+-- +migrate Up
+CREATE TABLE IF NOT EXISTS order_notes (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  order_id BIGINT NOT NULL,
+  note TEXT
+);
+-- several changes to one table: one ALTER, so they're all-or-nothing together
+ALTER TABLE orders
+  ADD COLUMN IF NOT EXISTS note_count INT NOT NULL DEFAULT 0,
+  ADD INDEX IF NOT EXISTS idx_orders_note_count (note_count);
+
+-- +sanity PostCheck
+-- check the end state
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'note_count' AND COLUMN_TYPE = 'int(11)'
+-- EXPECT_ROWS: SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders' AND INDEX_NAME = 'idx_orders_note_count'
+-- END_CHECK
+
+-- +migrate Down
+ALTER TABLE orders DROP INDEX IF EXISTS idx_orders_note_count, DROP COLUMN IF EXISTS note_count;
+DROP TABLE IF EXISTS order_notes;
+```
+
+**MongoDB** (data changes must *resume*, not *redo*):
+
+```javascript
+export async function up(db) {
+  // createIndex with the same keys and options is a no-op when the index exists
+  await db.collection('orders').createIndex({ customerId: 1 }, { name: 'idx_customer' });
+  // only documents not done yet — a re-run picks up where the last one stopped
+  await db.collection('orders').updateMany(
+    { noteCount: { $exists: false } },
+    { $set: { noteCount: 0 } }
+  );
+}
+```
+
+Avoid updates that change the result when repeated, such as `$inc`, `$push` or `insertMany` of fixed documents. If one is unavoidable, record which documents were already processed (a marker field) and filter on it.
+
+#### Things to watch
+
+- **`IF NOT EXISTS` skips silently.** It's right for objects this migration created on the failed run: their definition is exactly what's in the file. But an object with the same name created some other way, with a different definition, is skipped too, and nothing is reported. Catch that in the **PreCheck**, before anything runs ("if it exists, it must already be right", as above). Leaving it to the PostCheck is too late: a failed PostCheck triggers the automatic rollback, and a Down written with `IF EXISTS` then drops that pre-existing object too — tested: a `VARCHAR` column `note_count` that existed before the migration was dropped by the rollback. Sanity checks run only with `--sanity-check` (in `k8s/dynamic/`, put it in `ddl.args`).
+- **A PreCheck that asserts "not applied yet"** (e.g. `EXPECT_NO_ROWS` on the new column) fails the re-run once a partial run added that column. Check preconditions instead (the table exists; anything already there has the right definition).
+- **MySQL 8 has `IF [NOT] EXISTS` only on `CREATE TABLE` / `DROP TABLE`** — not on `ADD COLUMN`, `ADD INDEX`, `CREATE INDEX`, `DROP COLUMN` or `DROP INDEX` (all rejected by MySQL 8.4, all accepted by MariaDB). On MySQL, keep each migration to one statement (all-or-nothing, so a failure leaves nothing to clean up), or put same-table changes in one `ALTER`.
+- **Keep Down in step with Up.** Use `IF EXISTS` (`DROP COLUMN IF EXISTS`, `DROP INDEX IF EXISTS`, `DROP TABLE IF EXISTS`), so rolling back after a partial run works too.
+- **Don't add an automatic re-run.** Transient lock waits are already retried per statement by Lock Guard. Other failures (duplicate data, syntax, privileges) fail the same way every time, and re-running a MongoDB data change that keeps failing only adds to what it left behind. Re-run once someone has looked at the cause.
+
+Writing every migration this way from the start (re-runnable, same-table changes in one `ALTER`, a PreCheck on preconditions and a PostCheck on the end state) means a failure needs no file edit: remove the cause and re-run.
 
 ---
 

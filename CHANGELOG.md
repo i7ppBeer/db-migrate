@@ -50,6 +50,11 @@ changes, no config changes required — but read **Behavior changes** if you scr
   with certainty is sent as one batch with a single attempt. Reproduced and verified
   against MariaDB 11; `docs/LOCK-GUARD.md` corrected (it claimed nothing could be left
   half-applied).
+- **MariaDB validation refused valid re-runnable syntax** as `SQL_SYNTAX_ERROR`:
+  `ADD INDEX IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, `DROP COLUMN IF EXISTS`,
+  `DROP INDEX IF EXISTS`, `MODIFY COLUMN IF EXISTS` (the SQL parser behind the syntax
+  pre-check doesn't know these MariaDB forms). They're accepted now; the rest of each
+  statement is still checked.
 
 - **DCL (MariaDB): a new account's password was lost when another account in the same
   file already existed.** The "does it exist" check was one yes/no for the whole file,
@@ -82,6 +87,11 @@ changes, no config changes required — but read **Behavior changes** if you scr
 
 ### New
 
+- **Recovering from a failed migration**: `docs/DDL-PRODUCTION-SAFETY.md` §7.4 — what is
+  and isn't all-or-nothing on MariaDB and MongoDB (measured on real servers), why not
+  `down` (`down -n 1` after a failure rolls back the previous, successful migration), and
+  how to write migrations that can simply be re-run, with PreCheck / PostCheck examples
+  tested on MariaDB 11 and MongoDB 7.
 - **MariaDB `ssl` option** (adapter and the Docker entrypoint's wait-for-database
   check): `ssl: true` (verify against Node's default CAs), `ssl: { caFile, certFile,
   keyFile }` (files read for you), or any mysql2 `ssl` object. See

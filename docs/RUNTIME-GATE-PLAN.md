@@ -304,7 +304,11 @@ on a large collection can take minutes. It bounds single operations, not the who
 migration — many fast operations never trip it. Verified against a real MongoDB 7: a
 migration whose query takes ~10 s server-side stopped after 2.5 s with a 2000 ms limit,
 and ran its full 10.9 s without one. As with any failed MongoDB migration, operations
-before the one that timed out are not undone.
+before the one that timed out are not undone — and the operation that timed out may
+itself be partly done: stopping a 1,000,000-document `updateMany` at 300 ms left
+24,179 documents changed (an index build, by contrast, was dropped cleanly). Write data
+changes so a re-run resumes rather than redoes — see
+[DDL-PRODUCTION-SAFETY.md §7.4](./DDL-PRODUCTION-SAFETY.md#74-a-migration-failed-partway-recovering).
 
 ---
 
