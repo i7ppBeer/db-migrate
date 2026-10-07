@@ -338,13 +338,27 @@ export class RepeatableRunner {
    * Each username is paired with its positionally-matching password:
    *   usernames[0] → passwords[0], usernames[1] → passwords[1], …
    *
+   * Each account is classified on its own: an ALTER USER (reset) is always
+   * `password_changed`; a CREATE that replaces an account (CREATE OR REPLACE,
+   * or DROP + CREATE) is `password_changed` if it already existed; any other
+   * CREATE is `no_change` when the account already existed before the file
+   * ran (IF NOT EXISTS left its password alone), `new` when it didn't.
+   *
+   * With `requireAligned`, the accounts must line up one-to-one with the
+   * passwords (the MongoDB paths, where the names come from the migration's
+   * return value or a regex): when they don't, no password is paired at all —
+   * each account is reported with `passwordUnmatched` instead of possibly
+   * someone else's password.
+   *
    * @param {string}          originalContent  - Raw (un-resolved) SQL or JS
    * @param {string|string[]} passwords        - Generated password(s) in occurrence order
-   * @param {boolean}         alreadyExists    - True when account already existed
+   * @param {boolean|Set<string>} existing     - Which accounts already existed: a Set of
+   *                                             names / 'name@host' keys (see accountKey()),
+   *                                             or a boolean for every account in the file
    * @param {string[]}        [explicitNames]  - Usernames from up() return value (overrides regex)
+   * @param {{requireAligned?: boolean}} [opts]
    */
-  recordCredentialEvents(originalContent, passwords, alreadyExists = false, explicitNames = null) {
-    const PLACEHOLDER = 'CHANGE_ME_ON_FIRST_LOGIN';
+  recordCredentialEvents(originalContent, passwords, existing = false, explicitNames = null, { requireAligned = false } = {}) {
     const pwArray = Array.isArray(passwords) ? passwords : [passwords];
     let usernames = [];
 
@@ -365,62 +379,130 @@ export class RepeatableRunner {
           if (m) usernames.push(m[1]);
         }
       } else {
-        // SQL: strip comments, collapse whitespace, then split by ';' into statements.
-        // This handles multi-line CREATE USER … IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'
-        // which is the format used by all official templates.
-        const collapsed = this.stripCommentsAndCollapse(originalContent);
-        for (const stmt of collapsed.split(';')) {
-          const isCreate = /\bCREATE\s+USER\b/i.test(stmt);
-          const isAlter  = /\bALTER\s+USER\b/i.test(stmt);
-          if (!isCreate && !isAlter) continue;
-          if (!stmt.includes(PLACEHOLDER)) continue;
-          // SQL pattern: 'username'@'host'  or  `username`@host
-          const m = stmt.match(/['"`]([^'"`@\s]+)['"`]\s*@\s*['"`]?([^'"`\s;]+)['"`]?/);
-          if (m) {
-            usernames.push({
-              name: m[1],
-              host: m[2],
-              isReset: isAlter && !isCreate,
-              // Only a bare PASSWORD EXPIRE forces a change on first login;
-              // EXPIRE NEVER / DEFAULT / INTERVAL n DAY don't.
-              expiresOnFirstLogin: /\bPASSWORD\s+EXPIRE\b(?!\s+(?:NEVER|DEFAULT|INTERVAL)\b)/i.test(stmt)
-            });
-          }
-        }
+        usernames = this.parsePlaceholderAccountsSQL(originalContent);
       }
     }
 
-    // Normalise to { name, host?, expiresOnFirstLogin? }; detect if all entries are resets
-    const isResetPwd = usernames.length > 0 && usernames.every(u => u?.isReset);
     const accounts = usernames.map(u => (typeof u === 'string' ? { name: u } : u));
-    const usernameList = accounts.map(a => a.name);
-
-    if (usernameList.length === 0) return;
+    if (accounts.length === 0) return;
+    const aligned = !requireAligned || accounts.length === pwArray.length;
+    if (!aligned) {
+      console.log(`  ⚠️  [DCL] ${accounts.length} account(s) but ${pwArray.length} generated password(s) — can't tell which password belongs to which account, so none is reported. Return allUsernames from up(), listing every CHANGE_ME_ON_FIRST_LOGIN account in file order.`);
+    }
 
     // host is only known for SQL (MariaDB 'user'@'host'); left off otherwise
     const identity = (a) => (a.host ? { username: a.name, host: a.host } : { username: a.name });
+    const existed = (a) => existing === true ||
+      (existing instanceof Set && existing.has(RepeatableRunner.accountKey(a.name, a.host)));
 
-    // CREATE USER: skip if account already existed (password was NOT changed by IF NOT EXISTS)
-    // ALTER USER (reset_pwd): always record — ALTER USER unconditionally changes the password
-    if (alreadyExists && !isResetPwd) {
-      for (const a of accounts) this.credentialEvents.push({ type: 'no_change', ...identity(a) });
-      console.log(`  ⚠️  [DCL] Account already existed — password NOT changed: ${usernameList.join(', ')}`);
-      return;
-    }
-
-    // Pair usernames[i] → pwArray[i]; fall back to last password if arrays diverge
-    const type = isResetPwd ? 'password_changed' : 'new';
+    const created = [], unchanged = [], rotated = [];
     accounts.forEach((a, i) => {
-      const event = { type, ...identity(a), password: pwArray[i] ?? pwArray[pwArray.length - 1] };
-      if (a.expiresOnFirstLogin) event.expiry = { onFirstLogin: true };
+      if (!a.name) {
+        // A placeholder whose account couldn't be identified: the password was
+        // still set somewhere, so hand it out rather than lose it
+        this.credentialEvents.push({ type: 'new', username: `(unrecognized account, statement ${a.statement + 1})`, password: pwArray[i] });
+        console.log(`  ⚠️  [DCL] CHANGE_ME_ON_FIRST_LOGIN in statement ${a.statement + 1} doesn't belong to a recognizable CREATE USER / ALTER USER account — its password is in the email, unlabeled`);
+        return;
+      }
+      const wasThere = existed(a);
+      // CREATE USER IF NOT EXISTS on an account that already existed leaves
+      // its password alone, so there is nothing to hand out
+      if (!a.isReset && !a.replaces && wasThere) {
+        this.credentialEvents.push({ type: 'no_change', ...identity(a) });
+        unchanged.push(a.name);
+        return;
+      }
+      const changed = a.isReset || (a.replaces && wasThere);
+      const event = { type: changed ? 'password_changed' : 'new', ...identity(a) };
+      if (aligned) {
+        // Pair accounts[i] → pwArray[i]; fall back to last password if arrays diverge
+        event.password = pwArray[i] ?? pwArray[pwArray.length - 1];
+        if (a.expiresOnFirstLogin) event.expiry = { onFirstLogin: true };
+      } else {
+        event.password = null;
+        event.passwordUnmatched = true;
+      }
       this.credentialEvents.push(event);
+      (changed ? rotated : created).push(a.name);
     });
-    if (isResetPwd) {
-      console.log(`  🔄 [DCL] Password rotated for: ${usernameList.join(', ')} (included in the run's notification email, not logged here)`);
-    } else {
-      console.log(`  🆕 [DCL] New account created: ${usernameList.join(', ')} (included in the run's notification email, not logged here)`);
-    }
+
+    if (unchanged.length) console.log(`  ⚠️  [DCL] Account already existed — password NOT changed: ${unchanged.join(', ')}`);
+    if (rotated.length) console.log(`  🔄 [DCL] Password rotated for: ${rotated.join(', ')} (included in the run's notification email, not logged here)`);
+    if (created.length) console.log(`  🆕 [DCL] New account created: ${created.join(', ')} (included in the run's notification email, not logged here)`);
   }
+
+  /**
+   * Key identifying one account in an "already existed" Set: 'name@host'
+   * (host lower-cased — MariaDB host names are case-insensitive) when the
+   * host is known, else the bare name (MongoDB).
+   */
+  static accountKey(name, host) {
+    return host ? `${name}@${String(host).toLowerCase()}` : name;
+  }
+
+  /**
+   * One entry per CHANGE_ME_ON_FIRST_LOGIN occurrence (outside comments), in
+   * file order — exactly the order resolvePlaceholderPasswords() generates
+   * the passwords in, so entry i always pairs with password i.
+   *
+   * Each placeholder belongs to the nearest account named before it in its
+   * statement, so several accounts in one statement work:
+   *   CREATE USER 'a'@'%' IDENTIFIED BY 'CHANGE_ME…', 'b'@'%' IDENTIFIED BY 'CHANGE_ME…';
+   * An account without @host is MariaDB's default host '%'.
+   *
+   *   isReset   ALTER USER / SET PASSWORD — always sets a new password
+   *   replaces  CREATE OR REPLACE USER, or CREATE USER after a DROP USER of the
+   *             same account earlier in the file — sets the password even when
+   *             the account already existed
+   *
+   * A placeholder whose account can't be identified (another statement type,
+   * unquoted user name) still gets an entry, with name null, so the pairing of
+   * every later placeholder stays right.
+   *
+   * @param {string} originalContent - Raw (un-resolved) SQL
+   * @returns {Array<{name: ?string, host?: string, isReset?: boolean, replaces?: boolean,
+   *                  expiresOnFirstLogin?: boolean, statement: number}>}
+   */
+  parsePlaceholderAccountsSQL(originalContent) {
+    const PLACEHOLDER = 'CHANGE_ME_ON_FIRST_LOGIN';
+    // An account spec: 'user' optionally @'host' / @host, right after USER
+    // [IF [NOT] EXISTS], FOR (SET PASSWORD FOR) or a comma (next account)
+    const SPEC = /(?:\bUSER(?:\s+IF\s+(?:NOT\s+)?EXISTS)?|\bFOR|,)\s*(['"`])([^'"`]+)\1(?:\s*@\s*(?:(['"`])([^'"`]*)\3|([^\s,;'"`=]+)))?/gi;
+    const specs = (text) => [...text.matchAll(SPEC)].map(m => ({ name: m[2], host: m[4] ?? m[5] ?? '%' }));
+    const key = (a) => RepeatableRunner.accountKey(a.name, a.host);
+
+    const accounts = [];
+    const dropped = new Set();
+    this.stripCommentsAndCollapse(originalContent).split(';').forEach((stmt, statement) => {
+      const head = stmt.trimStart();
+      if (/^DROP\s+USER\b/i.test(head)) {
+        for (const a of specs(stmt)) dropped.add(key(a));
+        return;
+      }
+      const create = /^CREATE\s+(OR\s+REPLACE\s+)?USER\b/i.exec(head);
+      const reset = /^(?:ALTER\s+USER|SET\s+PASSWORD)\b/i.test(head);
+      // Only a bare PASSWORD EXPIRE forces a change on first login;
+      // EXPIRE NEVER / DEFAULT / INTERVAL n DAY don't.
+      const expiresOnFirstLogin = /\bPASSWORD\s+EXPIRE\b(?!\s+(?:NEVER|DEFAULT|INTERVAL)\b)/i.test(stmt);
+
+      for (let i = stmt.indexOf(PLACEHOLDER); i !== -1; i = stmt.indexOf(PLACEHOLDER, i + PLACEHOLDER.length)) {
+        const owner = (create || reset) ? specs(stmt.slice(0, i)).pop() : undefined;
+        if (!owner) {
+          accounts.push({ name: null, statement });
+          continue;
+        }
+        accounts.push({
+          ...owner,
+          isReset: reset,
+          replaces: Boolean(create) && (Boolean(create[1]) || dropped.has(key(owner))),
+          expiresOnFirstLogin,
+          statement
+        });
+      }
+    });
+    return accounts;
+  }
+
 
   /**
    * Inject customData into newly-created MongoDB users.
@@ -604,44 +686,38 @@ export class RepeatableRunner {
   }
 
   /**
-   * Pre-check whether accounts that will be created by this file already exist.
+   * Pre-check which accounts this file creates already exist.
    *
-   * Looks for `CREATE USER … CHANGE_ME_ON_FIRST_LOGIN` patterns, extracts
-   * the usernames, and queries `mysql.user` directly.  This is called BEFORE
-   * executing the migration SQL so that the result is not polluted by stale
-   * `SHOW WARNINGS` state left over from earlier queries on the same connection
-   * (mysql2 multi-statement mode does not reset the warning buffer when a
-   * subsequent query produces zero warnings).
+   * Takes the `CREATE USER … CHANGE_ME_ON_FIRST_LOGIN` statements and looks
+   * each 'user'@'host' up in `mysql.user` directly. Per account, not per file:
+   * a file that adds a new account next to ones created by an earlier run must
+   * still hand out the new account's password.
    *
-   * @param {Object} connection     - mysql2 pool connection
+   * Called BEFORE executing the migration SQL so the result is not polluted by
+   * stale `SHOW WARNINGS` state left over from earlier queries on the same
+   * connection (mysql2 multi-statement mode does not reset the warning buffer
+   * when a subsequent query produces zero warnings).
+   *
+   * ALTER USER (reset) statements are left out — they always target an
+   * existing account and always change its password.
+   *
+   * @param {Object} connection     - mysql2 connection
    * @param {string} originalContent - Raw (un-resolved) SQL content
-   * @returns {Promise<boolean>} true when at least one target account already exists
+   * @returns {Promise<Set<string>>} accountKey(user, host) of each account that already exists
    */
   async preCheckAccountsExistMariaDB(connection, originalContent) {
-    const PLACEHOLDER = 'CHANGE_ME_ON_FIRST_LOGIN';
-    const usernames = [];
-    // Strip comments and collapse whitespace so that multi-line statements like:
-    //   CREATE USER IF NOT EXISTS 'app_user'@'%'
-    //     IDENTIFIED BY 'CHANGE_ME_ON_FIRST_LOGIN'
-    //     PASSWORD EXPIRE;
-    // are treated as a single unit and the username can be extracted correctly.
-    const collapsed = this.stripCommentsAndCollapse(originalContent);
-    for (const stmt of collapsed.split(';')) {
-      // Only check CREATE USER — ALTER USER (reset_pwd) always targets an existing account,
-      // so alreadyExists would always be true and incorrectly suppress the credential event.
-      if (!/\bCREATE\s+USER\b/i.test(stmt)) continue;
-      if (!stmt.includes(PLACEHOLDER)) continue;
-      const m = stmt.match(/['"`]([^'"`@\s]+)['"`]\s*@/);
-      if (m) usernames.push(m[1]);
-    }
-    if (usernames.length === 0) return false;
+    const creates = this.parsePlaceholderAccountsSQL(originalContent).filter(a => a.name && !a.isReset);
+    if (creates.length === 0) return new Set();
 
-    const placeholders = usernames.map(() => '?').join(', ');
-    const [[{ cnt }]] = await connection.query(
-      `SELECT COUNT(*) AS cnt FROM mysql.user WHERE User IN (${placeholders})`,
-      usernames
+    const names = [...new Set(creates.map(a => a.name))];
+    const [rows] = await connection.query(
+      `SELECT User, Host FROM mysql.user WHERE User IN (${names.map(() => '?').join(', ')})`,
+      names
     );
-    return Number(cnt) > 0;
+    const present = new Set(rows.map(r => RepeatableRunner.accountKey(String(r.User), String(r.Host))));
+    return new Set(
+      creates.map(a => RepeatableRunner.accountKey(a.name, a.host)).filter(key => present.has(key))
+    );
   }
 
   /**
@@ -835,9 +911,9 @@ export class RepeatableRunner {
         // when a subsequent query produces zero warnings (mysql2 multi-statement
         // mode quirk), causing false-positive "already-exists" detection on the
         // very first run when the connection has residual Notes from earlier ops.
-        let alreadyExists = false;
+        let existingAccounts = new Set();
         if (generated) {
-          alreadyExists = await this.preCheckAccountsExistMariaDB(connection, file.content);
+          existingAccounts = await this.preCheckAccountsExistMariaDB(connection, file.content);
         }
 
         // Process DELIMITER for stored procedures support
@@ -849,10 +925,10 @@ export class RepeatableRunner {
           }
         }
 
-        // Record generated credentials; `alreadyExists` was determined above
+        // Record generated credentials; `existingAccounts` was determined above
         // via a direct mysql.user query so it is immune to stale SHOW WARNINGS.
         if (generated) {
-          this.recordCredentialEvents(file.content, passwords, alreadyExists);
+          this.recordCredentialEvents(file.content, passwords, existingAccounts);
         }
 
         // Update checksum
@@ -958,18 +1034,38 @@ export class RepeatableRunner {
         const createdUsernames = upResult?.createdUsernames ?? null;
         const allUsernames     = upResult?.allUsernames ?? createdUsernames;
 
-        // Record credentials only for new/rotated accounts; pass allUsernames for the no-change log
+        // Passwords are generated per CHANGE_ME_ON_FIRST_LOGIN occurrence, in
+        // file order, so they pair with allUsernames (every account the file
+        // manages, in that order) — not with createdUsernames, which is only
+        // the subset this run created. When allUsernames lines up with the
+        // passwords, each account is classified on its own: created → new,
+        // the rest → no_change.
+        //
+        // Anything that can't be lined up one-to-one with the passwords is
+        // reported without a password (requireAligned) — never with a guess.
         if (generated) {
-          let namesForLog;
+          const pwCount = Array.isArray(passwords) ? passwords.length : 1;
+          const strict = { requireAligned: true };
+          const listed = Array.isArray(upResult?.allUsernames) ? upResult.allUsernames : null;
           if (isRotated) {
-            // { name, isReset: true } shape — recordCredentialEvents() only
-            // classifies as password_changed when every entry is flagged this
-            // way (mirrors the MariaDB ALTER USER detection path).
-            namesForLog = (allUsernames || []).map(name => ({ name, isReset: true }));
+            // { name, isReset: true } → recorded as password_changed
+            this.recordCredentialEvents(file.content, passwords, false, (allUsernames || []).map(name => ({ name, isReset: true })), strict);
+          } else if (alreadyExists) {
+            // Every account already existed: no password was handed out, so
+            // there's nothing to pair (and nothing to warn about)
+            this.recordCredentialEvents(file.content, passwords, true, allUsernames);
+          } else if (listed && listed.length === pwCount) {
+            // Per account when the script says which ones it created; without
+            // createdUsernames, every listed account counts as new (as before)
+            const existing = Array.isArray(createdUsernames)
+              ? new Set(listed.filter(name => !createdUsernames.includes(name)))
+              : false;
+            this.recordCredentialEvents(file.content, passwords, existing, listed, strict);
           } else {
-            namesForLog = isNewAccount ? createdUsernames : allUsernames;
+            // createdUsernames, else allUsernames, else the names found in the
+            // file — paired only if they line up with the passwords
+            this.recordCredentialEvents(file.content, passwords, false, createdUsernames ?? listed, strict);
           }
-          this.recordCredentialEvents(file.content, passwords, isRotated ? false : alreadyExists, namesForLog);
         }
 
         // Inject customData (expiresAt, passwordLastModified) for new or rotated accounts

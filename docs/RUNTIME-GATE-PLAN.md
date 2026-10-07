@@ -251,9 +251,36 @@ no extra privilege); each collection is counted once per run. Collection names b
 runtime, and collections in another database reached through `client.db(…)`, are not
 seen. A file that can't be read or counted is listed as skipped.
 
+**MariaDB — large tables.** The same check for the migrations about to run: each Up
+section is scanned for statements whose run time grows with the table — `ALTER TABLE`,
+`CREATE INDEX … ON`, `OPTIMIZE TABLE`, `UPDATE`, `DELETE FROM` — on a named table
+(`orders`, `` `orders` ``, `archive.logs`). If that table has `runtimeGates.largeTableRows`
+rows or more (default 1,000,000; `0` turns this off), a warning names the file, the
+statement, the table and its size. Lock Guard (R5) bounds only the wait for the lock, not
+the run time, and there is no statement time limit on MariaDB — so this is the one
+warning before a long rebuild starts:
+
+```
+⚠️  20261007000001-orders-note.sql: ALTER TABLE on 'orders' (~1,487,421 rows, 200 MB, over runtimeGates.largeTableRows = 1,000,000)
+    may run for a long time; Lock Guard bounds only the wait for its lock, not the run time, and an ALTER that copies the table
+    blocks writes to it until it finishes. No statement time limit applies — set ddlSafety.statementTimeoutSec, or
+    "-- @statement-timeout-sec: <s>" in this file, to bound it. Consider pt-online-schema-change, or running it off-peak;
+    "-- @large-table-ok: true" in the file once reviewed.
+```
+
+The warning names the statement time limit that will apply to that file (R5 below), or
+that none does. Once a file has been reviewed, `-- @large-table-ok: true` at its top
+silences the warning for that file only. Never blocks. Sizes come from `information_schema.TABLES` (`TABLE_ROWS` is InnoDB's
+estimate; no extra privilege); each table is looked up once per run. A table created
+earlier in the same run doesn't exist yet and isn't flagged; table names built in
+dynamic SQL are not seen. A file that can't be read or looked up is listed as skipped.
+Verified against MariaDB 11.8 (1.5M- and 1.2M-row tables): `ALTER`, `CREATE INDEX`,
+`OPTIMIZE`, `UPDATE`/`DELETE` on a `db.table` flagged; a 10-row table, a table created
+earlier in the run and a `@large-table-ok` file not flagged; `largeTableRows: 0` silent.
+
 ```javascript
 // config.js — all optional
-runtimeGates: { longTransactionSec: 60, replicationLagWarnSec: 30, binlogWarnMb: 10240, diskUsageWarnPercent: 90, largeCollectionDocs: 1000000, requireLockCheck: false }
+runtimeGates: { longTransactionSec: 60, replicationLagWarnSec: 30, binlogWarnMb: 10240, diskUsageWarnPercent: 90, largeCollectionDocs: 1000000, largeTableRows: 1000000, requireLockCheck: false }
 ```
 
 ---
@@ -304,7 +331,46 @@ on a large collection can take minutes. It bounds single operations, not the who
 migration — many fast operations never trip it. Verified against a real MongoDB 7: a
 migration whose query takes ~10 s server-side stopped after 2.5 s with a 2000 ms limit,
 and ran its full 10.9 s without one. As with any failed MongoDB migration, operations
-before the one that timed out are not undone.
+before the one that timed out are not undone — and the operation that timed out may
+itself be partly done: stopping a 1,000,000-document `updateMany` at 300 ms left
+24,179 documents changed (an index build, by contrast, was dropped cleanly). Write data
+changes so a re-run resumes rather than redoes — see
+[DDL-PRODUCTION-SAFETY.md §7.4](./DDL-PRODUCTION-SAFETY.md#74-a-migration-failed-partway-recovering).
+
+**MariaDB — statement time limit, `ddlSafety.statementTimeoutSec` (off by default).**
+Lock Guard bounds only the wait for a lock; once a statement has its lock, nothing else
+bounds how long it runs. With this set (seconds), the session's `max_statement_time` is
+set for the migration's Up / Down and restored afterwards, so **each statement** running
+longer is stopped by the server and **rolled back** — never retried. Per file:
+
+```sql
+-- @statement-timeout-sec: 1800      (0 = no limit for this file)
+```
+
+The annotation wins over the config, applies even when the config is off, and a value
+that isn't a whole number fails validation (`INVALID_STATEMENT_TIMEOUT`). The error
+names the setting and how to give that file more time:
+
+```
+20261007100001-t1.sql: Query execution was interrupted (max_statement_time exceeded) (statement 2 of 2; statement 1 was
+already applied — MariaDB commits each DDL statement, so it is not rolled back) — stopped by @statement-timeout-sec (3 s)
+or a KILL QUERY; the server rolled that statement back. If this migration needs longer, raise the value in its
+"-- @statement-timeout-sec:" line (0 = no limit), or run it off-peak.
+```
+
+Verified against MariaDB 11.8 with a 3 s limit on a 1.5M-row table, through the CLI: a
+COPY `ALTER … MODIFY` (errno 1969) and an in-place `ADD INDEX` (errno 1317) were stopped
+at ~3 s with the table unchanged; an `UPDATE` of every row was stopped and rolled back
+(`SUM(b)` unchanged — the rollback took about as long again); `-- @statement-timeout-sec: 0`
+in a file let its `ADD INDEX` finish (14 s) under a 3 s project limit; the session value
+was restored. Statements before the stopped one stay applied, as with any failure (X3).
+MySQL has no `max_statement_time` for DDL: there the setting is refused before anything
+runs ("needs MariaDB's max_statement_time … nothing was run").
+
+```javascript
+// config.js (MariaDB DDL)
+ddlSafety: { statementTimeoutSec: 1800 }
+```
 
 ---
 
@@ -325,7 +391,9 @@ connect() → R0 identity → R1 changelog consistency → [R2 lock preflight
 ```
 
 R0 and R1 gate the *connection*; R2–R4 gate the *moment right before execution
-starts*; R5 gates *each statement*; R6 gates the *result*.
+starts*; R5 gates *each statement*; R6 gates the *result*. The full flow, with
+PreCheck, rollback and where a run can stop, is drawn in
+[EXECUTION-FLOW.md](EXECUTION-FLOW.md).
 
 ---
 

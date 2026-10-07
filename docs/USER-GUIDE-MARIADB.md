@@ -183,31 +183,7 @@ DROP TABLE ...
 
 ### 3.3 Execution Flow
 
-```mermaid
-flowchart TD
-  A["up / sync"] --> B["Connect — R0: the database exists and the connection points at it"]
-  B --> C["status — R1: changelog consistency, checksums of applied files"]
-  C --> D{"Validation gate<br/>(pending migrations only)"}
-  D -- fails --> X1["❌ Refused — nothing applied"]
-  D -- passes --> E{"Runtime gates R2–R4<br/>open transactions, read-only target, headroom"}
-  E -- blocked --> X1
-  E -- ok --> F["Next pending migration"]
-  F --> G{"--sanity-check and<br/>a PreCheck section?"}
-  G -- yes --> H{"PreCheck passes?"}
-  H -- no --> X2["❌ Stop — this migration is not run"]
-  H -- yes --> I
-  G -- no --> I["Run the Up section<br/>(Lock Guard: bounded lock wait + retry)"]
-  I -- error --> X3["❌ Stop — may be partly applied, not recorded"]
-  I -- ok --> J{"--sanity-check and<br/>a PostCheck section?"}
-  J -- no --> K["Record in the changelog, with checksum"]
-  J -- yes --> L{"PostCheck passes?"}
-  L -- yes --> K
-  L -- no --> M["Run the Down section<br/>(auto-rollback, unless --no-auto-rollback)"]
-  M --> X4["❌ Stop — rolled back, still pending"]
-  K --> N{"More pending?"}
-  N -- yes --> F
-  N -- no --> O["✅ Done"]
-```
+What `up` / `sync` do step by step — the gates R0–R6, PreCheck / Up / PostCheck per migration, automatic rollback, and the state left wherever a run stops — is drawn and explained in **[EXECUTION-FLOW.md](EXECUTION-FLOW.md)**, one page for MariaDB and MongoDB.
 
 `--dry-run` stops after the gates and reports what would run or be refused. Details: [RUNTIME-GATE-PLAN.md](RUNTIME-GATE-PLAN.md), [LOCK-GUARD.md](LOCK-GUARD.md).
 
@@ -292,7 +268,7 @@ DROP FUNCTION IF EXISTS fn_calculate_discount;
 DROP PROCEDURE IF EXISTS sp_get_user_order_stats;
 ```
 
-- **No `DELIMITER`.** It's a command of the `mysql` command-line client, not SQL: the server rejects it, so a migration containing `DELIMITER //` fails when it runs (and, without `@skip-syntax-check`, already in `validate`). The tool sends the whole section to the server in one go, and the server reads `BEGIN … END;` bodies correctly without it.
+- **No `DELIMITER`.** It's a command of the `mysql` command-line client, not SQL: the server rejects it, so a migration containing `DELIMITER //` fails when it runs (and, without `@skip-syntax-check`, already in `validate`). It isn't needed: the tool runs the section one statement at a time ([Lock Guard](LOCK-GUARD.md)) and keeps each `BEGIN … END;` body together as one statement, so a `;` inside the body doesn't split it. A section that can't be split with certainty, or any section with Lock Guard disabled, is sent as one batch, and the server reads the bodies correctly that way too.
 - **`@skip-syntax-check: true` is needed** for files with `CREATE/DROP PROCEDURE`, `FUNCTION` or `TRIGGER` — otherwise `validate` reports `SQL_SYNTAX_ERROR`. It skips only that parser; every other check still runs.
 - To change a procedure later, add a new migration that drops and recreates it (Down recreates the previous version).
 
@@ -387,6 +363,8 @@ docker compose run --rm migrate dcl --validate --allow-dangerous -c <config>
 | `@allow-forbidden` | `true` / `false` | Allow every forbidden operation in the file |
 | `@approved-by` | name / ticket | Who approved the forbidden operations; required when `validation.requireApprover: true` |
 | `@skip-syntax-check` | `true` | Skip the SQL parser (stored procedures, syntax it doesn't know); all other checks still run |
+| `@statement-timeout-sec` | seconds (`0` = no limit) | Stop and roll back any statement of this file running longer; overrides `ddlSafety.statementTimeoutSec` |
+| `@large-table-ok` | `true` | No R4 large-table warning for this file (reviewed) |
 
 `@description` and `@type` appeared in older examples; they're informational only and have no effect.
 
@@ -676,6 +654,16 @@ export default {
 ```
 
 Other options (`createDatabaseIfMissing`, `ddlSafety.lockGuard`, `runtimeGates`, `validation`, `notifications`) are in the [README's configuration section](../README.md#-configuration-examples).
+
+**TLS (e.g. AWS RDS with `require_secure_transport=ON`)** — add `ssl` next to the connection settings (inside `mariadb: { … }`, or at the top level of a flat config):
+
+```javascript
+ssl: { caFile: '/app/config/global-bundle.pem' }   // CA bundle; the server certificate is verified against it
+// ssl: true                                       // TLS, verified against Node's default CAs
+// ssl: { ca, cert, key, rejectUnauthorized, … }   // passed to the mysql2 driver as-is
+```
+
+`caFile` / `certFile` / `keyFile` are read for you. Without `ssl`, the connection is unencrypted, and a server that requires secure transport refuses it ("Connections using insecure transport are prohibited"). For RDS, download AWS's `global-bundle.pem` and ship it with the config — [`k8s/dynamic/`](../k8s/dynamic/README.md) mounts any `*.pem` in the profile directory at `/app/config/`. The same setting is used by the Docker entrypoint's wait-for-database check.
 
 ### 7.3 Full CLI Command Reference
 

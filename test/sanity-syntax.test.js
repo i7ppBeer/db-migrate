@@ -31,3 +31,40 @@ describe('MariaDB sanity block syntax check', () => {
     expect(errors).toHaveLength(1);
   });
 });
+
+describe('MariaDB syntax check — IF [NOT] EXISTS on index / column clauses', () => {
+  const syntaxErrors = (up, down = 'DROP TABLE IF EXISTS zz;') =>
+    new MariaDBAdapter({ mariadb: {} })
+      .validateContent(`-- +migrate Up\n${up}\n-- +migrate Down\n${down}\n`, 'x.sql', {})
+      .errors.filter(e => e.code === 'SQL_SYNTAX_ERROR' || e.code === 'SQL_SYNTAX_ERROR_DOWN');
+
+  it('accepts the re-runnable forms MariaDB supports (they used to be refused as syntax errors)', () => {
+    expect(syntaxErrors([
+      'CREATE TABLE IF NOT EXISTS t (id INT PRIMARY KEY, c INT);',
+      'ALTER TABLE t ADD COLUMN IF NOT EXISTS d INT, ADD INDEX IF NOT EXISTS i_d (d);',
+      'CREATE INDEX IF NOT EXISTS i_c ON t (c);',
+      'ALTER TABLE t MODIFY COLUMN IF EXISTS d BIGINT;'
+    ].join('\n'), [
+      'ALTER TABLE t DROP INDEX IF EXISTS i_d, DROP COLUMN IF EXISTS d;',
+      'DROP INDEX IF EXISTS i_c ON t;',
+      'ALTER TABLE t DROP KEY IF EXISTS i_c;'
+    ].join('\n'))).toEqual([]);
+  });
+
+  it('accepts ALTER TABLE … ADD UNIQUE in every form (the parser rejects all of them on its own)', () => {
+    expect(syntaxErrors([
+      'CREATE TABLE IF NOT EXISTS t (id INT PRIMARY KEY, a INT, b INT, c INT, d INT);',
+      'ALTER TABLE t ADD UNIQUE u_a (a);',
+      'ALTER TABLE t ADD UNIQUE KEY u_b (b), ADD UNIQUE INDEX IF NOT EXISTS u_c (c);',
+      'ALTER TABLE t ADD UNIQUE IF NOT EXISTS u_d (d);',
+      'ALTER TABLE t ADD CONSTRAINT uq_ab UNIQUE (a, b);',
+      'ALTER TABLE t ADD CONSTRAINT `uq ac` UNIQUE KEY (a, c);'
+    ].join('\n'))).toEqual([]);
+    expect(syntaxErrors('ALTER TABLE t ADD UNIQUE KEY u_a (a;').map(e => e.code)).toEqual(['SQL_SYNTAX_ERROR']);
+  });
+
+  it('still reports a real syntax error in such a statement', () => {
+    expect(syntaxErrors('ALTER TABLE t ADD INDEX IF NOT EXISTS i_d (d;').map(e => e.code)).toEqual(['SQL_SYNTAX_ERROR']);
+    expect(syntaxErrors('CREATE TABLE t (id INT);', 'ALTER TABLE t DROP INDEX IF EXISTS i_d,, DROP COLUMN IF EXISTS d;').map(e => e.code)).toEqual(['SQL_SYNTAX_ERROR_DOWN']);
+  });
+});

@@ -291,7 +291,9 @@ function dclEventRowHTML(event) {
         (event.supersededPasswords
           ? `<br><span style="font-family:Arial,sans-serif;font-size:11px;color:#5b6259;">Password was set ${event.supersededPasswords + 1} times in this run - only this final one is valid.</span>`
           : '')
-      : `<span style="font-family:Arial,sans-serif;font-size:12px;color:${style.text};">New account - credentials were not auto-generated for this one.</span>`;
+      : event.passwordUnmatched
+        ? `<span style="font-family:Arial,sans-serif;font-size:12px;color:${style.text};">${event.type === 'new' ? 'New account' : 'Password changed'} - its generated password could not be matched to it, so none is shown. Rotate this account; the migration's up() must return allUsernames listing every CHANGE_ME_ON_FIRST_LOGIN account in file order.</span>`
+        : `<span style="font-family:Arial,sans-serif;font-size:12px;color:${style.text};">New account - credentials were not auto-generated for this one.</span>`;
   } else if (event.type === 'no_change') {
     detail = `<span style="font-family:Arial,sans-serif;font-size:12px;color:${style.text};">Account already existed - password unchanged.</span>`;
   } else if (event.type === 'removed') {
@@ -338,7 +340,9 @@ export function buildDCLNotificationEvents(credentialEvents, diff, dbType) {
     const prev = merged.get(key);
     if (!prev) {
       merged.set(key, { ...rest, username: key });
-    } else if (e.password) {
+    } else if (e.password || e.passwordUnmatched) {
+      // A later password — or a later change whose password couldn't be
+      // matched — makes the earlier one invalid: never show that one as current.
       merged.set(key, {
         ...rest,
         username: key,

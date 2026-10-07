@@ -5,7 +5,8 @@
 # db-migrate Job (job.yaml) — it checks the two things that otherwise fail
 # silently or confusingly instead of surfacing a clear, actionable error:
 #
-#   1. ConfigMap existence — the Job's volumes reference a migrations
+#   1. ConfigMap existence and contents (migration files present, config
+#      file present) — the Job's volumes reference a migrations
 #      ConfigMap (content-hashed name) and a config ConfigMap. If either is
 #      missing, the Pod doesn't fail cleanly: it sits in ContainerCreating
 #      with a "configmap ... not found" event, the main container never
@@ -37,6 +38,21 @@
 #   OUTPUT_DIR        default: ./reports
 #   WAIT_SECONDS      default: 0 (fail fast). Set >0 to poll instead of
 #                      failing immediately if a previous Job is still active.
+#   DB                narrows the overlap check to Jobs labelled db=$DB (plus
+#                      Jobs with no db label, e.g. k8s/job.yaml, which could
+#                      be on any DB), so a project's MariaDB and MongoDB runs
+#                      don't block each other
+#   SUSPENDED_STALE_SECONDS  default: 600 — a Job suspended and never started for
+#                      longer than this is reported but no longer blocks
+#   REQUIRED_CONFIG_KEYS  default: config.js — space-separated keys CONFIG_CM
+#                      must contain (dynamic/submit.sh: ddl.config.js run.sh …)
+#   EXCLUDE_JOB       a Job to leave out of the overlap check — the caller's
+#                      own Job when it was created (suspended) before this check
+#                      (k8s/dynamic/submit.sh)
+#
+# "Still active" means not yet finished (no Complete/Failed condition) —
+# including a suspended Job, so two runs submitted at the same moment see each
+# other and both stop, instead of both starting.
 #
 # Example:
 #   PROJECT=shop NAMESPACE=production \
@@ -55,36 +71,19 @@ done
 : "${CONFIG_CM:=db-migrate-${PROJECT}-config}"
 : "${OUTPUT_DIR:=./reports}"
 : "${WAIT_SECONDS:=0}"
+: "${DB:=}"
+: "${EXCLUDE_JOB:=}"
+: "${SUSPENDED_STALE_SECONDS:=600}"
+: "${REQUIRED_CONFIG_KEYS:=config.js}"
 
 mkdir -p "$OUTPUT_DIR"
 
+# shellcheck source=notification-html.sh
+. "$(dirname "$0")/notification-html.sh"
+
 # $1=error|waiting  $2=title  $3=detail
 write_notification() {
-  local kind="$1" title="$2" detail="$3" accent bg
-  case "$kind" in
-    error)   accent="#b0303f"; bg="#fbe8ea" ;;
-    waiting) accent="#1f7a8c"; bg="#dff1f3" ;;
-  esac
-  cat > "$OUTPUT_DIR/notification.html" <<EOF
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light"><title>Migration Notification</title></head>
-<body style="margin:0;padding:0;background:#eef1ee;font-family:Arial,Helvetica,sans-serif;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#eef1ee" style="background:#eef1ee;"><tr><td align="center" style="padding:32px 16px;">
-<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#ffffff;border:1px solid #d7ddd4;">
-<tr><td bgcolor="#171b21" style="background:#171b21;padding:18px 28px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-<td style="font-family:Arial,sans-serif;color:#ffffff;font-size:15px;font-weight:bold;">Migration Notification</td>
-<td align="right" style="font-family:Arial,sans-serif;color:#c9cdc6;font-size:12px;">${PROJECT}</td>
-</tr></table></td></tr>
-<tr><td style="padding:20px 28px 4px;font-family:Arial,sans-serif;font-size:12px;color:#5b6259;">${NAMESPACE} | pre-flight | $(date -u +"%Y-%m-%d %H:%M") UTC</td></tr>
-<tr><td style="padding:18px 28px 8px;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-<td bgcolor="${bg}" style="background:${bg};border-left:3px solid ${accent};padding:12px 14px;">
-<span style="font-family:Arial,sans-serif;font-size:14px;color:#1c211d;font-weight:bold;">${title}</span><br>
-<span style="font-family:Arial,sans-serif;font-size:12px;color:#3a3f38;">${detail}</span>
-</td></tr></table></td></tr>
-<tr><td style="padding:18px 28px 22px;border-top:1px solid #d7ddd4;font-family:Arial,sans-serif;font-size:11px;color:#8a8f86;">This is an automated migration notification. Do not reply.</td></tr>
-</table></td></tr></table></body></html>
-EOF
-  echo "📧 Notification written to $OUTPUT_DIR/notification.html"
+  write_notification_html "$OUTPUT_DIR" "$1" "$2" "$3" "$PROJECT" "${NAMESPACE} | pre-flight | $(date -u +"%Y-%m-%d %H:%M") UTC"
 }
 
 check_configmaps() {
@@ -101,12 +100,53 @@ check_configmaps() {
       "Expected ConfigMap(s) not found in namespace '${NAMESPACE}': ${missing[*]}. Please confirm the deploy configuration is correct before retrying."
     exit 1
   fi
+  # Present but empty, or without the config file the Job runs with — the
+  # Pod would start and then fail (or worse, find "nothing pending").
+  local problems=() keys key
+  keys=$(kubectl get configmap "$MIGRATIONS_CM" -n "$NAMESPACE" -o json | jq -r '(.data // {}) + (.binaryData // {}) | keys[]')
+  [ -n "$keys" ] || problems+=("ConfigMap $MIGRATIONS_CM has no migration files")
+  keys=$(kubectl get configmap "$CONFIG_CM" -n "$NAMESPACE" -o json | jq -r '(.data // {}) | keys[]')
+  for key in $REQUIRED_CONFIG_KEYS; do
+    grep -qxF "$key" <<<"$keys" || problems+=("ConfigMap $CONFIG_CM has no $key")
+  done
+  if [ ${#problems[@]} -gt 0 ]; then
+    local joined
+    joined=$(printf '%s; ' "${problems[@]}"); joined=${joined%; }
+    echo "❌ $joined" >&2
+    write_notification "error" "Configuration is empty or incomplete" \
+      "$joined. Please check the deploy configuration (migration directory and config files) before retrying."
+    exit 1
+  fi
   echo "✅ ConfigMaps present: $MIGRATIONS_CM, $CONFIG_CM"
 }
 
-active_jobs() {
+# Unfinished db-migrate Jobs for this project (and DB), as "<name> <kind>"
+# lines — kind "running", or "stale" for a Job that has sat suspended, never
+# started, for over SUSPENDED_STALE_SECONDS (left behind by a submit that
+# died between creating and starting it; it would otherwise block every
+# later run, since a suspended Job never finishes and no deadline or TTL
+# applies to it). A Job with no db label (k8s/job.yaml) counts for every DB.
+unfinished_jobs() {
   kubectl get jobs -n "$NAMESPACE" -l "app=db-migrate,project=${PROJECT}" -o json 2>/dev/null \
-    | jq -r '.items[] | select((.status.active // 0) > 0) | .metadata.name'
+    | jq -r --arg self "$EXCLUDE_JOB" --arg db "$DB" --argjson stale "$SUSPENDED_STALE_SECONDS" '.items[]
+        | select(.metadata.name != $self)
+        | select($db == "" or ((.metadata.labels.db // "") as $d | $d == "" or $d == $db))
+        | select([.status.conditions[]? | select((.type == "Complete" or .type == "Failed") and .status == "True")] | length == 0)
+        | (if (.spec.suspend == true) and ((.status.active // 0) == 0) and (.status.startTime == null)
+              and (now - (.metadata.creationTimestamp | fromdateiso8601) > $stale)
+           then "stale" else "running" end) as $kind
+        | "\(.metadata.name) \($kind)"'
+}
+
+active_jobs() {
+  local all stale
+  all=$(unfinished_jobs)
+  stale=$(awk '$2 == "stale" {print $1}' <<<"$all")
+  if [ -n "$stale" ]; then
+    echo "⚠️  Ignoring Job(s) suspended for over ${SUSPENDED_STALE_SECONDS}s that never started (left by an interrupted submit): ${stale//$'\n'/, }" >&2
+    echo "   Delete with: kubectl delete job -n $NAMESPACE ${stale//$'\n'/ }" >&2
+  fi
+  awk '$2 == "running" {print $1}' <<<"$all"
 }
 
 check_no_active_job() {

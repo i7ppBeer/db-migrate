@@ -16,14 +16,17 @@
 
 const configPath = process.argv[2];
 
-async function checkMariaDB({ host, port, user, password }) {
+async function checkMariaDB({ host, port, user, password, ssl }) {
   const mysql = await import('mysql2/promise');
+  const { resolveSslOption } = await import('./adapters/mariadb-adapter.js');
+  const tls = resolveSslOption(ssl);
   const connection = await mysql.createConnection({
     host: host || 'localhost',
     port: parseInt(port || '3306', 10),
     user: user || undefined,
     password: password ?? undefined,
-    connectTimeout: 2000
+    connectTimeout: 2000,
+    ...(tls ? { ssl: tls } : {})
   });
   try {
     await connection.ping();
@@ -59,7 +62,7 @@ async function targetsFromConfig(path) {
     return {
       type: 'mariadb',
       label: c.name || `${m.host || 'localhost'}:${m.port || 3306}`,
-      params: { host: m.host, port: m.port, user: m.user ?? c.user, password: m.password ?? c.password }
+      params: { host: m.host, port: m.port, user: m.user ?? c.user, password: m.password ?? c.password, ssl: m.ssl ?? c.ssl }
     };
   });
 }

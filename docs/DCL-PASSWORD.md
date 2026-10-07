@@ -99,7 +99,7 @@ Each instance gets its **own** file, `notification-<instance name>.html`, with i
 
 Instance names must be unique — two instances with the same name would write the same file and overwrite each other's passwords, so `dcl-all` refuses to start. For different accounts per instance, give each instance its own `migrationsDir` — see [MULTI-INSTANCE.md](MULTI-INSTANCE.md).
 
-For `sync`, a DDL section is added above the DCL section listing the migrations applied (by filename/timestamp — that timestamp **is** the schema version) and a before/after field-level diff, reusing the same diff `printSchemaDiff()` shows on the console.
+`sync` (DDL only — it never runs DCL scripts) writes the same email with a DDL section instead: the migrations applied (by filename/timestamp — that timestamp **is** the schema version) and a before/after field-level diff, reusing the same diff `printSchemaDiff()` shows on the console.
 
 ### Format
 
@@ -214,6 +214,10 @@ for (const u of users) {
 }
 return { passwordSet: createdUsernames.length > 0, createdUsernames, allUsernames };
 ```
+
+`allUsernames` must list **every** account that has a `CHANGE_ME_ON_FIRST_LOGIN`, in the order the placeholders appear in the file (`users.map(u => u.username)` does exactly that). Passwords are generated per placeholder in file order and paired with `allUsernames` by position; each account in it is then reported on its own — in `createdUsernames` → **new** with its password, otherwise → **already existed**. So adding a new account to a file whose other accounts were created by an earlier run hands out the new account's own password. If `allUsernames` is missing or its length doesn't match the number of placeholders, the runner can't pair them per account and falls back to treating the file as a whole (`passwordSet`).
+
+MariaDB needs nothing from the script: before running a file, the runner looks up each `CREATE USER … 'CHANGE_ME_ON_FIRST_LOGIN'` account (`'user'@'host'`) in `mysql.user` and reports each one on its own the same way.
 
 ### MongoDB — customData Injection
 

@@ -37,7 +37,8 @@ so `main` stays green while no cluster is wired up. The Job connects to
 | `secret.example.yaml` | Shape of the credentials Secret — **placeholder values only** |
 | `configmap-migrations.example.yaml` | Shape of the migrations + config ConfigMaps, with two illustrative sample migrations |
 | `job.yaml` | The actual `sync` Job |
-| `preflight-check.sh` | Run by the executor right before applying `job.yaml` — verifies the ConfigMaps it references actually exist and no other db-migrate Job for this project is already running. See the script's own header comment for env vars and exit codes. |
+| `preflight-check.sh` | Run by the executor right before applying `job.yaml` — verifies the ConfigMaps it references actually exist and no other db-migrate Job for this project (optionally `DB`) is still unfinished. See the script's own header comment for env vars and exit codes. |
+| [`dynamic/`](dynamic/README.md) | Per-run Jobs with a timestamped name: DDL (`sync`) then DCL (`dcl`) in one Pod, MariaDB or MongoDB, credentials from mounted Secret files, reports collected by an external script for your own mail delivery |
 
 ## Workflow
 
@@ -90,13 +91,15 @@ lifecycle, smaller blast radius if either credential ever leaks.
 
 ## Manual pre-flight checklist (beyond what `preflight-check.sh` covers)
 
-`preflight-check.sh` (step 3 above) only checks two orchestration-level
-things — ConfigMaps exist, no other Job is already running. It says nothing
-about whether the *database itself* is in a safe state — `sync` doesn't yet
-implement the Runtime Gate plan (R0–R4 in
-[docs/RUNTIME-GATE-PLAN.md](../docs/RUNTIME-GATE-PLAN.md)), so there's no
-automated check today for "is now actually a safe time to run this against
-production" from the database's side (wrong-database connection, long-held
-locks, a read-only replica, …). Until that exists, run the manual checklist
-in [docs/DDL-PRODUCTION-SAFETY.md](../docs/DDL-PRODUCTION-SAFETY.md) section 5
+`preflight-check.sh` (step 3 above) only checks orchestration-level things —
+the ConfigMaps exist and aren't empty, no other Job is still running. The
+database side is checked by `sync` itself right after connecting, before it
+applies anything — the runtime gates in
+[docs/RUNTIME-GATE-PLAN.md](../docs/RUNTIME-GATE-PLAN.md): wrong database
+(R0), changelog/checksum consistency (R1), long-open transactions and queued
+metadata locks (R2), a read-only target (R3), disk/binlog headroom (R4,
+warning only). Those don't cover everything a person would look at before a
+production change (a maintenance window, a fresh backup, how big the tables
+being altered are…), so still go through the manual checklist in
+[docs/DDL-PRODUCTION-SAFETY.md](../docs/DDL-PRODUCTION-SAFETY.md) section 5
 before triggering this Job against a production database.

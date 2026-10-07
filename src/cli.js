@@ -17,7 +17,7 @@ import { DCLIdempotentChecker } from './core/dcl-idempotent-checker.js';
 import { checkMigrationsToRun, describeValidationFailures, allowHintForFailures } from './core/validation-gate.js';
 import { parseExpectedErrors, checkFileExpectation, parseExpectedSanity, checkSanityExpectation } from './core/fixture-expectations.js';
 import { buildDCLPlan } from './core/dcl-plan.js';
-import { resolveDirs, describeDirs, pickDir } from './core/migration-dirs.js';
+import { resolveDirs, describeDirs, pickDir, matchMigrationFile } from './core/migration-dirs.js';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -26,7 +26,7 @@ const program = new Command();
 program
   .name('db-migrate')
   .description('Unified database migration tool for MongoDB and MariaDB/MySQL (supports multiple instances, DDL versioned and DCL repeatable modes)')
-  .version('3.0.0')
+  .version('3.0.1')
   .option('-c, --config <path>', 'Path to config file')
   .option('-t, --type <type>', 'Database type (mongodb, mariadb)');
 
@@ -344,8 +344,9 @@ async function enforceValidationGate(adapter, status, options, { report = false 
  *        with runtimeGates.requireLockCheck, also refuses when the check
  *        couldn't run (missing privilege)
  *   R3 — read-only target: refuses, no override (connect to the primary)
- *   R4 — disk/binlog headroom, replication lag, and (MongoDB, for `files`)
- *        index builds / bulk writes on large collections: warnings only
+ *   R4 — disk/binlog headroom, replication lag, and (for `files`) index
+ *        builds / bulk writes on large MongoDB collections, ALTERs / bulk
+ *        DML on large MariaDB tables: warnings only
  * Checks that couldn't run (privileges, server type) are listed as skipped.
  *
  * @param {{ locks?: boolean, disk?: boolean, report?: boolean }} [opts] -
@@ -355,10 +356,12 @@ async function enforceValidationGate(adapter, status, options, { report = false 
 async function enforceRuntimeGates(adapter, options, { locks = true, disk = true, report = false, files = [] } = {}) {
   if (typeof adapter.runtimePreflight !== 'function') return;
   const r = await adapter.runtimePreflight({ locks, disk });
-  // MongoDB: index builds / bulk writes on large collections among the
-  // migrations about to run (advisory)
-  if (typeof adapter.largeCollectionWarnings === 'function' && files.length > 0) {
-    const large = await adapter.largeCollectionWarnings(files);
+  // Index builds / bulk writes (MongoDB: large collections) and ALTERs /
+  // bulk DML (MariaDB: large tables) among the migrations about to run
+  // (advisory)
+  for (const check of ['largeCollectionWarnings', 'largeTableWarnings']) {
+    if (typeof adapter[check] !== 'function' || files.length === 0) continue;
+    const large = await adapter[check](files);
     r.warnings.push(...large.warnings);
     r.skipped.push(...large.skipped);
   }
@@ -853,7 +856,8 @@ addAllowOptions(upCommand)
         for (const m of result.applied) {
           console.log(`   ${m}`);
         }
-      } else {
+      } else if (result.errors.length === 0 && !(result.sanityResults || []).some(sr => !sr.success)) {
+        // nothing applied and nothing failed — otherwise the errors below say why
         console.log(chalk.gray('\n   No pending migrations.'));
       }
       
@@ -1210,7 +1214,7 @@ program
       if (options.all) {
         filesToMark = versionedFiles;
       } else if (options.upTo) {
-        const targetFile = versionedFiles.find(f => f.includes(options.upTo));
+        const targetFile = matchMigrationFile(versionedFiles, options.upTo, '--up-to');
         if (!targetFile) {
           console.error(chalk.red(`[ERROR] Migration '${options.upTo}' not found`));
           process.exitCode = 1;
@@ -1219,7 +1223,7 @@ program
         const targetIdx = versionedFiles.indexOf(targetFile);
         filesToMark = versionedFiles.slice(0, targetIdx + 1);
       } else if (options.file) {
-        const targetFile = versionedFiles.find(f => f.includes(options.file));
+        const targetFile = matchMigrationFile(versionedFiles, options.file, '--file');
         if (!targetFile) {
           console.error(chalk.red(`[ERROR] Migration '${options.file}' not found`));
           process.exitCode = 1;
@@ -2100,7 +2104,7 @@ addAllowOptions(upAllCommand)
           
           if (result.applied.length > 0) {
             console.log(chalk.green(`   ✅ Applied ${result.applied.length} migration(s)`));
-          } else {
+          } else if (result.errors.length === 0) {
             console.log(chalk.gray(`   No pending migrations`));
           }
           
@@ -2664,7 +2668,7 @@ program
           const annotationInfo = m.annotations?.allowDangerous ? chalk.yellow(' [allow-dangerous]') : '';
           console.log(`   ${m.fileName} (${m.reason})${dirTag(m, Array.isArray(migrationsDir))}${annotationInfo}`);
         }
-      } else if (!result.skipped || result.skipped.length === 0) {
+      } else if ((!result.skipped || result.skipped.length === 0) && result.errors.length === 0) {
         console.log(chalk.gray('\n   All DCL migrations are up-to-date.'));
       }
 

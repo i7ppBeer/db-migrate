@@ -40,7 +40,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: migrate
-          image: your-registry/db-migrate:3.0.0
+          image: your-registry/db-migrate:3.0.1
           args: ["sync", "-c", "/app/config/config.js", "-o", "/app/reports"]
           envFrom:
             - secretRef:

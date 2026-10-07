@@ -11,6 +11,160 @@ major version.
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-10-06
+
+Fixes since **3.0.0** — most of them about generated DCL passwords — plus MariaDB TLS
+(needed for RDS) and a Kubernetes flow that runs DDL and DCL in one Job. No database
+changes, no config changes required — but read **Behavior changes** if you script
+`baseline` or read the pre-flight's `notification.html`.
+
+### TL;DR
+
+- **Rebuild / pull the image.** The DCL password fixes and TLS are in the image.
+- **DCL: a generated password could be lost or wrong** when one R__ file mixed accounts
+  that already existed with new ones. Fixed for MariaDB and MongoDB — every account is
+  now judged on its own, and the emailed password is the one the account was created
+  with.
+- **MariaDB TLS**: new `ssl` option (`ssl: { caFile: '/path/global-bundle.pem' }`).
+  Without it, servers with `require_secure_transport=ON` (common on RDS) refused the
+  connection.
+- **New: `k8s/dynamic/`** — one Job per deploy (timestamped name), DDL then DCL in one
+  Pod, MariaDB or MongoDB, credentials from mounted Secret files, reports fetched by
+  `collect.sh` for your own mail delivery. See [k8s/dynamic/README.md](k8s/dynamic/README.md).
+- **`baseline --up-to` / `--file` no longer match a substring** from the middle of a
+  file name.
+- **Lock Guard retries only the statement that hit the lock timeout.** It used to
+  re-run the whole migration, repeating statements that had already succeeded.
+
+### Fixed
+
+- **MariaDB Lock Guard re-ran the whole migration on a lock-wait retry.** MariaDB
+  commits each DDL statement, so in a migration like `CREATE TABLE a …; ALTER TABLE b …`
+  where the `ALTER` waited out the lock, the retry ran `CREATE TABLE a` again, failed
+  with `Table 'a' already exists`, and left the migration half-applied behind an error
+  that hid the real cause. Migrations now run one statement at a time and a retry
+  repeats only the statement that timed out; an error in a multi-statement migration
+  says which statement failed and that the ones before it were applied (they are not
+  rolled back). Statements are split with an SQL-aware splitter (quotes, comments,
+  `BEGIN … END` bodies of procedures / functions / triggers / events); SQL it can't split
+  with certainty is sent as one batch with a single attempt. Reproduced and verified
+  against MariaDB 11; `docs/LOCK-GUARD.md` corrected (it claimed nothing could be left
+  half-applied).
+- **MariaDB validation refused valid syntax** as `SQL_SYNTAX_ERROR`, because the SQL
+  parser behind the syntax pre-check doesn't know it: every `ALTER TABLE … ADD [CONSTRAINT
+  name] UNIQUE [INDEX|KEY]`, and the re-runnable forms `ADD INDEX / ADD UNIQUE / ADD
+  PARTITION / CREATE INDEX IF NOT EXISTS`, `DROP COLUMN / DROP INDEX / MODIFY COLUMN IF
+  EXISTS`. They're accepted now; the rest of each statement is still checked.
+  `ADD CONSTRAINT … CHECK (…)` is still refused by the parser — use
+  `-- @skip-syntax-check: true` for such a file.
+
+- **DCL (MariaDB): a new account's password was lost when another account in the same
+  file already existed.** The "does it exist" check was one yes/no for the whole file,
+  so the new account was reported as `NO CHANGE` and its generated password was never
+  shown. Each `'user'@'host'` is now looked up on its own.
+- **DCL (MongoDB): a new account could be emailed another account's password.**
+  Passwords were paired with `createdUsernames` (only the new accounts) by position,
+  while they're generated per placeholder in file order. They're now paired with
+  `allUsernames`; when the script's return value can't be lined up with the
+  placeholders, the account is reported **without** a password ("couldn't be matched —
+  rotate this account") instead of with a guess.
+- **DCL (MariaDB): passwords shifted to the wrong account** when one `CREATE USER`
+  created several accounts, or an account had no `@host`. The parser now maps each
+  `CHANGE_ME_ON_FIRST_LOGIN` to exactly one account (no host = `'%'`); a placeholder
+  whose account can't be recognized keeps its password in the email, labeled
+  `(unrecognized account, statement N)`.
+- **DCL (MariaDB): `CREATE OR REPLACE USER`, or `DROP USER` + `CREATE USER`, on an
+  existing account was reported as `NO CHANGE`** although its password had been replaced
+  — the new one was lost. It's now `PASSWORD CHANGED` with the new password. `ALTER USER`
+  in a file that also creates accounts is `PASSWORD CHANGED` too (it was shown as `NEW`
+  or `NO CHANGE`).
+- **`dcl` printed "All DCL migrations are up-to-date."** after a failed run.
+- **Image: `/tmp` was root-owned `755`**, so a non-root container (the k8s Jobs run as
+  uid 1000) couldn't run MongoDB DCL scripts with generated passwords (`EACCES … mkdtemp`).
+  Now `1777`.
+- **`baseline --up-to` / `--file`** picked the first file whose name *contained* the
+  argument (`users`, `2025`, …), so a short argument could mark the wrong range as
+  applied. Now: the exact file name (with or without `.sql`/`.js`), or a prefix only one
+  file has (e.g. its timestamp); a prefix several files share is an error listing them.
+
+### New
+
+- **Recovering from a failed migration**: `docs/DDL-PRODUCTION-SAFETY.md` §7.4 — what is
+  and isn't all-or-nothing on MariaDB and MongoDB (measured on real servers), why not
+  `down` (`down -n 1` after a failure rolls back the previous, successful migration), and
+  how to write migrations that can simply be re-run, with PreCheck / PostCheck examples
+  tested on MariaDB 11 and MongoDB 7.
+- **R4 large-table warning (MariaDB)**: before `up` / `sync` / `up-all` (and their
+  `--dry-run`), a pending migration that runs `ALTER TABLE`, `CREATE INDEX`,
+  `OPTIMIZE TABLE`, `UPDATE` or `DELETE` on a table with `runtimeGates.largeTableRows`
+  (1,000,000) rows or more is warned about, with the table's size — Lock Guard bounds
+  only the wait for the lock, not how long the statement runs. Never blocks; `0` turns
+  it off. The MariaDB counterpart of `largeCollectionDocs`. The warning names the
+  statement time limit that applies; `-- @large-table-ok: true` silences it for a
+  reviewed file.
+- **Statement time limit (MariaDB)**: `ddlSafety.statementTimeoutSec`, or
+  `-- @statement-timeout-sec: N` per file (`0` = no limit for that file), sets
+  `max_statement_time` for the migration — a statement running longer is stopped and
+  rolled back by the server, never retried. Off by default; not available on MySQL
+  (refused before anything runs). A malformed annotation fails validation
+  (`INVALID_STATEMENT_TIMEOUT`).
+- **Stopping a migration that runs too long**: `docs/DDL-PRODUCTION-SAFETY.md` §7.5 —
+  `KILL QUERY` (measured: stopped in ~1 s, table unchanged), and why killing the Pod or
+  the client does **not** stop it (the server finishes the ALTER and commits it).
+- **MariaDB `ssl` option** (adapter and the Docker entrypoint's wait-for-database
+  check): `ssl: true` (verify against Node's default CAs), `ssl: { caFile, certFile,
+  keyFile }` (files read for you), or any mysql2 `ssl` object. See
+  `docs/USER-GUIDE-MARIADB.md` §7.2.
+- **`k8s/dynamic/`**: `submit.sh` creates a suspended Job plus ConfigMaps owned by it,
+  runs the pre-flight, then starts it; `run.sh` (in the Pod) runs `sync` then `dcl` and
+  waits for the reports to be collected; `collect.sh` fetches them, verifies checksums
+  and releases the Pod. Every failure — bad profile, empty migrations directory,
+  missing config, Kubernetes errors, DB unreachable — produces an error
+  `notification.html` ready to mail; nothing is left suspended in the cluster. Exit
+  codes, files and troubleshooting are in its README.
+- **`k8s/preflight-check.sh`**: also checks that the migrations ConfigMap isn't empty
+  and the config ConfigMap has its files (`REQUIRED_CONFIG_KEYS`, default `config.js`);
+  new optional `DB`, `EXCLUDE_JOB`, `SUSPENDED_STALE_SECONDS`.
+
+### Behavior changes
+
+- **`baseline --up-to` / `--file`**: an argument that only matched part of a name now
+  fails with "not found" (or "matches N migrations"). Use the full file name or its
+  timestamp.
+- **Pre-flight `notification.html` is now mode `0600`** (it was `0644`), like the other
+  notification files. A mailer running as a different user than the one that ran the
+  pre-flight needs access.
+- **Pre-flight overlap check**: a Job counts as running until it has a Complete/Failed
+  condition (before: only while it had active Pods), so a Job whose Pod hasn't started
+  yet now blocks too. A Job suspended for over `SUSPENDED_STALE_SECONDS` (600) that
+  never started is ignored with a warning.
+- **MariaDB migration errors** from a migration with several statements end with
+  `(statement N of M; …)`. The MariaDB error code and the start of the message are
+  unchanged.
+- **DCL email** may now show `PASSWORD CHANGED` where 3.0.0 showed `NEW`/`NO CHANGE`
+  (the cases under Fixed), and a MongoDB account whose password can't be matched shows
+  no password.
+
+### Upgrade
+
+1. Use the 3.0.1 image.
+2. RDS / TLS-only MariaDB: add `ssl: { caFile: … }` to both DDL and DCL configs and ship
+   the CA bundle with them.
+3. MongoDB DCL scripts with `CHANGE_ME_ON_FIRST_LOGIN`: make sure `up()` returns
+   `allUsernames` listing every such account in file order
+   (`users.map(u => u.username)`), as in `docs/DCL-PASSWORD.md`.
+4. Scripts calling `baseline --up-to` / `--file` with a partial name: switch to the full
+   name or timestamp.
+
+### Caveats
+
+- If a 3.0.0 run hit one of the DCL bugs above, the affected accounts exist with a
+  password nobody has: rotate them (`ALTER USER` / `updateUser` R__ script).
+- MariaDB TLS was verified against a server with `require_secure_transport=ON` and a
+  private CA, not against RDS itself; the privileges the runtime gates need on RDS
+  (`PROCESS`) are not verified yet.
+- `k8s/dynamic/` isn't used by the CI deploy jobs yet — they still apply `k8s/job.yaml`.
+
 ## [3.0.0] - 2026-10-02
 
 Everything since **2.0.0** (2026-07-23, commit `644fa86`). Contains breaking changes —

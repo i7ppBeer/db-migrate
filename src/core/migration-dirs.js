@@ -96,3 +96,27 @@ export async function findExisting(migrationsDir, fileName) {
   }
   return null;
 }
+
+/**
+ * Find the migration a user named on the command line (baseline --up-to /
+ * --file): the exact file name, or the name without its .sql/.js extension;
+ * failing that, a prefix that only one file starts with (typically its
+ * timestamp). Never a substring from the middle of a name — '2025' or 'users'
+ * would otherwise silently pick whichever file happened to sort first.
+ *
+ * @param {string[]} fileNames
+ * @param {string} wanted
+ * @param {string} flag - for the error message, e.g. '--up-to'
+ * @returns {string|null} the file name, or null when nothing matches
+ * @throws when the prefix matches more than one file
+ */
+export function matchMigrationFile(fileNames, wanted, flag) {
+  const exact = fileNames.find(f => f === wanted || f.replace(/\.(sql|[cm]?js)$/i, '') === wanted);
+  if (exact) return exact;
+  const prefixed = fileNames.filter(f => f.startsWith(wanted));
+  if (prefixed.length > 1) {
+    const shown = prefixed.slice(0, 5).join(', ') + (prefixed.length > 5 ? ', …' : '');
+    throw new Error(`${flag} '${wanted}' matches ${prefixed.length} migrations (${shown}) — give the full file name`);
+  }
+  return prefixed[0] ?? null;
+}

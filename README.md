@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.12-green.svg)](https://nodejs.org/)
-[![Version](https://img.shields.io/badge/version-3.0.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-3.0.1-blue.svg)](package.json)
 
 New to this tool? [QUICKSTART.md](QUICKSTART.md) is a task-oriented walkthrough ("I want to create a migration", "I want to add a DB account", …). This README is the reference: what the tool does, every command, every config shape, and where the deeper docs live.
 
@@ -25,7 +25,7 @@ Most migration tools handle schema changes (DDL) and stop there. This one also t
 - **Runtime gates before execution** — right before `up`/`sync`/`up-all`/`down` run anything: refuse if a long-open transaction or a queued metadata-lock wait could make the migration jam the table (`--allow-open-transactions` to override, logged), refuse a read-only target (no override — `dcl` too), and warn on low disk / large binlogs / replication lag. See [docs/RUNTIME-GATE-PLAN.md](docs/RUNTIME-GATE-PLAN.md).
 - **Lock Guard (MariaDB)** — every DDL statement runs under a bounded `lock_wait_timeout` with retry, so an `ALTER TABLE` stuck behind a long-running transaction's metadata lock fails fast instead of queuing indefinitely and jamming every later query on that table. See [docs/LOCK-GUARD.md](docs/LOCK-GUARD.md).
 - **Sanity Check** — optional Pre-Check / Post-Check assertions per migration, with auto-rollback if the post-condition doesn't hold.
-- **DCL auto-generated passwords** — a `CHANGE_ME_ON_FIRST_LOGIN` placeholder in a DCL script is replaced at runtime with its own cryptographically secure, independently generated password (never printed, never written back to the file). It's never written to a bare file either — every account/permission event from a `dcl`/`sync` run (new password, rotated password, no change, account removed, permissions updated) is rendered into one mail-client-safe **run notification email** (`reports/notification.html` by default), the only place a generated password appears. See [docs/DCL-PASSWORD.md](docs/DCL-PASSWORD.md).
+- **DCL auto-generated passwords** — a `CHANGE_ME_ON_FIRST_LOGIN` placeholder in a DCL script is replaced at runtime with its own cryptographically secure, independently generated password (never printed, never written back to the file). It's never written to a bare file either — every account/permission event from a `dcl`/`dcl-all` run (new password, rotated password, no change, account removed, permissions updated) is rendered into one mail-client-safe **run notification email** (`reports/notification.html` by default), the only place a generated password appears. See [docs/DCL-PASSWORD.md](docs/DCL-PASSWORD.md).
 - **Reports** — `sync`, `test-all`, and `test-instances` can all emit a JSON + HTML report via `-o <dir>`.
 - **Kubernetes-ready** — example manifests in [`k8s/`](k8s/) for running `sync` as a one-shot Job, credentials from a Secret, migrations from a content-hashed ConfigMap.
 
@@ -249,7 +249,7 @@ export default {
 
 One known-slow migration (e.g. a large index build) can get its own limit without loosening the rest — `// @operation-timeout-ms: 600000` at the top of the file (`0` = no limit for that file).
 
-Before `up`/`sync`/`up-all` run, a pending MongoDB migration that builds an index or runs `updateMany`/`deleteMany`/`bulkWrite` on a collection with 1,000,000+ documents gets a warning naming the collection's size and the time limit that will apply (`runtimeGates.largeCollectionDocs` to change the threshold, `0` to turn it off). It never blocks.
+Before `up`/`sync`/`up-all` run, a pending MongoDB migration that builds an index or runs `updateMany`/`deleteMany`/`bulkWrite` on a collection with 1,000,000+ documents gets a warning naming the collection's size and the time limit that will apply (`runtimeGates.largeCollectionDocs` to change the threshold, `0` to turn it off). For MariaDB, an `ALTER TABLE`, `CREATE INDEX`, `OPTIMIZE TABLE`, `UPDATE` or `DELETE` on a table with 1,000,000+ rows gets the same kind of warning (`runtimeGates.largeTableRows`). It never blocks.
 
 Without the privilege the open-transaction check (R2) needs — `PROCESS` on MariaDB, `clusterMonitor` on MongoDB — it is skipped with a notice. For production, `runtimeGates: { requireLockCheck: true }` refuses such a run instead.
 

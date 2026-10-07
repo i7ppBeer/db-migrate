@@ -24,7 +24,9 @@ RUN chmod +x /app/docker/entrypoint.sh
 
 # --- Security ---
 ENV NODE_ENV=production
-RUN mkdir -p /app/reports /tmp && chmod 755 /app/reports /tmp
+# /tmp stays world-writable + sticky: the DCL runner (non-root in k8s) writes
+# its generated-password hand-off file there (repeatable-runner.js mkdtemp)
+RUN mkdir -p /app/reports /tmp && chmod 755 /app/reports && chmod 1777 /tmp
 
 ENTRYPOINT ["/app/docker/entrypoint.sh"]
 # No arguments → usage help (a bare `docker run <image>` used to fail with

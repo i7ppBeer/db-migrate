@@ -1,0 +1,102 @@
+# db-migrate per-run Job — DDL (sync) then DCL (dcl), then waits for an
+# external collector to fetch the reports before exiting.
+#
+# Rendered by submit.sh — do not apply by hand. Every {{ placeholder }} is
+# filled in there; see k8s/dynamic/README.md for the full flow.
+#
+# Created with suspend: true. submit.sh creates this run's ConfigMaps (owned
+# by this Job, so they are garbage-collected with it), runs the pre-flight
+# check, and only then un-suspends it.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ job }}"
+  namespace: "{{ namespace }}"
+  labels:
+    app: db-migrate
+    project: "{{ project }}"
+    db: "{{ db }}"
+    db-migrate/run-id: "{{ runId }}"
+  annotations:
+    db-migrate/environment: "{{ environment }}"
+    db-migrate/ddl-hash: "{{ ddlHash }}"
+    db-migrate/dcl-hash: "{{ dclHash }}"
+spec:
+  suspend: true
+  # DO NOT raise this. A DDL migration that fails partway can leave the
+  # database half-applied (docs/DDL-PRODUCTION-SAFETY.md section 1.8); a
+  # retry would run blindly against that state.
+  backoffLimit: 0
+  # Migration time + the time run.sh waits for the reports to be collected.
+  activeDeadlineSeconds: {{ activeDeadlineSeconds }}
+  # Deletes the Job, its Pod and (via ownerReferences) this run's ConfigMaps.
+  ttlSecondsAfterFinished: {{ ttlSeconds }}
+  template:
+    metadata:
+      labels:
+        app: db-migrate
+        project: "{{ project }}"
+        db: "{{ db }}"
+        db-migrate/run-id: "{{ runId }}"
+    spec:
+      restartPolicy: Never
+      # Credentials come from mounted Secret files, not the Kubernetes API —
+      # the Pod needs no API token at all.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: migrate
+          image: "{{ image }}"
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "/app/config/run.sh"]
+          envFrom:
+            # DB host/port/database/URL (no credentials) — from the profile's db.env
+            - configMapRef:
+                name: "{{ job }}-env"
+          env:
+            - name: DB_MIGRATE_ENVIRONMENT
+              value: "{{ environment }}"
+            # For the header of error emails run.sh writes itself
+            - name: DB_MIGRATE_PROJECT
+              value: "{{ project }}"
+            - name: DB_MIGRATE_DB
+              value: "{{ db }}"
+            - name: DB_MIGRATE_JOB
+              value: "{{ job }}"
+            - name: COLLECT_TIMEOUT_SECONDS
+              value: "{{ collectTimeoutSeconds }}"
+          volumeMounts:
+            - { name: config, mountPath: /app/config, readOnly: true }
+            - { name: ddl, mountPath: /app/migrations/ddl, readOnly: true }
+            - { name: dcl, mountPath: /app/migrations/dcl, readOnly: true }
+            - { name: ddl-cred, mountPath: /var/run/secrets/db-migrate/ddl, readOnly: true }
+            - { name: dcl-cred, mountPath: /var/run/secrets/db-migrate/dcl, readOnly: true }
+            - { name: reports, mountPath: /app/reports }
+            # Writable /tmp for uid 1000 — the DCL runner hands generated
+            # passwords to Mongo scripts through a private temp file there
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+      volumes:
+        - name: config
+          configMap: { name: "{{ job }}-config" }
+        - name: ddl
+          configMap: { name: "{{ job }}-ddl" }
+        - name: dcl
+          configMap: { name: "{{ job }}-dcl" }
+        # 0440, not 0400: the files are owned by root with group = fsGroup,
+        # so uid 1000 reads them through the group bit.
+        - name: ddl-cred
+          secret: { secretName: "{{ ddlSecret }}", defaultMode: 0440 }
+        - name: dcl-cred
+          secret: { secretName: "{{ dclSecret }}", defaultMode: 0440 }
+        - name: reports
+          emptyDir: {}
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }

@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { MariaDBAdapter } from '../src/adapters/mariadb-adapter.js';
+import { MariaDBAdapter, resolveSslOption } from '../src/adapters/mariadb-adapter.js';
 import * as fsp from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
@@ -2448,6 +2448,67 @@ describe('MariaDBAdapter — executeWithLockGuard', () => {
     expect(mockConnection.query).toHaveBeenCalledTimes(1);
   });
 
+  it('runs a multi-statement migration one statement at a time and retries only the one that timed out', async () => {
+    const sent = [];
+    let alterAttempts = 0;
+    mockConnection.query.mockImplementation(async (sql) => {
+      sent.push(sql);
+      if (sql.startsWith('ALTER TABLE orders') && ++alterAttempts === 1) throw lockWaitError();
+      return [[]];
+    });
+
+    await guardAdapter.executeWithLockGuard('CREATE TABLE side (id INT);\nALTER TABLE orders ADD COLUMN foo INT;', { database: 'test' });
+
+    expect(sent).toEqual([
+      'SET SESSION lock_wait_timeout = 5',
+      'SET SESSION innodb_lock_wait_timeout = 5',
+      'USE `test`',
+      'CREATE TABLE side (id INT)',          // once — not re-run on retry
+      'ALTER TABLE orders ADD COLUMN foo INT', // timed out
+      'ALTER TABLE orders ADD COLUMN foo INT'  // retried alone
+    ]);
+  });
+
+  it('a failure on a later statement says which statement and that the earlier ones were applied (errno kept)', async () => {
+    mockConnection.query.mockImplementation(async (sql) => {
+      if (sql.startsWith('ALTER TABLE orders')) throw lockWaitError();
+      return [[]];
+    });
+
+    const err = await guardAdapter.executeWithLockGuard('CREATE TABLE a (id INT); CREATE TABLE b (id INT); ALTER TABLE orders ADD COLUMN foo INT')
+      .catch(e => e);
+    expect(err.errno).toBe(1205);
+    expect(err.message).toMatch(/^Lock wait timeout exceeded; try restarting transaction \(statement 3 of 3; statements 1–2 were already applied — MariaDB commits each DDL statement/);
+  });
+
+  it('a failure on the first statement adds only its position', async () => {
+    mockConnection.query.mockImplementation(async (sql) => {
+      if (sql.startsWith('ALTER')) { const e = new Error('Unknown column'); e.errno = 1054; throw e; }
+      return [[]];
+    });
+    const err = await guardAdapter.executeWithLockGuard('ALTER TABLE x DROP COLUMN y; CREATE TABLE z (id INT)').catch(e => e);
+    expect(err.message).toBe('Unknown column (statement 1 of 2)');
+  });
+
+  it('SQL that cannot be split with certainty is sent as one batch, once — never retried', async () => {
+    const sent = [];
+    mockConnection.query.mockImplementation(async (sql) => {
+      sent.push(sql);
+      if (sql.includes('broken')) throw lockWaitError();
+      return [[]];
+    });
+    const unsplittable = "CREATE PROCEDURE broken() BEGIN SELECT 1;"; // no END
+    await expect(guardAdapter.executeWithLockGuard(unsplittable)).rejects.toMatchObject({ errno: 1205 });
+    expect(sent.filter(s => s.includes('broken'))).toEqual([unsplittable]);
+  });
+
+  it('enabled: false sends USE + the whole migration as one batch, as before Lock Guard', async () => {
+    guardAdapter.config.ddlSafety.lockGuard.enabled = false;
+    mockConnection.query.mockResolvedValue([[]]);
+    await guardAdapter.executeWithLockGuard('CREATE TABLE a (id INT); CREATE TABLE b (id INT);', { database: 'test' });
+    expect(mockConnection.query.mock.calls).toEqual([['USE `test`;\nCREATE TABLE a (id INT); CREATE TABLE b (id INT);']]);
+  });
+
   it('falls back to defaults when ddlSafety.lockGuard is not configured', async () => {
     const bareAdapter = new MariaDBAdapter({
       migrationsDir: '/test/migrations',
@@ -2603,5 +2664,38 @@ describe('MariaDBAdapter — getSchemaSnapshot', () => {
     adapter.connection = conn;
     const snapshot = await adapter.getSchemaSnapshot();
     expect(snapshot[0].rows).toBeNull();
+  });
+});
+
+describe('resolveSslOption — the ssl config option', () => {
+  let dir;
+  beforeEach(async () => {
+    dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ssl-'));
+    await fsp.writeFile(path.join(dir, 'ca.pem'), 'CA-PEM');
+  });
+  afterEach(async () => {
+    await fsp.rm(dir, { recursive: true, force: true });
+  });
+
+  it('unset / false → no TLS', () => {
+    expect(resolveSslOption(undefined)).toBeUndefined();
+    expect(resolveSslOption(false)).toBeUndefined();
+  });
+
+  it('true → TLS with the default CAs (certificate still verified)', () => {
+    expect(resolveSslOption(true)).toEqual({});
+  });
+
+  it('caFile is read into ca; other keys pass through to mysql2', () => {
+    expect(resolveSslOption({ caFile: path.join(dir, 'ca.pem'), rejectUnauthorized: true }))
+      .toEqual({ ca: 'CA-PEM', rejectUnauthorized: true });
+  });
+
+  it('an unreadable caFile is a clear error naming the file', () => {
+    expect(() => resolveSslOption({ caFile: path.join(dir, 'missing.pem') })).toThrow(/ssl\.caFile: cannot read .*missing\.pem \(ENOENT\)/);
+  });
+
+  it('anything else is rejected', () => {
+    expect(() => resolveSslOption('Amazon RDS')).toThrow(/ssl must be true or an object/);
   });
 });

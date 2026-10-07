@@ -1,0 +1,6 @@
+# Extra arguments for `sync` — one per line (values with spaces stay intact).
+# -c / -o are set by run.sh and are rejected here. Examples:
+#--sanity-check
+#--allow-dangerous
+#--approved-by
+#Alice (CAB-1042)

@@ -49,8 +49,12 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      # staging: test, build, deploy to staging only.
+      # production: the same, then production (after its manual approval) —
+      # production is never deployed without staging first. Run from main
+      # (release/* deploys to staging only).
       environment:
-        description: 'Deploy to environment'
+        description: 'Deploy to: staging only, or staging then production'
         required: true
         default: 'staging'
         type: choice
@@ -379,7 +383,7 @@ jobs:
             -e "s/{{ project }}/${PROJECT}/g" \
             -e "s/{{ namespace }}/${NAMESPACE}/g" \
             -e "s/{{ contentHash }}/${CONTENT_HASH:0:7}/g" \
-            -e "s|your-registry/db-migrate:3.0.0|${REGISTRY}/${IMAGE_NAME}:${{ needs.build.outputs.image_tag }}|g" \
+            -e "s|your-registry/db-migrate:3.0.1|${REGISTRY}/${IMAGE_NAME}:${{ needs.build.outputs.image_tag }}|g" \
             k8s/job.yaml \
             | sed "s|mariadb\.${NAMESPACE}\.svc\.cluster\.local|${MARIADB_HOST_OVERRIDE:-mariadb.${NAMESPACE}.svc.cluster.local}|g" \
             | kubectl apply -f -
@@ -401,7 +405,10 @@ jobs:
     needs: [build, deploy-staging]
     runs-on: ubuntu-latest
     environment: production  # Requires manual approval
-    if: vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    # A manual run deploys to production only when "production" was chosen
+    if: >-
+      vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' &&
+      (github.event_name != 'workflow_dispatch' || inputs.environment == 'production')
     env:
       NAMESPACE: production
       CONTENT_HASH: ${{ github.sha }}
@@ -452,7 +459,7 @@ jobs:
             -e "s/{{ project }}/${PROJECT}/g" \
             -e "s/{{ namespace }}/${NAMESPACE}/g" \
             -e "s/{{ contentHash }}/${CONTENT_HASH:0:7}/g" \
-            -e "s|your-registry/db-migrate:3.0.0|${REGISTRY}/${IMAGE_NAME}:${{ needs.build.outputs.image_tag }}|g" \
+            -e "s|your-registry/db-migrate:3.0.1|${REGISTRY}/${IMAGE_NAME}:${{ needs.build.outputs.image_tag }}|g" \
             k8s/job.yaml \
             | sed "s|mariadb\.${NAMESPACE}\.svc\.cluster\.local|${MARIADB_HOST_OVERRIDE:-mariadb.${NAMESPACE}.svc.cluster.local}|g" \
             | kubectl apply -f -
