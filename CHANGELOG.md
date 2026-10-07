@@ -94,6 +94,23 @@ changes, no config changes required — but read **Behavior changes** if you scr
   `down` (`down -n 1` after a failure rolls back the previous, successful migration), and
   how to write migrations that can simply be re-run, with PreCheck / PostCheck examples
   tested on MariaDB 11 and MongoDB 7.
+- **R4 large-table warning (MariaDB)**: before `up` / `sync` / `up-all` (and their
+  `--dry-run`), a pending migration that runs `ALTER TABLE`, `CREATE INDEX`,
+  `OPTIMIZE TABLE`, `UPDATE` or `DELETE` on a table with `runtimeGates.largeTableRows`
+  (1,000,000) rows or more is warned about, with the table's size — Lock Guard bounds
+  only the wait for the lock, not how long the statement runs. Never blocks; `0` turns
+  it off. The MariaDB counterpart of `largeCollectionDocs`. The warning names the
+  statement time limit that applies; `-- @large-table-ok: true` silences it for a
+  reviewed file.
+- **Statement time limit (MariaDB)**: `ddlSafety.statementTimeoutSec`, or
+  `-- @statement-timeout-sec: N` per file (`0` = no limit for that file), sets
+  `max_statement_time` for the migration — a statement running longer is stopped and
+  rolled back by the server, never retried. Off by default; not available on MySQL
+  (refused before anything runs). A malformed annotation fails validation
+  (`INVALID_STATEMENT_TIMEOUT`).
+- **Stopping a migration that runs too long**: `docs/DDL-PRODUCTION-SAFETY.md` §7.5 —
+  `KILL QUERY` (measured: stopped in ~1 s, table unchanged), and why killing the Pod or
+  the client does **not** stop it (the server finishes the ALTER and commits it).
 - **MariaDB `ssl` option** (adapter and the Docker entrypoint's wait-for-database
   check): `ssl: true` (verify against Node's default CAs), `ssl: { caFile, certFile,
   keyFile }` (files read for you), or any mysql2 `ssl` object. See

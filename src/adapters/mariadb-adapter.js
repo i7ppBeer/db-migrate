@@ -50,6 +50,11 @@ export function resolveSslOption(ssl) {
   };
 }
 
+/** "600" → 600, "0" → 0, anything else → null. */
+function parseWholeNumber(raw) {
+  return /^\d+$/.test(String(raw).trim()) ? Number(String(raw).trim()) : null;
+}
+
 export class MariaDBAdapter extends BaseAdapter {
   constructor(config) {
     super(config);
@@ -292,11 +297,46 @@ export class MariaDBAdapter extends BaseAdapter {
    * script can't be split with certainty (splitSqlStatements() returns null),
    * it's sent as one batch with a single attempt instead — never retried.
    *
+   * With a statement time limit (resolveStatementTimeout()), the session's
+   * max_statement_time is set for the migration and restored afterwards: a
+   * statement running longer is stopped and rolled back by the server
+   * (errno 1969, or 1317 for an in-place ALTER) — never retried.
+   *
    * @param {string} sql - The migration's SQL
-   * @param {{database?: string}} [opts] - database to USE first
+   * @param {{database?: string, timeoutSec?: number|null, timeoutSource?: string}} [opts] -
+   *   database to USE first; statement time limit in seconds and where it came from
    * @returns {Promise<*>} - this.connection.query()'s result for the last statement
    */
-  async executeWithLockGuard(sql, { database } = {}) {
+  async executeWithLockGuard(sql, { database, timeoutSec = null, timeoutSource = 'ddlSafety.statementTimeoutSec' } = {}) {
+    if (!timeoutSec) return this._executeGuarded(sql, database);
+    let previous;
+    try {
+      [[{ previous }]] = await this.connection.query('SELECT @@session.max_statement_time AS previous');
+    } catch (error) {
+      if (error?.errno === 1193) { // ER_UNKNOWN_SYSTEM_VARIABLE: MySQL
+        throw new Error(`${timeoutSource} needs MariaDB's max_statement_time, which this server doesn't have (MySQL?) — remove it; nothing was run.`);
+      }
+      throw error;
+    }
+    await this.connection.query(`SET SESSION max_statement_time = ${Number(timeoutSec)}`);
+    try {
+      return await this._executeGuarded(sql, database);
+    } catch (error) {
+      const interrupted = error && (error.errno === 1969 || error.errno === 1317);
+      if (interrupted && error instanceof Error) {
+        const hint = timeoutSource === '@statement-timeout-sec'
+          ? 'If this migration needs longer, raise the value in its "-- @statement-timeout-sec:" line (0 = no limit), or run it off-peak.'
+          : 'If this migration is expected to be slow (e.g. an ALTER on a large table), give just this file more time with "-- @statement-timeout-sec: <s>" at the top (0 = no limit), or run it off-peak.';
+        error.message += ` — stopped by ${timeoutSource} (${timeoutSec} s) or a KILL QUERY; the server rolled that statement back. ${hint}`;
+      }
+      throw error;
+    } finally {
+      await this.connection.query(`SET SESSION max_statement_time = ${Number(previous)}`).catch(() => {});
+    }
+  }
+
+  /** executeWithLockGuard() without the statement time limit. @private */
+  async _executeGuarded(sql, database) {
     const cfg = this.config.ddlSafety?.lockGuard ?? {};
     const enabled = cfg.enabled ?? true;
     const use = database ? `USE \`${database}\`` : null;
@@ -805,7 +845,7 @@ export class MariaDBAdapter extends BaseAdapter {
 
   /** All rule codes this adapter reports (for checking validation.rules). */
   knownValidationCodes() {
-    const codes = new Set(['SQL_SYNTAX_ERROR', 'SQL_SYNTAX_ERROR_DOWN', 'SANITY_SQL_SYNTAX_ERROR', 'ORPHAN_DROP_DOWN', 'ORPHAN_DROP_UP', 'FK_REFERENCES_DROPPED_TABLE', 'FK_UNRESOLVED_REFERENCE', 'MISSING_DOWN', 'MISSING_UP_MARKER', 'INSERT_SELECT', 'DROP_TABLE']);
+    const codes = new Set(['SQL_SYNTAX_ERROR', 'SQL_SYNTAX_ERROR_DOWN', 'SANITY_SQL_SYNTAX_ERROR', 'ORPHAN_DROP_DOWN', 'ORPHAN_DROP_UP', 'FK_REFERENCES_DROPPED_TABLE', 'FK_UNRESOLVED_REFERENCE', 'MISSING_DOWN', 'MISSING_UP_MARKER', 'INSERT_SELECT', 'DROP_TABLE', 'INVALID_STATEMENT_TIMEOUT']);
     for (const mode of ['versioned', 'repeatable']) {
       const rules = this.getValidationRules(mode);
       for (const group of [rules.forbidden, rules.dangerous]) {
@@ -832,7 +872,8 @@ export class MariaDBAdapter extends BaseAdapter {
    *   R3 readOnly — @@read_only / @@innodb_read_only. Checked regardless of
    *      the account's privileges: a SUPER/READ_ONLY ADMIN account can still
    *      write to a read-only replica, which only makes it diverge
-   *   R4 warnings — total binary log size above binlogWarnMb
+   *   R4 warnings — total binary log size above binlogWarnMb (large tables
+   *      in the pending migrations: largeTableWarnings())
    *
    * @param {{ locks?: boolean, disk?: boolean }} [which] - R2 / R4 (R3 always)
    */
@@ -883,6 +924,125 @@ export class MariaDBAdapter extends BaseAdapter {
         out.skipped.push(/not using binary logging/i.test(error.message)
           ? 'R4 binary-log size: binary logging is off'
           : `R4 binary-log size (needs BINLOG MONITOR / REPLICATION CLIENT): ${error.message}`);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The statement time limit for one migration file: its own
+   * `-- @statement-timeout-sec: N` (0 = no limit for this file) wins over
+   * ddlSafety.statementTimeoutSec — so one known-slow migration can get more
+   * time without loosening every other one. Off by default. MariaDB only
+   * (max_statement_time; MySQL has no equivalent for DDL).
+   * @returns {{ timeoutSec: number|null, timeoutSource: string }}
+   */
+  resolveStatementTimeout(content = '') {
+    const raw = this.parseFileAnnotations(content).statementTimeoutSec;
+    if (raw != null) {
+      const value = parseWholeNumber(raw);
+      if (value === null) throw new Error(`@statement-timeout-sec must be a whole number of seconds (0 = no limit for this file), got: ${raw}`);
+      return { timeoutSec: value || null, timeoutSource: '@statement-timeout-sec' };
+    }
+    const value = this.config.ddlSafety?.statementTimeoutSec;
+    if (value == null || value === 0) return { timeoutSec: null, timeoutSource: 'ddlSafety.statementTimeoutSec' };
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`ddlSafety.statementTimeoutSec must be a positive integer (seconds), got: ${value}`);
+    }
+    return { timeoutSec: value, timeoutSource: 'ddlSafety.statementTimeoutSec' };
+  }
+
+  /**
+   * Statements in a migration's Up whose run time grows with the table:
+   * ALTER TABLE, CREATE INDEX … ON, OPTIMIZE TABLE, UPDATE, DELETE FROM.
+   * A db-qualified name keeps its schema; otherwise schema is null (this
+   * database).
+   *
+   * @param {string} upSQL
+   * @returns {{schema: string|null, table: string, ops: string[]}[]}
+   */
+  findHeavyStatements(upSQL) {
+    const statements = splitSqlStatements(upSQL) ??
+      upSQL.replace(/\/\*[\s\S]*?\*\/|(?:--\s|#).*$/gm, '').split(';');
+    const NAME = '(?:`([^`]+)`|(\\w+))';
+    const TABLE = `${NAME}(?:\\s*\\.\\s*${NAME})?`;
+    const patterns = [
+      ['ALTER TABLE', new RegExp(`^ALTER\\s+(?:(?:ONLINE|IGNORE)\\s+)*TABLE\\s+(?:IF\\s+EXISTS\\s+)?${TABLE}`, 'i')],
+      ['CREATE INDEX', new RegExp(`^CREATE\\s+(?:OR\\s+REPLACE\\s+)?(?:(?:UNIQUE|FULLTEXT|SPATIAL)\\s+)?INDEX\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(?:\`[^\`]+\`|\\w+)\\s+ON\\s+${TABLE}`, 'i')],
+      ['OPTIMIZE TABLE', new RegExp(`^OPTIMIZE\\s+(?:(?:NO_WRITE_TO_BINLOG|LOCAL)\\s+)?TABLE\\s+${TABLE}`, 'i')],
+      ['UPDATE', new RegExp(`^UPDATE\\s+(?:(?:LOW_PRIORITY|IGNORE)\\s+)*${TABLE}`, 'i')],
+      ['DELETE', new RegExp(`^DELETE\\s+(?:(?:LOW_PRIORITY|QUICK|IGNORE)\\s+)*FROM\\s+${TABLE}`, 'i')]
+    ];
+    const found = new Map(); // "schema.table" → { schema, table, ops }
+    for (const statement of statements) {
+      const text = statement.trim();
+      for (const [op, re] of patterns) {
+        const m = re.exec(text);
+        if (!m) continue;
+        const first = m[1] ?? m[2];
+        const second = m[3] ?? m[4];
+        const schema = second ? first : null;
+        const table = second ?? first;
+        const key = `${schema ?? ''}.${table}`;
+        if (!found.has(key)) found.set(key, { schema, table, ops: [] });
+        const entry = found.get(key);
+        if (!entry.ops.includes(op)) entry.ops.push(op);
+        break;
+      }
+    }
+    return [...found.values()];
+  }
+
+  /**
+   * Gate R4 (advisory) for the migrations about to run: an ALTER, index
+   * build or bulk UPDATE/DELETE on a table of runtimeGates.largeTableRows
+   * rows or more can run for a long time — Lock Guard bounds only the wait
+   * for its lock, not the run time. Said before it starts. Read-only:
+   * information_schema.TABLES (TABLE_ROWS is InnoDB's estimate).
+   *
+   * @param {string[]} files - pending migrations, in run order
+   * @returns {Promise<{warnings: string[], skipped: string[]}>}
+   */
+  async largeTableWarnings(files) {
+    const out = { warnings: [], skipped: [] };
+    const threshold = this.getRuntimeGateConfig().largeTableRows;
+    if (!threshold || !files || files.length === 0) return out;
+    const dbName = (this.config.mariadb || this.config).database;
+    const sizes = new Map();
+    const formatBytes = (bytes) => bytes >= 1024 ** 3
+      ? `${(bytes / 1024 ** 3).toFixed(1)} GB`
+      : `${Math.round(bytes / 1024 ** 2)} MB`;
+    for (const fileName of files) {
+      try {
+        const content = await fs.readFile(path.join(this.config.migrationsDir, fileName), 'utf-8');
+        const upSQL = this.extractSection(content, 'Up');
+        if (!upSQL || this.parseFileAnnotations(content).largeTableOk) continue;
+        const { timeoutSec, timeoutSource } = this.resolveStatementTimeout(content);
+        const limit = timeoutSec
+          ? `each statement is stopped after ${timeoutSec} s (${timeoutSource}) and rolled back — check that's enough at this size, or the migration fails partway`
+          : 'no statement time limit applies — set ddlSafety.statementTimeoutSec, or "-- @statement-timeout-sec: <s>" in this file, to bound it';
+        for (const { schema, table, ops } of this.findHeavyStatements(upSQL)) {
+          const key = `${schema ?? dbName}.${table}`;
+          if (!sizes.has(key)) {
+            const [rows] = await this.connection.query(
+              `SELECT TABLE_ROWS AS table_rows, DATA_LENGTH + INDEX_LENGTH AS bytes
+                 FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND TABLE_TYPE = 'BASE TABLE'`,
+              [schema ?? dbName, table]
+            );
+            // a table created earlier in this run doesn't exist yet — empty
+            sizes.set(key, rows[0] ? { rows: Number(rows[0].table_rows ?? 0), bytes: Number(rows[0].bytes ?? 0) } : { rows: 0, bytes: 0 });
+          }
+          const { rows, bytes } = sizes.get(key);
+          if (rows < threshold) continue;
+          out.warnings.push(`${fileName}: ${ops.join(', ')} on '${schema ? `${schema}.` : ''}${table}' ` +
+            `(~${rows.toLocaleString('en-US')} rows, ${formatBytes(bytes)}, over runtimeGates.largeTableRows = ${threshold.toLocaleString('en-US')}) ` +
+            'may run for a long time; Lock Guard bounds only the wait for its lock, not the run time, and an ALTER that copies the table ' +
+            `blocks writes to it until it finishes. ${limit[0].toUpperCase()}${limit.slice(1)}. ` +
+            'Consider pt-online-schema-change, or running it off-peak; "-- @large-table-ok: true" in the file once reviewed.');
+        }
+      } catch (error) {
+        out.skipped.push(`R4 large-table check for ${fileName}: ${error.message}`);
       }
     }
     return out;
@@ -965,7 +1125,7 @@ export class MariaDBAdapter extends BaseAdapter {
             // context is guaranteed within the same multi-statement execution.
             // This means migration files don't need to include "USE <db>" themselves.
             // Run in the configured database, guarded against MDL queue jams
-            await this.executeWithLockGuard(upSQL, { database: dbName });
+            await this.executeWithLockGuard(upSQL, { database: dbName, ...this.resolveStatementTimeout(content) });
           }
 
           // Record in changelog — an Up section with no statements is a
@@ -1060,7 +1220,7 @@ export class MariaDBAdapter extends BaseAdapter {
               up: async () => {
                 if (upSQL) {
                   const dbName = (this.config.mariadb || this.config).database;
-                  await this.executeWithLockGuard(upSQL, { database: dbName });
+                  await this.executeWithLockGuard(upSQL, { database: dbName, ...this.resolveStatementTimeout(content) });
                 }
                 const id = file.replace('.sql', '');
                 await this.connection.execute(
@@ -1071,7 +1231,7 @@ export class MariaDBAdapter extends BaseAdapter {
               down: async () => {
                 if (downSQL) {
                   const dbName = (this.config.mariadb || this.config).database;
-                  await this.executeWithLockGuard(downSQL, { database: dbName });
+                  await this.executeWithLockGuard(downSQL, { database: dbName, ...this.resolveStatementTimeout(content) });
                   const id = file.replace('.sql', '');
                   await this.connection.execute(
                     `DELETE FROM ${this.changelogTable} WHERE id = ?`,
@@ -1108,7 +1268,7 @@ export class MariaDBAdapter extends BaseAdapter {
               const startTime = Date.now();
               if (upSQL) {
                 const dbName = (this.config.mariadb || this.config).database;
-                await this.executeWithLockGuard(upSQL, { database: dbName });
+                await this.executeWithLockGuard(upSQL, { database: dbName, ...this.resolveStatementTimeout(content) });
               }
               const id = file.replace('.sql', '');
               await this.connection.execute(
@@ -1451,7 +1611,7 @@ export class MariaDBAdapter extends BaseAdapter {
               // within the same multi-statement execution.
               const dbConfigDown = this.config.mariadb || this.config;
               // Run in the configured database, guarded against MDL queue jams
-              await this.executeWithLockGuard(downSQL, { database: dbConfigDown.database });
+              await this.executeWithLockGuard(downSQL, { database: dbConfigDown.database, ...this.resolveStatementTimeout(content) });
             } catch (downError) {
               // DOWN SQL failed — restore the changelog entry so state stays consistent
               try {
@@ -1634,6 +1794,8 @@ export class MariaDBAdapter extends BaseAdapter {
    *   -- @allow-dangerous: true
    *   -- @allow: CODE1,CODE2
    *   -- @allow-forbidden: true
+   *   -- @statement-timeout-sec: N   (0 = no limit for this file)
+   *   -- @large-table-ok: true       (no R4 large-table warning for this file)
    * Stops parsing at first non-comment, non-blank line.
    * @param {string} content - File content
    * @param {string} fileName - File name
@@ -1644,7 +1806,9 @@ export class MariaDBAdapter extends BaseAdapter {
       allowDangerous: false,
       allowForbidden: false,
       allowedCodes: [],
-      approvedBy: null
+      approvedBy: null,
+      statementTimeoutSec: null,
+      largeTableOk: false
     };
     const commentPrefix = '--';
     for (const line of content.split('\n')) {
@@ -1663,6 +1827,10 @@ export class MariaDBAdapter extends BaseAdapter {
       }
       const approvedMatch = t.match(/--\s*@approved-by\s*:\s*(.+)/i);
       if (approvedMatch && approvedMatch[1].trim()) annotations.approvedBy = approvedMatch[1].trim();
+      const timeoutMatch = t.match(/--\s*@statement-timeout-sec\s*:\s*(.+)/i);
+      if (timeoutMatch) annotations.statementTimeoutSec = timeoutMatch[1].trim();
+      const largeTableMatch = t.match(/--\s*@large-table-ok\s*:\s*(.+)/i);
+      if (largeTableMatch) annotations.largeTableOk = ['true', 'yes', '1'].includes(largeTableMatch[1].trim().toLowerCase());
       const allowMatch = t.match(/--\s*@allow\s*:\s*(.+)/i);
       if (allowMatch) {
         const codes = allowMatch[1].split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
@@ -1898,6 +2066,13 @@ export class MariaDBAdapter extends BaseAdapter {
     const syntaxResult = this.validateSQLSyntax(content, fileName);
 
     const errors = [...syntaxResult.errors];
+    if (fileAnnotations.statementTimeoutSec != null && parseWholeNumber(fileAnnotations.statementTimeoutSec) === null) {
+      errors.push({
+        type: 'invalid-annotation',
+        code: 'INVALID_STATEMENT_TIMEOUT',
+        message: `🔴 @statement-timeout-sec must be a whole number of seconds (0 = no limit for this file), got: ${fileAnnotations.statementTimeoutSec}`
+      });
+    }
     const warnings = [...syntaxResult.warnings];
     const dangerousOps = [];
     const forbiddenOps = [];

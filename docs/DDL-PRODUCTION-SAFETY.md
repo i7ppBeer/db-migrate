@@ -167,7 +167,7 @@ When `up --sanity-check` runs, if the migration file has a `PostCheck` defined, 
    ```sql
    KILL <thread_id>;  -- matches the trx_mysql_thread_id / id found via queries 2, 3 in Section 5
    ```
-3. If you truly must abort the migration itself (e.g., it's stuck by itself, or it was a misjudgment), **check the actual DB state first** after interrupting, before deciding what to do next:
+3. If you truly must abort the migration itself (e.g., it's stuck by itself, or it was a misjudgment — for one that is simply running too long, see [§7.5](#75-a-migration-is-running-too-long-in-production)), **check the actual DB state first** after interrupting, before deciding what to do next:
    ```bash
    node src/cli.js status -c <config>
    ```
@@ -276,6 +276,39 @@ Avoid updates that change the result when repeated, such as `$inc`, `$push` or `
 - **Don't add an automatic re-run.** Transient lock waits are already retried per statement by Lock Guard. Other failures (duplicate data, syntax, privileges) fail the same way every time, and re-running a MongoDB data change that keeps failing only adds to what it left behind. Re-run once someone has looked at the cause.
 
 Writing every migration this way from the start (re-runnable, same-table changes in one `ALTER`, a PreCheck on preconditions and a PostCheck on the end state) means a failure needs no file edit: remove the cause and re-run.
+
+### 7.5 A migration is running too long in production
+
+Stop it on the server with `KILL QUERY` — **not** by killing the Pod, deleting the Job, pressing Ctrl-C or waiting for `activeDeadlineSeconds`. Those stop the client only: MariaDB keeps running the statement and commits it.
+
+Measured on MariaDB 11.8 with a 4,000,000-row InnoDB table (2026-10-07):
+
+| What was done | What happened to the statement | Table afterwards |
+|---|---|---|
+| `KILL QUERY` on a COPY `ALTER … MODIFY` | gone ~1 s later, errno 1317 to the client | unchanged; no `#sql…` temp table left |
+| 3 s `max_statement_time` on a COPY `ALTER` | stopped at 3.2 s, errno 1969 | unchanged |
+| 3 s `max_statement_time` on an in-place `ADD INDEX` | stopped at 3.2 s, errno 1317 | no index |
+| 3 s `max_statement_time` on `UPDATE` of every row | stopped, then rolled back — 6.7 s in all | unchanged (`SUM` identical) |
+| Client process killed 3 s into a COPY `ALTER` | **kept running**, finished ~40 s later | **altered** (`INT` → `BIGINT`), migration not recorded |
+
+1. Find the statement:
+   ```sql
+   SELECT ID, USER, TIME, STATE, LEFT(INFO, 120) AS query
+     FROM information_schema.PROCESSLIST
+    WHERE DB = '<database>' AND COMMAND = 'Query' AND ID <> CONNECTION_ID()
+    ORDER BY TIME DESC;
+   ```
+   `copy to tmp table` in `STATE` is a COPY `ALTER`: writes to that table are blocked until it ends.
+2. Decide whether stopping is cheaper than waiting. An `ALTER` stops almost at once. An `UPDATE` / `DELETE` has to roll back what it already changed, which takes about as long as it has run — near the end, letting it finish is usually quicker.
+3. Stop it:
+   ```sql
+   KILL QUERY <ID>;
+   ```
+   The tool receives the error, reports which statement of the file stopped (X3 in [EXECUTION-FLOW.md](EXECUTION-FLOW.md)), doesn't record the migration and runs nothing after it. Statements before it in the same file stay applied — recover per [§7.4](#74-a-migration-failed-partway-recovering).
+
+**If the client was already killed** (Pod deadline, Job deleted): the statement is still running or already committed. Watch `PROCESSLIST` until it's gone, check the table, then either `baseline --file <file>` (the whole file is now applied) or finish / undo it by hand per §7.4 — re-running `up` would repeat statements that already ran.
+
+**Next time, before it starts:** R4 warns about an `ALTER`, index build or bulk `UPDATE`/`DELETE` on a table of `runtimeGates.largeTableRows` (1,000,000) rows or more; `ddlSafety.statementTimeoutSec`, or `-- @statement-timeout-sec: N` in the file, makes the server stop and roll back any statement running longer ([RUNTIME-GATE-PLAN.md, R5](RUNTIME-GATE-PLAN.md)); for a large COPY `ALTER`, use pt-online-schema-change.
 
 ---
 

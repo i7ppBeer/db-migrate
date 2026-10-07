@@ -208,6 +208,13 @@ wait
 
 The Job's `activeDeadlineSeconds` is set to `MIGRATE_TIMEOUT_SECONDS + COLLECT_TIMEOUT_SECONDS`.
 
+A deadline (or deleting the Job) stops the Pod, **not** a statement already running on
+MariaDB: the server finishes it and commits, and the migration isn't recorded (measured:
+a COPY `ALTER` on a 4M-row table finished ~40 s after its client was killed). To bound a
+statement, use `ddlSafety.statementTimeoutSec` / `-- @statement-timeout-sec:`, which the
+server enforces; to stop one by hand, `KILL QUERY` — see
+[DDL-PRODUCTION-SAFETY.md §7.5](../../docs/DDL-PRODUCTION-SAFETY.md#75-a-migration-is-running-too-long-in-production).
+
 ### 4.2 Exit codes
 
 **`submit.sh`**

@@ -268,7 +268,7 @@ DROP FUNCTION IF EXISTS fn_calculate_discount;
 DROP PROCEDURE IF EXISTS sp_get_user_order_stats;
 ```
 
-- **No `DELIMITER`.** It's a command of the `mysql` command-line client, not SQL: the server rejects it, so a migration containing `DELIMITER //` fails when it runs (and, without `@skip-syntax-check`, already in `validate`). The tool sends the whole section to the server in one go, and the server reads `BEGIN … END;` bodies correctly without it.
+- **No `DELIMITER`.** It's a command of the `mysql` command-line client, not SQL: the server rejects it, so a migration containing `DELIMITER //` fails when it runs (and, without `@skip-syntax-check`, already in `validate`). It isn't needed: the tool runs the section one statement at a time ([Lock Guard](LOCK-GUARD.md)) and keeps each `BEGIN … END;` body together as one statement, so a `;` inside the body doesn't split it. A section that can't be split with certainty, or any section with Lock Guard disabled, is sent as one batch, and the server reads the bodies correctly that way too.
 - **`@skip-syntax-check: true` is needed** for files with `CREATE/DROP PROCEDURE`, `FUNCTION` or `TRIGGER` — otherwise `validate` reports `SQL_SYNTAX_ERROR`. It skips only that parser; every other check still runs.
 - To change a procedure later, add a new migration that drops and recreates it (Down recreates the previous version).
 
@@ -363,6 +363,8 @@ docker compose run --rm migrate dcl --validate --allow-dangerous -c <config>
 | `@allow-forbidden` | `true` / `false` | Allow every forbidden operation in the file |
 | `@approved-by` | name / ticket | Who approved the forbidden operations; required when `validation.requireApprover: true` |
 | `@skip-syntax-check` | `true` | Skip the SQL parser (stored procedures, syntax it doesn't know); all other checks still run |
+| `@statement-timeout-sec` | seconds (`0` = no limit) | Stop and roll back any statement of this file running longer; overrides `ddlSafety.statementTimeoutSec` |
+| `@large-table-ok` | `true` | No R4 large-table warning for this file (reviewed) |
 
 `@description` and `@type` appeared in older examples; they're informational only and have no effect.
 

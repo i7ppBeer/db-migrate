@@ -155,6 +155,7 @@ subqueries inside it don't trigger a second match):
 |---|---|---|
 | `SQL_SYNTAX_ERROR` / `SQL_SYNTAX_ERROR_DOWN` | `node-sql-parser` rejects the Up/Down SQL | No |
 | `SANITY_SQL_SYNTAX_ERROR` | Sanity `PreCheck`/`PostCheck` SQL fails to parse | No |
+| `INVALID_STATEMENT_TIMEOUT` | `-- @statement-timeout-sec:` isn't a whole number of seconds | No — fix the file |
 | `MISSING_UP_MARKER` | The file has no `-- +migrate Up` marker at all. `up` used to skip such a file without running or recording it, so it stayed pending forever and a later `sync` reported "Applied 0" as success; now both `validate` and `up` reject it. (An Up marker with nothing under it is a deliberate no-op migration and is recorded as applied.) | No — fix the file |
 | `MISSING_DOWN` | `Down` is empty/missing and `Up` contains a real operation (`CREATE`/`ALTER`/`DROP TABLE`, `CREATE INDEX`, `INSERT INTO`) — see [Warnings](#warnings--never-block) for the non-blocking case where `Up` has no real operations. Mirrors the MongoDB adapter's equivalent check — both now block equally; this used to be warning-only here (resolved [discussion item #1](#discussion-items)). | No |
 | `ORPHAN_DROP_DOWN` | `Down` drops a table `Up` never created | **Yes** — `--allow-dangerous` / `--allow ORPHAN_DROP_DOWN` |

@@ -344,8 +344,9 @@ async function enforceValidationGate(adapter, status, options, { report = false 
  *        with runtimeGates.requireLockCheck, also refuses when the check
  *        couldn't run (missing privilege)
  *   R3 — read-only target: refuses, no override (connect to the primary)
- *   R4 — disk/binlog headroom, replication lag, and (MongoDB, for `files`)
- *        index builds / bulk writes on large collections: warnings only
+ *   R4 — disk/binlog headroom, replication lag, and (for `files`) index
+ *        builds / bulk writes on large MongoDB collections, ALTERs / bulk
+ *        DML on large MariaDB tables: warnings only
  * Checks that couldn't run (privileges, server type) are listed as skipped.
  *
  * @param {{ locks?: boolean, disk?: boolean, report?: boolean }} [opts] -
@@ -355,10 +356,12 @@ async function enforceValidationGate(adapter, status, options, { report = false 
 async function enforceRuntimeGates(adapter, options, { locks = true, disk = true, report = false, files = [] } = {}) {
   if (typeof adapter.runtimePreflight !== 'function') return;
   const r = await adapter.runtimePreflight({ locks, disk });
-  // MongoDB: index builds / bulk writes on large collections among the
-  // migrations about to run (advisory)
-  if (typeof adapter.largeCollectionWarnings === 'function' && files.length > 0) {
-    const large = await adapter.largeCollectionWarnings(files);
+  // Index builds / bulk writes (MongoDB: large collections) and ALTERs /
+  // bulk DML (MariaDB: large tables) among the migrations about to run
+  // (advisory)
+  for (const check of ['largeCollectionWarnings', 'largeTableWarnings']) {
+    if (typeof adapter[check] !== 'function' || files.length === 0) continue;
+    const large = await adapter[check](files);
     r.warnings.push(...large.warnings);
     r.skipped.push(...large.skipped);
   }

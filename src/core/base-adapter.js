@@ -61,6 +61,10 @@ export const RUNTIME_GATE_DEFAULTS = {
   // update/delete on a collection with at least this many documents is
   // reported (never blocks); 0 turns the check off
   largeCollectionDocs: 1000000,
+  // R4: a pending MariaDB migration running an ALTER TABLE, index build or
+  // bulk UPDATE/DELETE on a table with at least this many rows (InnoDB's
+  // estimate) is reported (never blocks); 0 turns the check off
+  largeTableRows: 1000000,
   // R2: refuse when the open-transaction / lock check itself couldn't run
   // (missing PROCESS / clusterMonitor privilege) instead of skipping it —
   // for production, where "skipped" must not quietly mean "unchecked"

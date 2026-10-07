@@ -65,7 +65,7 @@ Worst-case wait for one statement before failing loudly ≈ `maxRetries × lockW
 
 ## What It Does NOT Do
 
-- **Doesn't make a big table's rebuild itself faster.** If an `ALTER TABLE` genuinely needs to copy a huge table (`MODIFY/CHANGE COLUMN`, `ENGINE=`, etc.), Lock Guard only bounds how long it waits *to start* — once it acquires the lock, a long rebuild still takes as long as it takes. That's a `pt-online-schema-change` / online-DDL problem, not a lock-wait problem.
+- **Doesn't make a big table's rebuild itself faster.** If an `ALTER TABLE` genuinely needs to copy a huge table (`MODIFY/CHANGE COLUMN`, `ENGINE=`, etc.), Lock Guard only bounds how long it waits *to start* — once it acquires the lock, a long rebuild still takes as long as it takes. That's a `pt-online-schema-change` / online-DDL problem, not a lock-wait problem. To bound the run time itself, set `ddlSafety.statementTimeoutSec` or `-- @statement-timeout-sec:` ([RUNTIME-GATE-PLAN.md, R5](RUNTIME-GATE-PLAN.md)); R4 warns before an ALTER on a table of `runtimeGates.largeTableRows` rows or more.
 - **Doesn't protect the other side.** A batch script running a large `DELETE`/`UPDATE` is a separate connection with its own session settings — Lock Guard only governs this tool's own connection. If you want the reverse case bounded too (a long-running DDL blocking a batch job), set `innodb_lock_wait_timeout` on that script's own connection.
 - **Doesn't classify tables as "large" or "small."** There's deliberately no static table-size list to maintain (those go stale and can't be verified in lower environments with small test data). Lock Guard applies uniformly regardless of table size, because the failure mode it prevents doesn't depend on table size either.
 
