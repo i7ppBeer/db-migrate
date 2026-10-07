@@ -49,8 +49,12 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      # staging: test, build, deploy to staging only.
+      # production: the same, then production (after its manual approval) —
+      # production is never deployed without staging first. Run from main
+      # (release/* deploys to staging only).
       environment:
-        description: 'Deploy to environment'
+        description: 'Deploy to: staging only, or staging then production'
         required: true
         default: 'staging'
         type: choice
@@ -401,7 +405,10 @@ jobs:
     needs: [build, deploy-staging]
     runs-on: ubuntu-latest
     environment: production  # Requires manual approval
-    if: vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    # A manual run deploys to production only when "production" was chosen
+    if: >-
+      vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' &&
+      (github.event_name != 'workflow_dispatch' || inputs.environment == 'production')
     env:
       NAMESPACE: production
       CONTENT_HASH: ${{ github.sha }}
