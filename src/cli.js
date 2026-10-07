@@ -856,7 +856,8 @@ addAllowOptions(upCommand)
         for (const m of result.applied) {
           console.log(`   ${m}`);
         }
-      } else {
+      } else if (result.errors.length === 0 && !(result.sanityResults || []).some(sr => !sr.success)) {
+        // nothing applied and nothing failed — otherwise the errors below say why
         console.log(chalk.gray('\n   No pending migrations.'));
       }
       
@@ -2103,7 +2104,7 @@ addAllowOptions(upAllCommand)
           
           if (result.applied.length > 0) {
             console.log(chalk.green(`   ✅ Applied ${result.applied.length} migration(s)`));
-          } else {
+          } else if (result.errors.length === 0) {
             console.log(chalk.gray(`   No pending migrations`));
           }
           
