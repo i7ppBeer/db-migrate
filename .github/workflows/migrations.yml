@@ -212,6 +212,7 @@ jobs:
     outputs:
       image_tag: ${{ steps.meta.outputs.version }}
       image_digest: ${{ steps.build.outputs.digest }}
+      image_digest_azure: ${{ steps.build-azure.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -259,9 +260,10 @@ jobs:
             type=sha,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
 
-      # The real Dockerfile is single-stage (src/ + node_modules + entrypoint.sh,
-      # see the file itself) -- no separate Dockerfile.migrations, no "runner"
-      # build target, no BASE_IMAGE/MIGRATIONS_PATH build-args to pass.
+      # One Dockerfile, two targets (see the file): the default image, and
+      # the Azure DevOps container-job image, tagged with an -azure suffix
+      # (3.0.1-azure, 3.0-azure, latest-azure, <sha>-azure). Each target has
+      # its own cache scope so the two builds don't evict each other.
       - name: Build and Push Image
         id: build
         uses: docker/build-push-action@v7
@@ -271,14 +273,42 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=runner
+          cache-to: type=gha,mode=max,scope=runner
+
+      - name: Extract metadata (Azure DevOps image)
+        id: meta-azure
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            suffix=-azure,onlatest=true
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and Push Image (Azure DevOps)
+        id: build-azure
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: azure
+          push: true
+          tags: ${{ steps.meta-azure.outputs.tags }}
+          labels: ${{ steps.meta-azure.outputs.labels }}
+          cache-from: type=gha,scope=azure
+          cache-to: type=gha,mode=max,scope=azure
 
       - name: Output Image Info
         run: |
           echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           echo "Tag: ${{ steps.meta.outputs.version }}"
           echo "Digest: ${{ steps.build.outputs.digest }}"
+          echo "Azure DevOps image: ${{ steps.meta-azure.outputs.version }} (digest ${{ steps.build-azure.outputs.digest }})"
 
   # ============================================================
   # Job 4: GitHub Release (release tags only)
@@ -301,6 +331,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ needs.build.outputs.image_digest }}
+          DIGEST_AZURE: ${{ needs.build.outputs.image_digest_azure }}
         run: |
           version="${GITHUB_REF_NAME#v}"
           node scripts/changelog-section.mjs "$version" > notes.md
@@ -316,6 +347,14 @@ jobs:
             echo '```'
             echo
             echo "Digest \`${DIGEST}\` — also tagged \`${version%.*}\` and with the commit SHA."
+            echo
+            echo 'Azure DevOps container jobs:'
+            echo
+            echo '```'
+            echo "docker pull ${image}:${version}-azure"
+            echo '```'
+            echo
+            echo "Digest \`${DIGEST_AZURE}\` — also tagged \`${version%.*}-azure\`."
           } >> notes.md
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
 

@@ -2,7 +2,7 @@
 
 > ⚠️ **Partially outdated (audited 2026-09-11, Kubernetes section corrected)**:
 > - The **Kubernetes Deployment** section has been changed to point at the real, working [`k8s/`](../k8s/README.md) setup (kubectl + ConfigMap/Secret/Job) — the `./charts/db-migrate` Helm chart it originally taught was never actually created.
-> - The `azure-pipelines-migrations.yml` referenced in the **Azure DevOps Pipeline** section still **does not exist** (`Dockerfile.azure` does exist, though — it's the image used for the Azure DevOps agent) — that section is unverified; treat it as a draft. If you want to use it, you'll need to write the actual pipeline YAML yourself.
+> - The `azure-pipelines-migrations.yml` referenced in the **Azure DevOps Pipeline** section still **does not exist** (the Azure DevOps container-job image does: `Dockerfile`'s `azure` target, published as `<version>-azure` — see [Images](#images)) — that section is unverified; treat it as a draft. If you want to use it, you'll need to write the actual pipeline YAML yourself.
 > - `.github/workflows/migrations.yml` has been corrected to match (its build/deploy job also used to reference a nonexistent `Dockerfile.migrations` and Helm chart).
 > - `scripts/build-migration-image.sh` was fixed 2026-10-01: it used to build from the same nonexistent `Dockerfile.migrations` / `--target runner` and always failed. It now builds the runner image from `Dockerfile` and bakes migrations in with a generated Dockerfile — the **Local Build** section below reflects that.
 
@@ -133,6 +133,23 @@ docker run --rm -v "$(pwd)/config.js:/app/config/config.js:ro" ghcr.io/myorg/db-
 ```
 
 ---
+
+## Images
+
+One `Dockerfile`, two targets built from the same base, both pushed to ghcr.io by the GitHub Actions build job (main, `release/*` and `v*` tags):
+
+| Target | Build | Tags | For |
+|---|---|---|---|
+| default (`runner`) | `docker build .` | `3.0.1`, `3.0`, `latest`, `<sha>`, `<branch>` | `docker run`, Kubernetes Jobs — `ENTRYPOINT` is `docker/entrypoint.sh`, no arguments prints help |
+| `azure` | `docker build --target azure .` | the same with `-azure`: `3.0.1-azure`, `3.0-azure`, `latest-azure`, … | Azure DevOps container jobs — keeps `node:24-alpine`'s own entrypoint, so the agent can run its commands in it, and sets `com.azure.dev.pipelines.agent.handler.node.path` (Alpine isn't glibc, so the agent uses the image's node) |
+
+Same version number = same code: the two differ only in those settings. In an Azure pipeline:
+
+```yaml
+container: ghcr.io/<owner>/db-migrate/db-migrate:3.0.1-azure
+steps:
+  - script: node /app/src/cli.js up -c config.js
+```
 
 ## CI/CD Automation
 
@@ -331,7 +348,7 @@ git push origin main
 
 ## Related Files
 
-- [Dockerfile](../Dockerfile) - Runner (base) image
+- [Dockerfile](../Dockerfile) - Runner (base) image; `--target azure` for Azure DevOps container jobs
 - [build-migration-image.sh](../scripts/build-migration-image.sh) - Builds runner image + baked-in migrations
 - [docker/entrypoint.sh](../docker/entrypoint.sh) / [src/check-db.js](../src/check-db.js) - Container entrypoint and the wait-for-database check
 - [.github/workflows/migrations.yml](../.github/workflows/migrations.yml) - GitHub Actions

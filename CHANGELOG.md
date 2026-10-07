@@ -126,6 +126,12 @@ changes, no config changes required — but read **Behavior changes** if you scr
   and the config ConfigMap has its files (`REQUIRED_CONFIG_KEYS`, default `config.js`);
   new optional `DB`, `EXCLUDE_JOB`, `SUSPENDED_STALE_SECONDS`.
 
+- **Azure DevOps image built and published with every release**: `Dockerfile.azure` is
+  now the `azure` target of `Dockerfile` (same base, so fixes reach both), pushed to
+  ghcr.io as `<version>-azure` (`3.0.1-azure`, `3.0-azure`, `latest-azure`) next to the
+  default image. It also gets the `/tmp` 1777 fix, which `Dockerfile.azure` had missed.
+  See `docs/BUILD-IMAGE-GUIDE.md` (Images).
+
 ### Behavior changes
 
 - **`baseline --up-to` / `--file`**: an argument that only matched part of a name now
